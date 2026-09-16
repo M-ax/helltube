@@ -171,6 +171,24 @@ sudo systemctl enable --now helltube-update.timer
 
 There is deliberately **no automatic rollback after candidate startup**: the new server may already have migrated SQLite or changed uploads. Disable the timer, inspect both update and backend journals, and back up the stopped server's data before repairing it. Use a trusted, schema-compatible checkout and rerun the bootstrap (choose updates disabled until the problem in `main` is resolved). Only a successful bootstrap clears the failure marker and revision baseline. Do not just delete the marker or copy old code over a potentially migrated database. Continue keeping your own consistent data/secrets backups as described above.
 
+**Startup error: `Deployment directories must be root-owned and protected, without symlinks.`** Older bootstraps extracted Node with the archive's numeric owner (for example, UID/GID `1001`), so the updater correctly rejected `/opt/helltube/node/bin` or npm's directories. Check ownership without exposing secrets:
+
+```bash
+sudo namei -l /etc/helltube/update.json /opt/helltube/app /opt/helltube/update-state /usr/local/bin/node /usr/local/bin/npm
+```
+
+If this confirms the original bootstrap-installed Node tree has the archive's owner, repair **only that runtime tree**, under the deployment lock, then retry. This does not modify application data, secrets, or the failure marker:
+
+```bash
+sudo systemctl stop helltube-update.timer
+sudo flock -x /run/lock/helltube-deploy.lock sh -ec 'chown -hR root:root /opt/helltube/node; chmod -R go-w /opt/helltube/node'
+sudo systemctl start helltube-update.service
+sudo systemctl start helltube-update.timer
+sudo journalctl -u helltube-update.service -n 100 --no-pager
+```
+
+The fixed bootstrap extracts new Node archives as root with protected permissions, while retaining read/execute access for the unprivileged services. Rerunning the bootstrap may reuse an existing Node installation, so apply the repair above first when affected. The updated pinned updater reports the exact rejected path, owner and mode; rerun the trusted bootstrap to install those diagnostics. Do not recursively change ownership of `/opt/helltube`, `/var/lib/helltube` or `/etc/helltube`, or bypass the updater's checks. If a different path is rejected, investigate it separately; if runtime contents may have been tampered with, reinstall a verified Node distribution instead of merely changing ownership.
+
 ### YouTube WireGuard VPN
 
 Helltube uses **yt-dlp**, with **FFmpeg fetching the extracted video/audio URLs**. VPN mode sends both through the same private HTTP proxy inside a WireGuard-only network namespace. This preserves the same public egress IP for extraction and playback, without changing the container's default route or moving nginx/the backend into the VPN.

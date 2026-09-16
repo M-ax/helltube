@@ -73,7 +73,10 @@ def trusted_directory(path):
         info = directory.lstat()
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
                 or (info.st_mode & 0o022 and not (directory != path and info.st_mode & stat.S_ISVTX))):
-            raise UpdateError("Deployment directories must be root-owned and protected, without symlinks.")
+            raise UpdateError(
+                f"Unsafe deployment directory {directory} "
+                f"(uid={info.st_uid}, gid={info.st_gid}, mode={stat.S_IMODE(info.st_mode):04o}). "
+                "Deployment directories must be root-owned and protected, without symlinks.")
 
 
 def read_json(path):
@@ -120,7 +123,9 @@ def load_config():
         trusted_directory(resolved.parent)
         info = resolved.stat()
         if info.st_uid != 0 or info.st_mode & 0o022:
-            raise UpdateError("Node/npm must be installed system-wide by root.")
+            raise UpdateError(
+                f"Node/npm must be installed system-wide by root: {resolved} "
+                f"(uid={info.st_uid}, gid={info.st_gid}, mode={stat.S_IMODE(info.st_mode):04o}).")
     return config
 
 

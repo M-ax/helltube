@@ -437,6 +437,13 @@ WantedBy=multi-user.target
 EOF
 }
 
+extract_node_archive() (
+  local archive=$1 destination=$2
+  install -d -o root -g root -m 755 "$destination"
+  umask 022
+  tar -xJf "$archive" --strip-components=1 --no-same-owner --no-same-permissions -C "$destination"
+)
+
 install_node() {
   if command -v node >/dev/null && command -v npm >/dev/null &&
     node -e 'const [a,b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 13) ? 0 : 1)' &&
@@ -461,8 +468,7 @@ install_node() {
     "https://nodejs.org/dist/latest-v24.x/$archive" -o "$WORK_DIR/$archive"
   checksum=$(awk -v archive="$archive" '$2 == archive { print $1 }' "$WORK_DIR/SHASUMS256.txt")
   (cd "$WORK_DIR"; printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status)
-  install -d -m 755 /opt/helltube/node
-  tar -xJf "$WORK_DIR/$archive" --strip-components=1 -C /opt/helltube/node
+  extract_node_archive "$WORK_DIR/$archive" /opt/helltube/node
   ln -sfn /opt/helltube/node/bin/node /usr/local/bin/node
   ln -sfn /opt/helltube/node/bin/npm /usr/local/bin/npm
   ln -sfn /opt/helltube/node/bin/npx /usr/local/bin/npx

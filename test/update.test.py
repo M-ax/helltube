@@ -9,12 +9,14 @@ No installed services, users, deployment files or credentials are touched.
 from contextlib import ExitStack
 import fcntl
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -257,6 +259,71 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.trusted_directory(self.app)
 
+    def test_directory_errors_identify_rejected_path_owner_and_mode(self):
+        directory = self.directory / "node"
+        directory.mkdir(mode=0o755)
+        binary_directory = directory / "bin"
+        binary_directory.mkdir(mode=0o755)
+        for uid, mode in ((1001, 0o755), (0, 0o775), (0, 0o777)):
+            with self.subTest(uid=uid, mode=oct(mode)):
+                os.chown(directory, uid, uid)
+                directory.chmod(mode)
+                with self.assertRaises(updater.UpdateError) as raised:
+                    updater.trusted_directory(binary_directory)
+                message = str(raised.exception)
+                self.assertIn(str(directory), message)
+                self.assertIn(f"uid={uid}", message)
+                self.assertIn(f"mode={mode:04o}", message)
+                self.assertEqual(directory.stat().st_uid, uid)
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), mode)
+        os.chown(directory, 0, 0)
+        directory.chmod(0o755)
+        link = self.directory / "node-link"
+        link.symlink_to(directory, target_is_directory=True)
+        with self.assertRaises(updater.UpdateError) as raised:
+            updater.trusted_directory(link / "bin")
+        self.assertIn(str(link), str(raised.exception))
+        self.assertIn("without symlinks", str(raised.exception))
+
+    def test_bootstrap_node_archive_is_usable_by_updater_and_unprivileged_users(self):
+        script = Path(__file__).resolve().parents[1] / "scripts/bootstrap-ubuntu.sh"
+        directories = ("bin", "lib", "lib/node_modules", "lib/node_modules/npm", "lib/node_modules/npm/bin")
+        files = ("bin/node", "lib/node_modules/npm/bin/npm-cli.js")
+        for mode in (0o755, 0o777):
+            with self.subTest(archive_mode=oct(mode)):
+                archive = self.directory / f"node-{mode:o}.tar.xz"
+                destination = self.directory / f"node-{mode:o}"
+                with tarfile.open(archive, "w:xz") as bundle:
+                    for name in (*directories, *files, "bin/npm"):
+                        member = tarfile.TarInfo("node-v24.0.0-linux-x64/" + name)
+                        member.uid = member.gid = 1001
+                        member.mode = mode
+                        if name in directories:
+                            member.type = tarfile.DIRTYPE
+                            bundle.addfile(member)
+                        elif name == "bin/npm":
+                            member.type = tarfile.SYMTYPE
+                            member.linkname = "../lib/node_modules/npm/bin/npm-cli.js"
+                            bundle.addfile(member)
+                        else:
+                            content = b"#!/bin/sh\nexit 0\n"
+                            member.size = len(content)
+                            bundle.addfile(member, io.BytesIO(content))
+                result = subprocess.run(["/bin/bash", "-c",
+                    'source "$1"; extract_node_archive "$2" "$3"',
+                    "node-extraction-test", str(script), str(archive), str(destination)],
+                    env=updater.ENV, capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = {name: str(destination / "bin" / name) for name in ("node", "npm")}
+                updater.CONFIG.write_text(json.dumps(config))
+                self.assertEqual(updater.load_config(), config)
+                for name in (".", *directories, *files, "bin/npm"):
+                    info = (destination / name).lstat()
+                    self.assertEqual((info.st_uid, info.st_gid), (0, 0), name)
+                    if not stat.S_ISLNK(info.st_mode):
+                        self.assertEqual(stat.S_IMODE(info.st_mode), 0o755, name)
+                self.assertEqual((destination / "bin/npm").readlink(), Path("../lib/node_modules/npm/bin/npm-cli.js"))
+
     def test_release_sealing_keeps_internal_links_strips_special_modes_and_git(self):
         release = artifact(self.directory / "candidate")
         (release / ".git").mkdir()
@@ -409,8 +476,10 @@ class UpdateTests(unittest.TestCase):
         updater.CONFIG.write_text(json.dumps(config))
         self.assertEqual(updater.load_config(), config)
         (self.directory / "npm").chmod(0o777)
-        with self.assertRaisesRegex(updater.UpdateError, "installed system-wide"):
+        with self.assertRaisesRegex(updater.UpdateError, "installed system-wide") as raised:
             updater.load_config()
+        self.assertIn(str(self.directory / "npm"), str(raised.exception))
+        self.assertIn("mode=0777", str(raised.exception))
         updater.CONFIG.write_text('{"node":"/missing"}')
         with self.assertRaises(updater.UpdateError):
             updater.load_config()
