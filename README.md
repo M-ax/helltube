@@ -145,6 +145,7 @@ For each new commit, the updater:
 
 - Fetches the exact observed commit into a fresh staging directory. If the branch changes between checking and fetching, it aborts safely and retries on a later check.
 - Runs locked `npm ci`, `npm test`, and the frontend build as a separate **`helltube-build`** account in a restricted systemd service, without access to production data or secrets. The existing backend remains online during this work. Builds have a 20-minute limit; unsupported Node/dependency requirements fail instead of silently upgrading the runtime.
+- Prunes development dependencies after tests and the build, without rerunning package lifecycle scripts. This removes build-only esbuild/workerd hard links; release sealing still rejects any remaining hard links or special files instead of weakening filesystem safety checks.
 - Makes the candidate code root-owned, stops the backend, replaces `/opt/helltube/app`, and starts it again. It requires three consecutive loopback `/api/health` successes before recording the deployed revision. Restarts briefly interrupt playback/connections; this is not zero-downtime deployment.
 - Preserves `/var/lib/helltube` and `/etc/helltube`, including accounts, uploads, environment settings, certificates, cookies, and the WireGuard profile. A shared deployment lock prevents overlap with another update or the bootstrap. An already-stopped backend is left stopped.
 

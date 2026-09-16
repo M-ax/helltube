@@ -393,6 +393,7 @@ class UpdateTests(unittest.TestCase):
             self.assertIn("--engine-strict", updater.BUILD_SCRIPT)
             self.assertIn('"$4" test', updater.BUILD_SCRIPT)
             self.assertIn('"$4" run build', updater.BUILD_SCRIPT)
+            self.assertIn('"$4" prune --omit=dev --ignore-scripts --no-audit --no-fund --engine-strict', updater.BUILD_SCRIPT)
             self.assertEqual(workspace.stat().st_uid, 1234)
 
     def test_failed_build_stops_transient_service(self):
@@ -417,11 +418,12 @@ class UpdateTests(unittest.TestCase):
 }
 """
         for name, tip, failure, expected in (
-                ("success", REVISION, "none", ["ci", "test", "run"]),
+                ("success", REVISION, "none", ["ci", "test", "run", "prune"]),
                 ("racing-tip", OLD, "none", []),
                 ("install-failed", REVISION, "ci", ["ci"]),
                 ("tests-failed", REVISION, "test", ["ci", "test"]),
-                ("build-failed", REVISION, "run", ["ci", "test", "run"])):
+                ("build-failed", REVISION, "run", ["ci", "test", "run"]),
+                ("prune-failed", REVISION, "prune", ["ci", "test", "run", "prune"])):
             with self.subTest(name=name):
                 workspace = self.directory / name
                 workspace.mkdir()

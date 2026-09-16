@@ -46,6 +46,7 @@ git -c core.hooksPath=/dev/null checkout --detach "$3"
 "$4" ci --include=dev --no-audit --no-fund --engine-strict
 "$4" test
 "$4" run build
+"$4" prune --omit=dev --ignore-scripts --no-audit --no-fund --engine-strict
 """
 
 
