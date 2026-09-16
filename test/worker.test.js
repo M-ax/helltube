@@ -388,6 +388,76 @@ test('loopback origin supports local verification without changing the forwarded
   assert.equal(h.calls[0].request.headers.get('Origin'), frontend);
 });
 
+test('502 diagnostics distinguish missing and invalid bindings without exposing their values', async t => {
+  for (const [binding, values, code] of [
+    ['BARE_METAL_ORIGIN', [undefined, ''], 'origin-missing'],
+    ['BARE_METAL_ORIGIN', [null, {}, 'not a URL', 'media.example.test', `"${origin}"`, `${origin}\n`,
+      `${origin}/sensitive-diagnostic-value`, 'https://sensitive-diagnostic-value:password@media.example.test'], 'origin-invalid'],
+    ['EDGE_PROXY_SECRET', [undefined, ''], 'edge-secret-missing'],
+    ['EDGE_PROXY_SECRET', [null, {}, '   ', ' sensitive-diagnostic-value', 'sensitive-diagnostic-value\r\n'], 'edge-secret-invalid'],
+  ]) {
+    await t.test(code, async () => {
+      const h = harness();
+      for (const value of values) {
+        const response = await h.request('/api/me?grant=sensitive-diagnostic-value', {}, { [binding]: value });
+        assert.equal(response.status, 502);
+        assert.equal(response.headers.get('X-Helltube-Error'), code);
+        assert.equal(await response.text(), 'Upstream unavailable.');
+        assert.doesNotMatch(JSON.stringify([...response.headers]), /sensitive-diagnostic-value|password/);
+        privateResponse(response);
+        secured(response, binding === 'BARE_METAL_ORIGIN' ? '' : origin);
+      }
+      assert.equal(h.calls.length, 0);
+      assert.equal(h.matches.length, 0);
+    });
+  }
+});
+
+test('502 diagnostics identify failed operations without leaking requests or exceptions', async t => {
+  const fail = () => { throw new Error('https://sensitive-diagnostic-value:password@example.test/?grant=sensitive-diagnostic-value'); };
+  for (const [path, options, code] of [
+    ['/api/me', { upstream: fail }, 'upstream-request-failed'],
+    ['/', { assets: { fetch: fail } }, 'assets-fetch-failed'],
+    [segment, { authorize: fail }, 'upstream-request-failed'],
+    [segment, { authorize: () => new Response('sensitive-diagnostic-value', { status: 503 }) }, 'media-authorization-failed'],
+    [segment, { authorize: () => new Response('sensitive-diagnostic-value') }, 'media-authorization-failed'],
+    ['/api/me', { upstream: () => ({ get status() { return fail(); } }) }, 'upstream-response-failed'],
+  ]) {
+    await t.test(`${path} ${code}`, async () => {
+      const h = harness(options);
+      const response = await h.request(`${path}?grant=sensitive-diagnostic-value`, {
+        headers: { Cookie: 'session=sensitive-diagnostic-value' },
+      }, { EDGE_PROXY_SECRET: 'sensitive-diagnostic-value' });
+      assert.equal(response.status, 502);
+      assert.equal(response.headers.get('X-Helltube-Error'), code);
+      assert.equal(await response.text(), 'Upstream unavailable.');
+      assert.doesNotMatch(JSON.stringify([...response.headers]), /sensitive-diagnostic-value|password/);
+      privateResponse(response);
+      secured(response);
+      assert.equal(h.matches.length, 0);
+      assert.equal(h.puts.length, 0);
+    });
+  }
+});
+
+test('backend responses and ordinary denials are not mislabeled as Worker failures', async () => {
+  for (const status of [200, 401, 403, 502]) {
+    const response = await harness({ upstream: () => new Response('backend response', { status }) }).request('/api/me');
+    assert.equal(response.status, status);
+    assert.equal(await response.text(), 'backend response');
+    assert.equal(response.headers.get('X-Helltube-Error'), null);
+    privateResponse(response);
+  }
+  for (const status of [401, 403, 404]) {
+    const response = await harness({ authorize: () => new Response(null, { status }) }).request();
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get('X-Helltube-Error'), null);
+  }
+  const response = await harness().request('/direct/keys/private');
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get('X-Helltube-Error'), null);
+});
+
 test('segment TTL defaults safely and is bounded from one to 120 seconds', async () => {
   for (const [SEGMENT_CACHE_TTL, ttl] of [[undefined, 90], ['', 90], ['invalid', 90], ['Infinity', 90], ['30', 30], ['2.8', 2], ['0', 1], ['-5', 1], ['9000', 120]]) {
     const h = harness();

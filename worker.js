@@ -35,9 +35,11 @@ function responseHeaders(response, security, noStore = true) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-function failure(status, security) {
+function failure(status, security, code) {
   const message = status === 502 ? 'Upstream unavailable.' : 'Request denied.';
-  return responseHeaders(new Response(message, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }), security);
+  const headers = { 'Content-Type': 'text/plain; charset=utf-8' };
+  if (status === 502 && code) headers['X-Helltube-Error'] = code;
+  return responseHeaders(new Response(message, { status, headers }), security);
 }
 
 function cacheable(response) {
@@ -79,24 +81,34 @@ export function createWorker({ fetch: fetchOrigin = (request, options) => global
   return {
     async fetch(request, env = {}, context) {
       let security = securityHeaders('');
+      let failureCode = 'worker-error';
       try {
         const url = new URL(request.url);
         const destination = route(url.pathname, request.method);
         if (destination.status) return failure(destination.status, security);
+        failureCode = 'origin-invalid';
         const origin = deploymentOrigin(env.BARE_METAL_ORIGIN);
         security = securityHeaders(origin);
-        if (!destination.proxy) return responseHeaders(await env.ASSETS.fetch(request), security, false);
+        if (!destination.proxy) {
+          failureCode = 'assets-fetch-failed';
+          return responseHeaders(await env.ASSETS.fetch(request), security, false);
+        }
+        if (!origin) return failure(502, security, 'origin-missing');
         const secret = env.EDGE_PROXY_SECRET;
-        if (!origin || typeof secret !== 'string' || !secret.trim() || secret !== secret.trim() || /[\r\n]/.test(secret)) {
-          return failure(502, security);
+        if (secret === undefined || secret === '') return failure(502, security, 'edge-secret-missing');
+        if (typeof secret !== 'string' || !secret.trim() || secret !== secret.trim() || /[\r\n]/.test(secret)) {
+          return failure(502, security, 'edge-secret-invalid');
         }
 
         let segmentCache;
         let key;
         if (destination.segment) {
+          failureCode = 'upstream-request-failed';
           const authorization = await proxy(request, origin, secret, `/api/edge/media/${destination.jobId}/${destination.file}`);
-          if (!authorization.ok) return failure([401, 403, 404].includes(authorization.status) ? authorization.status : 502, security);
+          failureCode = 'media-authorization-failed';
+          if (!authorization.ok) return failure([401, 403, 404].includes(authorization.status) ? authorization.status : 502, security, failureCode);
           if ((await authorization.json())?.cacheable !== true) return failure(403, security);
+          failureCode = 'worker-error';
           if (request.method === 'GET' && !conditionalHeaders.some(name => request.headers.has(name))) {
             segmentCache = cache === undefined ? globalThis.caches?.default : cache;
             key = new Request(`${url.origin}${url.pathname}`);
@@ -108,7 +120,9 @@ export function createWorker({ fetch: fetchOrigin = (request, options) => global
           }
         }
 
+        failureCode = 'upstream-request-failed';
         const response = await proxy(request, origin, secret);
+        failureCode = 'upstream-response-failed';
         if (response.status === 101) return response;
         if (segmentCache && cacheable(response)) {
           const headers = new Headers(response.headers);
@@ -120,7 +134,7 @@ export function createWorker({ fetch: fetchOrigin = (request, options) => global
         }
         return responseHeaders(response, security);
       } catch {
-        return failure(502, security);
+        return failure(502, security, failureCode);
       }
     },
   };

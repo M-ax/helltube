@@ -32,7 +32,7 @@ Open **http://127.0.0.1:3000**. To listen on the LAN, set `$env:HOST = '0.0.0.0'
 
 ## Cloudflare Worker frontend + bare-metal backend
 
-`worker.js` serves the built frontend and proxies API/WebSocket traffic. **Specify your bare-metal hostname as `BARE_METAL_ORIGIN` both in `wrangler.jsonc` and in the backend service environment.** No frontend rebuild is needed when changing the backend setting, but redeploy the Worker with matching settings. Leave the backend setting empty for the original single-server/Vite setup.
+`worker.js` serves the built frontend and proxies API/WebSocket traffic. **Set `BARE_METAL_ORIGIN` to your bare-metal HTTPS origin both as a Worker runtime binding and in the backend service environment.** This checkout uses a Worker secret for that binding; it is intentionally not set in `wrangler.jsonc`. No frontend rebuild is needed when changing the backend setting, but deploy the Worker with matching settings. Leave the backend setting empty for the original single-server/Vite setup.
 
 ```text
 Browser → Worker: frontend, API, WebSocket, YouTube playlists
@@ -229,12 +229,33 @@ If you separately need a **YouTube Data API key** for an application using Googl
 
 ### Worker deployment
 
-1. Set `vars.BARE_METAL_ORIGIN` in `wrangler.jsonc` to the same bare-metal origin. `SEGMENT_CACHE_TTL` controls the short internal cache lifetime (default 90 seconds, maximum 120).
+1. Set the Worker's runtime `BARE_METAL_ORIGIN` secret to the same bare-metal HTTPS origin, using Settings → Variables and Secrets or `wrangler secret put BARE_METAL_ORIGIN`. Enter only the origin, without surrounding quotes or whitespace, and deploy dashboard changes. Build variables do not create runtime bindings. A `vars.BARE_METAL_ORIGIN` entry in `wrangler.jsonc` is an alternative for this non-sensitive URL, but do not define it as both a variable and a secret. `SEGMENT_CACHE_TTL` controls the short internal cache lifetime (default 90 seconds, maximum 120).
 2. Authenticate Wrangler with your Cloudflare account and provision `EDGE_PROXY_SECRET` using Cloudflare's dashboard secret binding or `wrangler secret put EDGE_PROXY_SECRET`. Never store the value as an ordinary Worker variable.
 3. Run `npm run deploy:worker`, then attach your frontend hostname (for example `watch.example.com`) as the Worker's custom domain. Set `ALLOWED_ORIGINS` to match it. The backend hostname must not route back to this Worker.
 4. Change the seeded administrator password before permitting external access.
 
 The deploy script builds `dist` before publishing. Wrangler is a development dependency; no Worker runtime is needed on bare metal. For local split-host testing, build first and use `npm run dev:worker`; put local `BARE_METAL_ORIGIN` and `EDGE_PROXY_SECRET` overrides in an ignored `.dev.vars`, use the same settings on the backend, and allow the local Worker origin in `ALLOWED_ORIGINS`. Keep `SECURE_COOKIES=false` for HTTP loopback. Do not override protected routes with Cloudflare cache rules or expose the assets binding through a separate unauthenticated media route.
+
+#### Diagnosing Worker 502 responses
+
+Worker-generated 502 responses keep the generic `Upstream unavailable.` body and `no-store` headers, but include a safe `X-Helltube-Error` code. No binding values, cookies, request URLs, or exception messages are included. Inspect the failing request's response headers in browser developer tools, or check the public health endpoint without sending credentials:
+
+```powershell
+curl.exe --silent --show-error --include --max-time 20 'https://watch.example.com/api/health'
+```
+
+| `X-Helltube-Error` | Meaning / next check |
+| --- | --- |
+| `origin-missing` | The running Worker received no `BARE_METAL_ORIGIN` or an empty string; no backend request was attempted. Check that binding on the active Worker serving this hostname. |
+| `origin-invalid` | Origin validation failed before proxying. Check for quotes, whitespace, non-string bindings, or anything other than an HTTPS origin; HTTP is allowed only for loopback development. |
+| `edge-secret-missing` | The origin is valid, but the Worker received no `EDGE_PROXY_SECRET` or an empty string. |
+| `edge-secret-invalid` | The shared-secret binding is not a usable string (for example, it contains surrounding whitespace or line breaks). |
+| `upstream-request-failed` | Bindings passed validation, but constructing or fetching the backend request threw. Check runtime compatibility and backend DNS, TLS, IPv4/IPv6 routing, firewall, and reachability from Cloudflare. Direct browser reachability alone does not verify Worker reachability. |
+| `media-authorization-failed` | The backend authorization check returned an unexpected status or unreadable decision. Cached segments remain inaccessible. |
+| `assets-fetch-failed` | Fetching or processing the `ASSETS` response failed. |
+| `upstream-response-failed` / `worker-error` | Processing the upstream response or another Worker operation threw. |
+
+A normal proxied backend response is not assigned a Worker error code: signed-out `/api/me` should return 401, and rejected edge credentials return 403. A 502 without the header may come from the backend, an older Worker, or another proxy; check its body and the hostname's routing rather than assuming a missing secret. A healthy backend `/api/health` together with a Worker error code lets you distinguish backend availability from Worker configuration without sharing credentials.
 
 ### Encryption, caching, and privacy limits
 
@@ -311,7 +332,7 @@ Environment variables (set in PowerShell or your service manager; `.env` is not 
 | `CLEANUP_INTERVAL_MS` | `60000` | Interval for sweeping unreferenced uploads and streaming files |
 | `SECURE_COOKIES` | `false` | Set `true` behind HTTPS |
 | `ALLOWED_ORIGINS` | localhost Vite origins | Comma-separated additional trusted browser origins; same-origin always accepted |
-| `BARE_METAL_ORIGIN` | empty | Public DNS-only HTTPS backend origin for direct keys, uploaded-video playback, and upload chunks; also set in `wrangler.jsonc` |
+| `BARE_METAL_ORIGIN` | empty | Public DNS-only HTTPS backend origin for direct keys, uploaded-video playback, and upload chunks; also set as a Worker runtime binding |
 | `EDGE_PROXY_SECRET` | empty | Shared backend/Worker secret (at least 32 characters) enabling authenticated edge authorization; store as a Worker secret |
 
 Durable application state lives in **`data\helltube.sqlite`**, using Node's built-in SQLite support (no separate database installation). This includes accounts with salted scrypt hashes, sessions and their expiry/revocation, volume/mute preferences, rooms, ordered queues/playlist groups, five-item history, shared playback checkpoints, and upload metadata/offsets. Existing `users.json` accounts migrate transactionally without changing IDs or passwords; legacy account files are removed only after a successful migration. Invalid databases are not silently reset.
