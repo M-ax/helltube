@@ -28,6 +28,7 @@ import sys
 MAX_PROFILE_BYTES = 64 * 1024
 CONFIG = "/etc/helltube/.secrets/youtube-wireguard.conf"
 RUNTIME = "/run/helltube-vpn"
+NETNS_DIRECTORY = "/run/netns"
 NAMESPACE = "helltube-youtube"
 WIREGUARD = "ht-wg0"
 HOST_VETH = "ht-vpn-host"
@@ -330,6 +331,18 @@ def run_command(arguments, data=None, purpose="network"):
         raise SafeError(diagnostics[purpose]) from None
     if result.returncode:
         raise SafeError(diagnostics[purpose])
+    if arguments == ["ip", "-j", "netns", "list"] and not result.stdout.strip():
+        # iproute2 can return success without JSON when /run/netns cannot be
+        # opened. Verify absence/emptiness ourselves; never hide access errors.
+        try:
+            with os.scandir(NETNS_DIRECTORY) as entries:
+                if next(entries, None) is None:
+                    return b"[]"
+        except FileNotFoundError:
+            return b"[]"
+        except OSError:
+            pass
+        raise SafeError("Cannot safely inspect existing network namespaces.")
     return result.stdout
 
 

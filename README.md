@@ -201,6 +201,19 @@ curl --fail --max-time 30 --noproxy '' --proxy http://169.254.77.2:8888 https://
 
 Confirm that IP matches your VPN provider, then add/play a video through your normal site. To verify the kill switch during a maintenance window, bring `ht-wg0` down inside `helltube-youtube` and repeat the explicit-proxy curl: it must fail, while `/api/health` and uploads remain reachable. Bring the interface back up afterward. Do not use `wg showconf` or publish profiles/dumps containing private keys.
 
+**Startup error: `Cannot safely inspect existing network resources.`** Older helpers reject the empty output that `ip -j netns list` can return on a fresh host when `/run/netns` does not exist. This happens before tunnel creation and is not evidence of invalid VPN credentials. The updated helper accepts empty namespace output only after independently confirming the directory is absent or empty; existing handles, inspection errors, failed commands and malformed JSON still fail closed.
+
+From a trusted checkout containing the fix, rerun the bootstrap and reuse the saved settings, or replace only the installed helper during a maintenance window (this briefly stops YouTube networking):
+
+```bash
+sudo systemctl stop helltube-youtube-proxy helltube-vpn
+sudo install -o root -g root -m 755 scripts/wireguard.py /usr/local/lib/helltube/wireguard.py
+sudo systemctl restart helltube-vpn helltube-youtube-proxy
+sudo systemctl status helltube-vpn helltube-youtube-proxy --no-pager
+```
+
+The automatic app updater does **not** replace this privileged helper. As a temporary workaround for an older helper, if `sudo ip -j netns list` succeeds with blank output and `/run/netns` is absent, create that directory with `sudo mkdir -p /run/netns`, then restart both services. `/run` is volatile, so install the fix for subsequent boots. Do not delete existing namespaces, interfaces or ownership markers to bypass inspection failures.
+
 For a non-bootstrap deployment, **`YOUTUBE_PROXY=http://proxy-host:port`** applies to both yt-dlp and YouTube FFmpeg inputs. Only credential-free HTTP proxy origins are accepted; setting this variable alone does **not** create a VPN or firewall. You must supply equivalent isolated proxy networking. Empty/unset retains the existing direct behavior. A VPN does not guarantee that YouTube bot checks disappear, and does not remove the cookie-account ban risk described below.
 
 ### YouTube authentication

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Run directly: python3 test/wireguard.test.py -v. No host network/system writes.
 
-Only external network/process boundaries are doubled. POSIX ownership/import
-and marker transactions use real files and are skipped unless running as root
-on Linux, in a root-owned checkout with trusted ancestors. Every fixture stays
-in this checkout and is removed by the test.
+External network/process boundaries and directory-inspection errors are doubled.
+POSIX ownership/import and marker transactions use real files and are skipped
+unless running as root on Linux, in a root-owned checkout with trusted ancestors.
+Every fixture stays in this checkout and is removed by the test.
 """
 
 import base64
@@ -517,6 +517,85 @@ class NetworkTests(unittest.TestCase):
                 wg.run_command(["ip", "-j", "link", "show"])
             self.assertNotIn("secret-sentinel", str(context.exception))
             self.assertNotIn(PRIVATE, str(context.exception))
+
+
+class NamespaceInspectionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix=".wireguard-test-", dir=ROOT / "test")
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name) / "netns"
+        setting = patch.object(wg, "NETNS_DIRECTORY", str(self.directory))
+        setting.start()
+        self.addCleanup(setting.stop)
+        self.command = ["ip", "-j", "netns", "list"]
+
+    def test_preflight_and_cleanup_accept_verified_empty_namespace_stdout(self):
+        for exists in (False, True):
+            if exists:
+                self.directory.mkdir()
+            for output in (b"", b" \t\n", b"[]\n"):
+                with self.subTest(exists=exists, output=output):
+                    boundary = NetworkBoundary()
+                    boundary.namespaces.clear()
+
+                    def execute(arguments, **options):
+                        normal = boundary(arguments)
+                        return subprocess.CompletedProcess(arguments, 0,
+                                                           output if arguments == self.command else normal, b"")
+
+                    with patch.object(wg.subprocess, "run", side_effect=execute):
+                        wg.preflight(wg.run_command)
+                        wg.cleanup_network(wg.run_command)
+                    self.assertTrue(all("-j" in call[0] for call in boundary.calls))
+                    self.assertEqual(boundary.host, {"lo", "eth0", "unrelated0"})
+                    self.assertEqual(boundary.namespaces, {})
+                    self.assertEqual(self.directory.exists(), exists)
+
+    def test_empty_stdout_does_not_hide_existing_namespace_handles(self):
+        self.directory.mkdir()
+        handle = self.directory / wg.NAMESPACE
+        handle.touch()
+        result = subprocess.CompletedProcess(self.command, 0, b"", b"")
+        with patch.object(wg.subprocess, "run", return_value=result), self.assertRaises(wg.SafeError):
+            wg.preflight(wg.run_command)
+        self.assertTrue(handle.is_file())
+
+    def test_empty_stdout_does_not_hide_directory_inspection_errors(self):
+        result = subprocess.CompletedProcess(self.command, 0, b"", b"")
+        self.directory.write_bytes(b"not a directory")
+        with patch.object(wg.subprocess, "run", return_value=result), self.assertRaises(wg.SafeError):
+            wg.preflight(wg.run_command)
+        self.assertEqual(self.directory.read_bytes(), b"not a directory")
+        with patch.object(wg.subprocess, "run", return_value=result), \
+                patch.object(wg.os, "scandir", side_effect=PermissionError("secret-sentinel")), \
+                self.assertRaises(wg.SafeError) as context:
+            wg.preflight(wg.run_command)
+        self.assertNotIn("secret-sentinel", str(context.exception))
+
+    def test_nonzero_exit_is_not_treated_as_an_empty_namespace_list(self):
+        result = subprocess.CompletedProcess(self.command, 1, b"", b"secret-sentinel")
+        with patch.object(wg.subprocess, "run", return_value=result), self.assertRaises(wg.SafeError) as context:
+            wg.preflight(wg.run_command)
+        self.assertNotIn("secret-sentinel", str(context.exception))
+
+    def test_malformed_namespace_stdout_still_fails_closed(self):
+        for output in (b"not-json secret-sentinel", b"{}", b"[1]", b"[{}]", b'[{"name": 1}]', b"\xff"):
+            with self.subTest(output=output):
+                result = subprocess.CompletedProcess(self.command, 0, output, b"")
+                with patch.object(wg.subprocess, "run", return_value=result), self.assertRaises(wg.SafeError) as context:
+                    wg.preflight(wg.run_command)
+                self.assertNotIn("secret-sentinel", str(context.exception))
+
+    def test_empty_stdout_is_not_accepted_for_other_inspection_commands(self):
+        for command in (["ip", "-j", "link", "show"],
+                        ["ip", "-n", wg.NAMESPACE, "-j", "link", "show"],
+                        ["ip", "-j", "-4", "route", "show", "table", "all"],
+                        ["ip", "-j", "-4", "address", "show"]):
+            for output in (b"", b" \t\n"):
+                with self.subTest(command=command, output=output):
+                    result = subprocess.CompletedProcess(command, 0, output, b"")
+                    with patch.object(wg.subprocess, "run", return_value=result), self.assertRaises(wg.SafeError):
+                        wg.json_command(command, wg.run_command)
 
 
 @unittest.skipUnless(CAN_ROOT, "Real root-owned POSIX file operations require Linux root")
