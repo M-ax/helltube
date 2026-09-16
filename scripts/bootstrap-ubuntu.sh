@@ -337,6 +337,90 @@ DisableViaHeader Yes
 EOF
 }
 
+require_safe_apparmor_path() {
+  local path=$1 kind=$2 metadata owner mode links
+  while :; do
+    [[ ! -L $path && ( ( $kind == file && -f $path ) || ( $kind == directory && -d $path ) ) ]] ||
+      die "Refusing unsafe AppArmor $kind: $path"
+    metadata=$(stat -c '%u:%a:%h' -- "$path") || die "Cannot inspect AppArmor path: $path"
+    IFS=: read -r owner mode links <<< "$metadata"
+    [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) ||
+      die "AppArmor path must be root-owned and not group/world-writable: $path"
+    [[ $kind != file || $links == 1 ]] || die "Refusing hardlinked AppArmor file: $path"
+    [[ $path != / ]] || break
+    path=$(dirname -- "$path")
+    kind=directory
+  done
+}
+
+install_youtube_proxy_apparmor() (
+  local rootfs=${1:-/} profile directory local_file addon temporary='' enabled state destination last_byte
+  [[ $rootfs == /* ]] || die 'AppArmor rootfs must be an absolute path.'
+  rootfs=${rootfs%/}
+  profile=$rootfs/etc/apparmor.d/tinyproxy
+  [[ -e $profile || -L $profile ]] || return 0
+  require_safe_apparmor_path "$profile" file
+  grep -qE '^[[:space:]]*#?include[[:space:]]+(if[[:space:]]+exists[[:space:]]+)?<local/tinyproxy>[[:space:]]*(#.*)?$' "$profile" ||
+    die "AppArmor profile lacks the local/tinyproxy include hook: $profile"
+  directory=$rootfs/etc/apparmor.d/local
+  local_file=$directory/tinyproxy
+  addon=$directory/helltube-youtube-proxy
+  if [[ -e $directory || -L $directory ]]; then
+    require_safe_apparmor_path "$directory" directory
+  else
+    mkdir -m 755 -- "$directory" || die 'Cannot create the AppArmor local directory.'
+    chown root:root "$directory" || die 'Cannot secure the AppArmor local directory.'
+  fi
+  for destination in "$local_file" "$addon"; do
+    if [[ -e $destination || -L $destination ]]; then
+      require_safe_apparmor_path "$destination" file
+    fi
+  done
+  trap '[[ -z $temporary ]] || rm -f -- "$temporary"' EXIT
+  temporary=$(mktemp "$addon.XXXXXX") || die 'Cannot stage the AppArmor addon.'
+  printf '%s\n' '/run/credentials/helltube-youtube-proxy.service/proxy-config r,' \
+    '/run/helltube-youtube-proxy/tinyproxy.pid rw,' > "$temporary" || die 'Cannot write the AppArmor addon.'
+  chown root:root "$temporary" && chmod 644 "$temporary" || die 'Cannot secure the AppArmor addon.'
+  mv -fT -- "$temporary" "$addon" || die 'Cannot install the AppArmor addon.'
+  temporary=''
+  if [[ ! -e $local_file ]]; then
+    : > "$local_file" || die 'Cannot create the Tinyproxy local policy.'
+    chown root:root "$local_file" && chmod 644 "$local_file" || die 'Cannot secure the Tinyproxy local policy.'
+  fi
+  if grep -qE '^[[:space:]]*#?include[[:space:]]+(if[[:space:]]+exists[[:space:]]+)?<local/helltube-youtube-proxy>[[:space:]]*(#.*)?$' "$local_file"; then
+    :
+  else
+    [[ $? == 1 ]] || die 'Cannot inspect the Tinyproxy local policy include.'
+    last_byte=$(tail -c 1 -- "$local_file") || die 'Cannot read the Tinyproxy local policy ending.'
+    if [[ -s $local_file && -n $last_byte ]]; then
+      printf '\n' >> "$local_file" || die 'Cannot terminate the Tinyproxy local policy line.'
+    fi
+    printf '%s\n' 'include if exists <local/helltube-youtube-proxy>' >> "$local_file" ||
+      die 'Cannot append the Tinyproxy AppArmor include.'
+  fi
+
+  # Service status alone is unreliable in containers; use the kernel's actual interface.
+  enabled=$rootfs/sys/module/apparmor/parameters/enabled
+  if [[ -e $enabled ]]; then
+    state=$(< "$enabled") || die 'Cannot read the AppArmor kernel enabled state.'
+    case $state in
+      N) printf 'AppArmor is disabled in the kernel; addon saved for future boots, not reloaded.\n'; return 0 ;;
+      Y) ;;
+      *) die 'Cannot determine the AppArmor kernel enabled state.' ;;
+    esac
+  fi
+  if [[ ! -d $rootfs/sys/kernel/security/apparmor ]]; then
+    printf 'AppArmor kernel interface unavailable; addon saved but not reloaded.\n'
+    return 0
+  fi
+  if ! command -v apparmor_parser >/dev/null; then
+    apt-get install -y --no-install-recommends apparmor || die 'Cannot install apparmor_parser for the existing Tinyproxy profile.'
+  fi
+  command -v apparmor_parser >/dev/null || die 'apparmor_parser is required to reload the existing Tinyproxy profile.'
+  apparmor_parser -r "$profile" ||
+    die 'AppArmor Tinyproxy reload failed. The LXC host must permit policy loading; resolve policy errors/privileges and rerun bootstrap. AppArmor was not bypassed.'
+)
+
 render_nginx() {
   local hostname=$1
   valid_hostname "$hostname" || die 'Invalid backend hostname.'
@@ -686,6 +770,7 @@ main() {
   install -o root -g root -m 644 "$WORK_DIR/helltube.service" /etc/systemd/system/helltube.service
   systemctl daemon-reload
   if [[ $YOUTUBE_VPN_ENABLED == yes ]]; then
+    install_youtube_proxy_apparmor
     systemctl enable --now helltube-vpn.service helltube-youtube-proxy.service
     local vpn_ready=no
     for ((attempt = 0; attempt < 5; attempt++)); do

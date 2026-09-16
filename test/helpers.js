@@ -6,7 +6,7 @@ import { createApp } from '../server/app.js';
 
 export async function start(t, options = {}) {
   await mkdir('test-artifacts', { recursive: true });
-  const dir = await mkdtemp(path.resolve('test-artifacts', 'server-'));
+  const dir = await mkdtemp(path.resolve('test-artifacts', '.server-'));
   const instance = await createApp({ dataDir: dir, port: 0, ...options });
   const url = await instance.listen(0);
   t.after(async () => { await instance.close(); await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });

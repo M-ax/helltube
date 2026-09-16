@@ -269,7 +269,7 @@ export async function createApp(overrides = {}) {
       return res.send(contents);
     }
     if (req.params.file.endsWith('.ts') && job.key?.length === 16) res.set('X-Helltube-Encrypted', 'aes-128');
-    res.sendFile(path.join(job.dir, req.params.file), { cacheControl: false }, error => { if (error) next(error); });
+    res.sendFile(req.params.file, { root: job.dir, cacheControl: false }, error => { if (error) next(error); });
   };
   app.get('/media/:jobId/:file', identify, serveMedia);
   app.get('/direct/media/:jobId/key.bin', identifyDirect(req => `media:${req.params.jobId}`), (req, res) => {

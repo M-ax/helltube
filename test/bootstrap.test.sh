@@ -301,14 +301,194 @@ for directive in 'User=helltube-proxy' 'NetworkNamespacePath=/run/netns/helltube
   'BindsTo=helltube-vpn.service' 'After=helltube-vpn.service' 'NoNewPrivileges=true' \
   'BindReadOnlyPaths=/run/helltube-vpn/resolv.conf:/etc/resolv.conf' \
   'BindReadOnlyPaths=/run/helltube-vpn/nsswitch.conf:/etc/nsswitch.conf' \
+  'LoadCredential=proxy-config:/etc/helltube/youtube-proxy.conf' \
+  'RuntimeDirectory=helltube-youtube-proxy' 'RuntimeDirectoryMode=0700' \
+  'CapabilityBoundingSet=' 'ProtectSystem=strict' 'ProtectHome=true' \
+  'PrivateTmp=true' 'PrivateDevices=true' 'UMask=0077' 'StandardOutput=null' 'StandardError=null' \
   'ExecStart=/usr/bin/tinyproxy -d -c %d/proxy-config'; do
   assert_contains "$proxy_unit" "$directive"
 done
 proxy_config=$(render_youtube_proxy_config)
-for directive in 'Listen 169.254.77.2' 'Port 8888' 'Allow 169.254.77.1' 'ConnectPort 443' 'LogFile "/dev/null"'; do
+for directive in 'Listen 169.254.77.2' 'Port 8888' 'Allow 169.254.77.1' 'ConnectPort 443' \
+  'LogFile "/dev/null"' 'PidFile "/run/helltube-youtube-proxy/tinyproxy.pid"'; do
   assert_contains "$proxy_config" "$directive"
 done
 printf 'PASS: VPN service isolation, explicit proxy and no backend privileges\n'
+
+# Owner operations are doubled only for unprivileged runs; root exercises native ownership.
+# All policy/kernel paths and external commands stay inside the fixture boundary.
+# shellcheck disable=SC2329
+apparmor_cases() (
+  workspace=$(mktemp -d "$root/test-artifacts/bootstrap-apparmor.XXXXXX")
+  trap 'rm -rf -- "$workspace"' EXIT
+  local rootfs=$workspace/rootfs profile local_file addon expected_include expected_rules
+  local parser_status=0 parser_available=no install_parser=yes apt_status=0 unsafe_owner='' details
+  profile=$rootfs/etc/apparmor.d/tinyproxy
+  local_file=$rootfs/etc/apparmor.d/local/tinyproxy
+  addon=$rootfs/etc/apparmor.d/local/helltube-youtube-proxy
+  expected_include='include if exists <local/helltube-youtube-proxy>'
+  expected_rules=$'/run/credentials/helltube-youtube-proxy.service/proxy-config r,\n/run/helltube-youtube-proxy/tinyproxy.pid rw,'
+  stat() {
+    details=$(command stat "$@") || return
+    if [[ $EUID != 0 && $1 == -c && $2 == '%u:%a:%h' ]]; then
+      if [[ ${!#} == "$unsafe_owner" ]]; then
+        details="65534:${details#*:}"
+      elif [[ $details == "$EUID":* ]]; then
+        details="0:${details#*:}"
+      fi
+    fi
+    printf '%s\n' "$details"
+  }
+  chown() {
+    [[ $1 == root:root && $2 == "$rootfs"/* ]] || die 'Unexpected AppArmor ownership change.'
+    if [[ $EUID == 0 ]]; then command chown "$@"; fi
+  }
+  command() {
+    if [[ $* == '-v apparmor_parser' ]]; then
+      [[ $parser_available == yes ]]
+    else
+      builtin command "$@"
+    fi
+  }
+  apt-get() {
+    [[ $* == 'install -y --no-install-recommends apparmor' ]] || die 'Unexpected AppArmor package install.'
+    printf 'install\n' >> "$workspace/actions"
+    (( apt_status == 0 )) || return "$apt_status"
+    parser_available=$install_parser
+  }
+  apparmor_parser() {
+    [[ $# == 2 && $1 == -r && $2 == "$profile" ]] || die 'Wrong AppArmor reload command.'
+    [[ $(< "$addon") == "$expected_rules" ]] || die 'Reload ran before the exact addon was installed.'
+    grep -qF "$expected_include" "$local_file" || die 'Reload ran before the local include was installed.'
+    printf 'reload\n' >> "$workspace/actions"
+    if (( parser_status != 0 )); then printf 'Permission denied loading policy\n' >&2; fi
+    return "$parser_status"
+  }
+  mkdir -p "$rootfs/sys/module/apparmor/parameters" "$rootfs/sys/kernel/security/apparmor"
+  printf 'Y\n' > "$rootfs/sys/module/apparmor/parameters/enabled"
+  : > "$workspace/actions"
+  install_youtube_proxy_apparmor "$rootfs"
+  [[ ! -e $rootfs/etc && ! -s $workspace/actions ]] || die 'No-profile run changed policy or installed packages.'
+
+  mkdir -p "${profile%/*}"
+  install_youtube_proxy_apparmor "$rootfs"
+  [[ ! -e ${profile%/*}/local && ! -s $workspace/actions ]] || die 'Missing Tinyproxy profile must leave shared policy alone.'
+  parser_available=yes
+  printf 'profile tinyproxy /usr/bin/tinyproxy {\n  include if exists <local/tinyproxy>\n}\n' > "$profile"
+  cp "$profile" "$workspace/original-profile"
+  install_youtube_proxy_apparmor "$rootfs"
+  printf '%s\n' "$expected_rules" > "$workspace/expected-addon"
+  cmp -s "$workspace/expected-addon" "$addon" || die 'Addon must contain exactly the two literal rules.'
+  [[ $(< "$local_file") == "$expected_include" ]] || die 'Missing local file was not created with the include.'
+  [[ $(command stat -c %a "$addon") == 644 && $(command stat -c %a "$local_file") == 644 ]] || die 'Wrong generated AppArmor file modes.'
+  if [[ $EUID == 0 ]]; then
+    [[ $(command stat -c '%u:%g' "$addon") == 0:0 && $(command stat -c '%u:%g' "$local_file") == 0:0 ]] || die 'Generated AppArmor files are not root-owned.'
+  fi
+  [[ $(< "$workspace/actions") == reload ]] || die 'Existing parser should reload without package installation.'
+  if [[ -n ${APPARMOR_TEST_PARSER:-} ]]; then
+    [[ $APPARMOR_TEST_PARSER == /* && -x $APPARMOR_TEST_PARSER ]] || die 'APPARMOR_TEST_PARSER must be an absolute parser executable path.'
+    "$APPARMOR_TEST_PARSER" --skip-kernel-load --skip-cache --base "${profile%/*}" "$profile"
+    printf 'PASS: real AppArmor parser compiles the fixture without loading kernel policy or writing cache\n'
+  fi
+  printf '/unexpected/broad/** rw,\n' > "$addon"
+  install_youtube_proxy_apparmor "$rootfs"
+  cmp -s "$workspace/expected-addon" "$addon" || die 'Managed addon was not restored to exactly the two rules.'
+
+  for custom in $'# custom policy\n/custom/path r,\n' $'# custom policy\n/custom/path r,' ''; do
+    printf '%s' "$custom" > "$local_file"
+    chmod 600 "$local_file"
+    printf '%s' "$custom" > "$workspace/expected-local"
+    if [[ -n $custom && $custom != *$'\n' ]]; then printf '\n' >> "$workspace/expected-local"; fi
+    printf '%s\n' "$expected_include" >> "$workspace/expected-local"
+    install_youtube_proxy_apparmor "$rootfs"
+    install_youtube_proxy_apparmor "$rootfs"
+    cmp -s "$workspace/expected-local" "$local_file" || die 'Rerun damaged custom content, trailing LF or duplicated the include.'
+    [[ $(command stat -c %a "$local_file") == 600 ]] || die 'Existing local policy permissions were weakened.'
+  done
+  printf '  %s # administrator include' "$expected_include" > "$local_file"
+  cp "$local_file" "$workspace/expected-local"
+  install_youtube_proxy_apparmor "$rootfs"
+  cmp -s "$workspace/expected-local" "$local_file" || die 'Existing include with whitespace/comment was duplicated or modified.'
+  cmp -s "$workspace/original-profile" "$profile" || die 'Distro profile was modified.'
+  printf 'PASS: exact AppArmor addon, native file modes, preserved custom content and idempotent includes\n'
+
+  for state in disabled unavailable missing-parameter; do
+    : > "$workspace/actions"
+    parser_available=no
+    printf 'N\n' > "$rootfs/sys/module/apparmor/parameters/enabled"
+    if [[ $state == unavailable ]]; then
+      printf 'Y\n' > "$rootfs/sys/module/apparmor/parameters/enabled"
+      rmdir "$rootfs/sys/kernel/security/apparmor"
+    elif [[ $state == missing-parameter ]]; then
+      rm "$rootfs/sys/module/apparmor/parameters/enabled"
+    fi
+    install_youtube_proxy_apparmor "$rootfs" > "$workspace/output"
+    [[ ! -s $workspace/actions ]] || die 'Disabled/unavailable kernel caused reload or package installation.'
+  done
+  mkdir "$rootfs/sys/kernel/security/apparmor"
+  : > "$workspace/actions"
+  install_youtube_proxy_apparmor "$rootfs"
+  [[ $(< "$workspace/actions") == $'install\nreload' ]] || die 'Visible kernel interface without module parameter must still reload.'
+  printf 'Y\n' > "$rootfs/sys/module/apparmor/parameters/enabled"
+  parser_status=13
+  if (install_youtube_proxy_apparmor "$rootfs") > "$workspace/output" 2>&1; then die 'AppArmor reload failure was ignored.'; fi
+  assert_contains "$(< "$workspace/output")" 'AppArmor'
+  assert_contains "$(< "$workspace/output")" 'LXC'
+  assert_contains "$(< "$workspace/output")" 'Permission denied loading policy'
+  parser_status=0
+  parser_available=no
+  install_parser=no
+  if (install_youtube_proxy_apparmor "$rootfs") > "$workspace/output" 2>&1; then die 'Missing parser after installation was ignored.'; fi
+  assert_contains "$(< "$workspace/output")" 'apparmor_parser'
+  apt_status=100
+  if (install_youtube_proxy_apparmor "$rootfs") > "$workspace/output" 2>&1; then die 'Failed parser package installation was ignored.'; fi
+  assert_contains "$(< "$workspace/output")" 'Cannot install apparmor_parser'
+  parser_available=yes
+  printf 'unexpected\n' > "$rootfs/sys/module/apparmor/parameters/enabled"
+  : > "$workspace/actions"
+  if (install_youtube_proxy_apparmor "$rootfs") > "$workspace/output" 2>&1; then die 'Unknown kernel state was silently treated as disabled.'; fi
+  [[ ! -s $workspace/actions ]] || die 'Unknown kernel state caused a reload.'
+  printf 'Y\n' > "$rootfs/sys/module/apparmor/parameters/enabled"
+  printf 'PASS: actual kernel availability gates reload; enabled policy/parser failures abort clearly\n'
+
+  for target in "$addon" "$local_file" "$profile" "${local_file%/*}" "${profile%/*}" "$rootfs/etc" "$rootfs"; do
+    mv "$target" "$target.saved"
+    for kind in symlink dangling directory fifo; do
+      case $kind in
+        symlink) ln -s "$target.saved" "$target" ;;
+        dangling) ln -s "$workspace/missing" "$target" ;;
+        directory) [[ -f $target.saved ]] || continue; mkdir "$target" ;;
+        fifo) [[ -f $target.saved ]] || continue; mkfifo "$target" ;;
+      esac
+      : > "$workspace/actions"
+      if (install_youtube_proxy_apparmor "$rootfs") > "$workspace/output" 2>&1; then
+        # Missing profiles under dangling parents require no writes, but must never create through them.
+        [[ $kind == dangling && -d $target.saved ]] || die "Accepted unsafe AppArmor destination: $target ($kind)"
+      fi
+      [[ ! -s $workspace/actions && ! -e $workspace/missing ]] || die 'Unsafe path caused an external action or followed a dangling link.'
+      if [[ $kind == directory ]]; then rmdir "$target"; else rm "$target"; fi
+    done
+    mv "$target.saved" "$target"
+    for writable in g o; do
+      chmod "$writable+w" "$target"
+      if (install_youtube_proxy_apparmor "$rootfs") > "$workspace/output" 2>&1; then die "Accepted writable AppArmor path: $target"; fi
+      chmod "$writable-w" "$target"
+    done
+    unsafe_owner=$target
+    if [[ $EUID == 0 ]]; then command chown 65534 "$target"; fi
+    if (install_youtube_proxy_apparmor "$rootfs") > "$workspace/output" 2>&1; then die "Accepted untrusted AppArmor owner: $target"; fi
+    if [[ $EUID == 0 ]]; then command chown root "$target"; fi
+    unsafe_owner=''
+  done
+  ln "$local_file" "$workspace/hardlink"
+  if (install_youtube_proxy_apparmor "$rootfs") >/dev/null 2>&1; then die 'Accepted a hardlinked local policy.'; fi
+  rm "$workspace/hardlink"
+  printf 'profile tinyproxy /usr/bin/tinyproxy {}\n' > "$profile"
+  if (install_youtube_proxy_apparmor "$rootfs") > "$workspace/output" 2>&1; then die 'Accepted a distro profile without the local include hook.'; fi
+  printf 'PASS: AppArmor rejects unsafe destinations, ancestors, ownership and missing local hooks\n'
+)
+mkdir -p "$root/test-artifacts"
+apparmor_cases
 
 vpn_prompt_cases() (
   workspace=$(mktemp -d "$root/test/.bootstrap-vpn.XXXXXX")
@@ -549,6 +729,8 @@ pin = main.index('install -o root -g root -m 755 "$source_dir/scripts/wireguard.
 copy = main.index("rsync -a")
 assert main.index('systemctl stop "$vpn_unit"') < copy < pin
 assert '$YOUTUBE_VPN_ENABLED == yes' in main[copy:pin]
+assert main.count("install_youtube_proxy_apparmor") == 1
+assert 'if [[ $YOUTUBE_VPN_ENABLED == yes ]]; then\n        install_youtube_proxy_apparmor;\n        systemctl enable --now helltube-vpn.service helltube-youtube-proxy.service;' in main
 assert "ensure_build_account" in main
 PY
 printf 'PASS: bootstrap locks before settings, pins trusted helpers and installs updater units only after HTTPS health\n'
