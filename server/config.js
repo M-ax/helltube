@@ -1,0 +1,28 @@
+import path from 'node:path';
+
+export const config = {
+  port: Number(process.env.PORT || 3000),
+  host: process.env.HOST || '127.0.0.1',
+  dataDir: path.resolve(process.env.DATA_DIR || 'data'),
+  ffmpeg: process.env.FFMPEG_PATH || 'ffmpeg',
+  ytdlp: process.env.YTDLP_PATH || 'yt-dlp',
+  secureCookies: process.env.SECURE_COOKIES === 'true',
+  origins: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173').split(','),
+  maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES || 10 * 1024 ** 3),
+  maxStorageBytes: Number(process.env.MAX_STORAGE_BYTES || 30 * 1024 ** 3),
+  maxTranscoders: Number(process.env.MAX_TRANSCODERS || 4),
+  cleanupIntervalMs: Number(process.env.CLEANUP_INTERVAL_MS || 60000),
+  maxQueue: 500,
+  maxRooms: 30,
+};
+
+export function httpError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
+export function text(value, label, max = 80) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > max) {
+    throw httpError(400, `${label} must be between 1 and ${max} characters.`);
+  }
+  return value.trim();
+}

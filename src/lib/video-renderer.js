@@ -1,0 +1,450 @@
+import {advanceBeachBall, createBeachBall, paintBeachBall, resizeBeachBall} from './beach-ball.js';
+
+const vertexSource = `
+    attribute vec2 a_position;
+    uniform mat4 u_projection;
+    uniform vec4 u_rect;
+    uniform float u_rotation;
+    varying vec2 v_uv;
+    void main() {
+        float c = cos(u_rotation);
+        float s = sin(u_rotation);
+        vec2 point = mat2(c, s, -s, c) * ((a_position - 0.5) * u_rect.zw);
+        gl_Position = u_projection * vec4(u_rect.xy + u_rect.zw * 0.5 + point, 0.0, 1.0);
+        v_uv = a_position;
+    }
+`;
+
+const fragmentSource = `
+    precision mediump float;
+    uniform sampler2D u_video;
+    uniform float u_opacity;
+    varying vec2 v_uv;
+    void main() {
+        vec4 color = texture2D(u_video, v_uv);
+        gl_FragColor = vec4(color.rgb, color.a * u_opacity);
+    }
+`;
+
+export function orthographicProjection(width, height) {
+    return new Float32Array([
+        2 / width, 0, 0, 0,
+        0, -2 / height, 0, 0,
+        0, 0, -1, 0,
+        -1, 1, 0, 1,
+    ]);
+}
+
+export function videoRect(width, height, videoWidth, videoHeight) {
+    if (![width, height, videoWidth, videoHeight].every(value => Number.isFinite(value) && value > 0)) return null;
+    const scale = Math.min(width / videoWidth, height / videoHeight);
+    const scaledWidth = videoWidth * scale;
+    const scaledHeight = videoHeight * scale;
+    return [(width - scaledWidth) / 2, (height - scaledHeight) / 2, scaledWidth, scaledHeight];
+}
+
+export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
+    let gl;
+    try {
+        gl = canvas.getContext('webgl', {alpha: false, antialias: false, depth: false, stencil: false});
+    } catch { /* Native video remains available if WebGL is blocked. */ }
+    let overlay;
+    try {
+        overlay = overlayCanvas?.getContext('2d');
+    } catch { /* The optional overlay must not interrupt native playback. */ }
+
+    let program;
+    let buffer;
+    let texture;
+    let ghostTexture;
+    let ballTexture;
+    let projectionLocation;
+    let rectLocation;
+    let opacityLocation;
+    let rotationLocation;
+    let maxSize = 4096;
+    let maxTextureSize;
+    let frameId = null;
+    let animationId = null;
+    let lastBallTime = null;
+    let active = false;
+    let failed = false;
+    let lost = false;
+    let destroyed = false;
+    let videoDirty = true;
+    let videoUploaded = false;
+    let ghost = null;
+    let ghostDirty = false;
+    let ball = null;
+    let ballSprite = null;
+    let overlayDirty = true;
+    let hasViewport = false;
+    const useVideoFrames = typeof video.requestVideoFrameCallback === 'function';
+    const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    let reducedMotion = !!motionQuery?.matches;
+
+    function setActive(value) {
+        if (active === value) return;
+        active = value;
+        onActive(value);
+    }
+
+    function cancelFrame() {
+        if (frameId !== null) video.cancelVideoFrameCallback(frameId);
+        if (animationId !== null) cancelAnimationFrame(animationId);
+        frameId = null;
+        animationId = null;
+        lastBallTime = null;
+    }
+
+    function disposeResources() {
+        if (gl && !lost) {
+            for (const resource of [texture, ghostTexture, ballTexture]) if (resource) gl.deleteTexture(resource);
+            if (buffer) gl.deleteBuffer(buffer);
+            if (program) gl.deleteProgram(program);
+        }
+        texture = ghostTexture = ballTexture = buffer = program = null;
+        videoUploaded = false;
+        videoDirty = true;
+        ghostDirty = !!ghost;
+    }
+
+    function releaseBall() {
+        if (ballTexture && gl && !lost) gl.deleteTexture(ballTexture);
+        ballTexture = null;
+        if (ballSprite) ballSprite.width = ballSprite.height = 0;
+        ballSprite = null;
+        ball = null;
+    }
+
+    function fail() {
+        failed = true;
+        cancelFrame();
+        setActive(false);
+        disposeResources();
+    }
+
+    function createTexture() {
+        const resource = gl.createTexture();
+        if (!resource) throw new Error('Texture allocation failed.');
+        gl.bindTexture(gl.TEXTURE_2D, resource);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        return resource;
+    }
+
+    function initialize() {
+        const shaders = [];
+        try {
+            failed = false;
+            program = gl.createProgram();
+            for (const [type, source] of [[gl.VERTEX_SHADER, vertexSource], [gl.FRAGMENT_SHADER, fragmentSource]]) {
+                const shader = gl.createShader(type);
+                shaders.push(shader);
+                gl.shaderSource(shader, source);
+                gl.compileShader(shader);
+                if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error('Video shader compilation failed.');
+                gl.attachShader(program, shader);
+            }
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error('Video shader linking failed.');
+            gl.useProgram(program);
+            buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+            const positionLocation = gl.getAttribLocation(program, 'a_position');
+            gl.enableVertexAttribArray(positionLocation);
+            gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+            projectionLocation = gl.getUniformLocation(program, 'u_projection');
+            rectLocation = gl.getUniformLocation(program, 'u_rect');
+            opacityLocation = gl.getUniformLocation(program, 'u_opacity');
+            rotationLocation = gl.getUniformLocation(program, 'u_rotation');
+            gl.uniform1i(gl.getUniformLocation(program, 'u_video'), 0);
+            gl.activeTexture(gl.TEXTURE0);
+            texture = createTexture();
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+            gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+            gl.disable(gl.DEPTH_TEST);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            gl.clearColor(5 / 255, 5 / 255, 6 / 255, 1);
+            maxSize = Math.min(4096, gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
+            maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+        } catch {
+            fail();
+        } finally {
+            for (const shader of shaders) if (shader) gl.deleteShader(shader);
+        }
+    }
+
+    function resizeCanvas(target, width, height, limit = 4096) {
+        const ratio = Math.min(window.devicePixelRatio || 1, 2, limit / width, limit / height);
+        const pixelWidth = Math.max(1, Math.round(width * ratio));
+        const pixelHeight = Math.max(1, Math.round(height * ratio));
+        if (target.width !== pixelWidth || target.height !== pixelHeight) {
+            target.width = pixelWidth;
+            target.height = pixelHeight;
+        }
+    }
+
+    function getGhostRect(width, height) {
+        if (!ghost?.width || !ghost?.height) return null;
+        return videoRect(width, height, video.videoWidth, video.videoHeight)
+            || videoRect(width, height, ghost.width, ghost.height);
+    }
+
+    function getBallSprite() {
+        if (!ballSprite) {
+            ballSprite = document.createElement('canvas');
+            ballSprite.width = ballSprite.height = 256;
+            const context = ballSprite.getContext('2d');
+            if (context) paintBeachBall(context, ballSprite.width);
+        }
+        return ballSprite;
+    }
+
+    function drawTexture(resource, rect, opacity = 1, rotation = 0) {
+        gl.bindTexture(gl.TEXTURE_2D, resource);
+        gl.uniform4fv(rectLocation, rect);
+        gl.uniform1f(opacityLocation, opacity);
+        gl.uniform1f(rotationLocation, rotation);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    function drawGhost(rect) {
+        if (!rect) return;
+        try {
+            if (ghostDirty) {
+                ghostDirty = false;
+                if (ghost.width > maxTextureSize || ghost.height > maxTextureSize) {
+                    if (ghostTexture) gl.deleteTexture(ghostTexture);
+                    ghostTexture = null;
+                    return;
+                }
+                if (!ghostTexture) ghostTexture = createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, ghostTexture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, ghost);
+            }
+            if (ghostTexture) drawTexture(ghostTexture, rect, 0.45);
+        } catch { /* A released parent-owned image must not disable the video renderer. */
+            if (ghostTexture) gl.deleteTexture(ghostTexture);
+            ghostTexture = null;
+        }
+    }
+
+    function clearOverlay() {
+        if (!overlay || !overlayDirty) return;
+        overlay.setTransform(1, 0, 0, 1, 0, 0);
+        overlay.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        overlayDirty = false;
+    }
+
+    function renderOverlay(width, height) {
+        clearOverlay();
+        if (!overlay || (!ghost && !ball)) return;
+        resizeCanvas(overlayCanvas, width, height);
+        overlay.save();
+        overlay.setTransform(overlayCanvas.width / width, 0, 0, overlayCanvas.height / height, 0, 0);
+        const rect = getGhostRect(width, height);
+        if (rect) {
+            overlay.globalAlpha = 0.45;
+            try {
+                overlay.drawImage(ghost, ...rect);
+            } catch { /* The parent can release its preview image at any time. */ }
+        }
+        if (ball) {
+            overlay.globalAlpha = 0.65;
+            overlay.translate(ball.x, ball.y);
+            overlay.rotate(ball.angle);
+            overlay.drawImage(getBallSprite(), -ball.radius, -ball.radius, ball.radius * 2, ball.radius * 2);
+        }
+        overlay.restore();
+        overlayDirty = true;
+    }
+
+    function render() {
+        if (destroyed || document.hidden) return;
+        const bounds = canvas.getBoundingClientRect();
+        const {width, height} = bounds.width && bounds.height ? bounds : overlayCanvas?.getBoundingClientRect() || bounds;
+        hasViewport = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
+        if (!hasViewport) {
+            setActive(false);
+            clearOverlay();
+            return;
+        }
+        if (ball) ball = resizeBeachBall(ball, width, height);
+        if (gl && !failed && !lost) {
+            try {
+                resizeCanvas(canvas, width, height, maxSize);
+                gl.viewport(0, 0, canvas.width, canvas.height);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+                const rect = videoRect(width, height, video.videoWidth, video.videoHeight);
+                if (video.readyState < 2 || !rect) {
+                    videoUploaded = false;
+                    setActive(false);
+                } else {
+                    if (video.videoWidth > maxTextureSize || video.videoHeight > maxTextureSize) {
+                        throw new Error('Video exceeds the texture size limit.');
+                    }
+                    gl.useProgram(program);
+                    // Effect-only redraws reuse the last decoded video texture, including while paused.
+                    if (videoDirty || !videoUploaded) {
+                        gl.bindTexture(gl.TEXTURE_2D, texture);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+                        videoDirty = false;
+                        videoUploaded = true;
+                    }
+                    gl.uniformMatrix4fv(projectionLocation, false, orthographicProjection(width, height));
+                    drawTexture(texture, rect);
+                    drawGhost(getGhostRect(width, height));
+                    if (ball) {
+                        if (!ballTexture) {
+                            ballTexture = createTexture();
+                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, getBallSprite());
+                        }
+                        drawTexture(ballTexture, [ball.x - ball.radius, ball.y - ball.radius, ball.radius * 2, ball.radius * 2], 0.65, ball.angle);
+                    }
+                    if (!active && gl.getError() !== gl.NO_ERROR) throw new Error('Video rendering failed.');
+                    setActive(true);
+                }
+            } catch { /* A texture upload failure must not interrupt room playback. */
+                fail();
+            }
+        } else {
+            setActive(false);
+        }
+        if (active) clearOverlay();
+        else renderOverlay(width, height);
+    }
+
+    function schedule() {
+        if (destroyed || document.hidden) return;
+        const renderVideo = gl && !failed && !lost;
+        if (renderVideo && useVideoFrames && frameId === null) frameId = video.requestVideoFrameCallback(frame);
+        const animateBall = ball && !reducedMotion && hasViewport;
+        const animateVideo = renderVideo && hasViewport && !useVideoFrames && !video.paused && !video.ended;
+        if (animateBall || animateVideo) {
+            if (animationId === null) animationId = requestAnimationFrame(animate);
+        } else if (animationId !== null) {
+            cancelAnimationFrame(animationId);
+            animationId = null;
+        }
+        if (!animateBall) lastBallTime = null;
+    }
+
+    function animate(time) {
+        animationId = null;
+        if (destroyed || document.hidden) return;
+        if (ball && !reducedMotion) {
+            const elapsed = lastBallTime === null ? 0 : Math.min(0.05, Math.max(0, (time - lastBallTime) / 1000));
+            ball = advanceBeachBall(ball, elapsed, reducedMotion);
+            lastBallTime = time;
+        }
+        if (!useVideoFrames && !video.paused && !video.ended) videoDirty = true;
+        redraw();
+    }
+
+    function frame() {
+        frameId = null;
+        refresh();
+    }
+
+    function redraw() {
+        render();
+        schedule();
+    }
+
+    function refresh() {
+        videoDirty = true;
+        redraw();
+    }
+
+    function reset() {
+        cancelFrame();
+        videoUploaded = false;
+        setActive(false);
+        refresh();
+    }
+
+    function visibilityChanged() {
+        cancelFrame();
+        if (!document.hidden) refresh();
+    }
+
+    function motionChanged() {
+        reducedMotion = !!motionQuery.matches;
+        cancelFrame();
+        redraw();
+    }
+
+    function contextLost(event) {
+        event.preventDefault();
+        lost = true;
+        cancelFrame();
+        setActive(false);
+        disposeResources();
+        redraw();
+    }
+
+    function contextRestored() {
+        lost = false;
+        initialize();
+        refresh();
+    }
+
+    const events = ['loadeddata', 'seeked', 'playing', 'pause', 'resize'];
+    for (const event of events) video.addEventListener(event, refresh);
+    video.addEventListener('emptied', reset);
+    canvas.addEventListener('webglcontextlost', contextLost);
+    canvas.addEventListener('webglcontextrestored', contextRestored);
+    document.addEventListener('visibilitychange', visibilityChanged);
+    window.addEventListener('resize', redraw);
+    if (motionQuery?.addEventListener) motionQuery.addEventListener('change', motionChanged);
+    else motionQuery?.addListener(motionChanged);
+    const observer = new ResizeObserver(redraw);
+    observer.observe(canvas);
+    if (overlayCanvas) observer.observe(overlayCanvas);
+    if (gl) initialize();
+    else onActive(false);
+    refresh();
+
+    return {
+        setGhost(imageOrNull) {
+            if (destroyed) return;
+            ghost = imageOrNull || null;
+            ghostDirty = !!ghost;
+            if (!ghost && ghostTexture) {
+                if (gl && !lost) gl.deleteTexture(ghostTexture);
+                ghostTexture = null;
+            }
+            redraw();
+        },
+        setBeachBall(enabled) {
+            if (destroyed || !!ball === !!enabled) return;
+            if (enabled) ball = createBeachBall(0, 0);
+            else releaseBall();
+            redraw();
+        },
+        destroy() {
+            if (destroyed) return;
+            destroyed = true;
+            cancelFrame();
+            observer.disconnect();
+            for (const event of events) video.removeEventListener(event, refresh);
+            video.removeEventListener('emptied', reset);
+            canvas.removeEventListener('webglcontextlost', contextLost);
+            canvas.removeEventListener('webglcontextrestored', contextRestored);
+            document.removeEventListener('visibilitychange', visibilityChanged);
+            window.removeEventListener('resize', redraw);
+            if (motionQuery?.removeEventListener) motionQuery.removeEventListener('change', motionChanged);
+            else motionQuery?.removeListener(motionChanged);
+            clearOverlay();
+            ghost = null;
+            releaseBall();
+            disposeResources();
+            gl?.getExtension('WEBGL_lose_context')?.loseContext();
+        },
+    };
+}
