@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile } from 'node:fs/promises';
+import { createDecipheriv } from 'node:crypto';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { start, until } from './helpers.js';
 import { makeItem } from '../server/rooms.js';
@@ -10,6 +11,66 @@ import { createApp } from '../server/app.js';
 import { WebSocket } from 'ws';
 
 const exec = promisify(execFile);
+
+async function encryptedHLS(instance, url, cookie, item, contents) {
+  const job = instance.media.jobs.get(item.id);
+  assert.ok(Buffer.isBuffer(job.key));
+  assert.equal(job.key.length, 16);
+  const keyURI = `/direct/media/${job.id}/key.bin`;
+  assert.match(contents, /#EXT-X-KEY:METHOD=AES-128,/);
+  assert.equal((await fetch(url + keyURI)).status, 401);
+  assert.equal((await fetch(url + keyURI, { headers: { Cookie: 'session=invalid' } })).status, 401);
+  const response = await fetch(url + keyURI, { headers: { Cookie: cookie } });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('cache-control'), /\bno-store\b/);
+  const key = Buffer.from(await response.arrayBuffer());
+  assert.deepEqual(key, job.key);
+  assert.equal((await fetch(`${url}/media/${job.id}/key.bin`, { headers: { Cookie: cookie } })).status, 404);
+  assert.equal((await fetch(`${url}/media/${job.id}/key-info`, { headers: { Cookie: cookie } })).status, 404);
+  const keyFile = path.resolve(job.keyDir, 'key.bin');
+  const keyInfoFile = path.join(job.keyDir, 'key-info');
+  assert.ok(path.relative(path.dirname(instance.media.dir), keyFile).startsWith(`..${path.sep}`));
+  assert.deepEqual(await readFile(keyFile), key);
+  assert.equal(await readFile(keyInfoFile, 'utf8'), `${keyURI}\n${keyFile}\n`, 'Key-info omits an explicit IV.');
+  if (process.platform !== 'win32') {
+    for (const dir of [path.dirname(instance.media.keyDir), instance.media.keyDir, job.keyDir]) {
+      assert.equal((await stat(dir)).mode & 0o777, 0o700);
+    }
+    for (const file of [keyFile, keyInfoFile]) assert.equal((await stat(file)).mode & 0o777, 0o600);
+  }
+  assert.equal(Object.hasOwn(item, 'key'), false);
+  assert.deepEqual(Object.keys(item.media).sort(), ['baseTime', 'bufferedUntil', 'complete', 'url']);
+  for (const secret of [JSON.stringify(key), key.toString('hex'), key.toString('base64'), keyFile]) {
+    assert.equal(JSON.stringify(item).includes(secret), false, 'Serialized items must not contain key material or private paths.');
+  }
+  let sequence = BigInt(contents.match(/^#EXT-X-MEDIA-SEQUENCE:(\d+)/m)?.[1] || '0');
+  let keyTag;
+  const decodedSegments = [];
+  for (const line of contents.split(/\r?\n/)) {
+    if (line.startsWith('#EXT-X-KEY:')) keyTag = line;
+    if (!line || line.startsWith('#')) continue;
+    assert.match(line, /^segment-\d{6,}\.ts$/, 'Local segments stay relative.');
+    assert.equal(keyTag?.match(/URI="([^"]+)"/)?.[1], keyURI);
+    const iv = Buffer.alloc(16);
+    iv.writeBigUInt64BE(sequence++, 8);
+    const declaredIV = keyTag.match(/IV=0x([\da-f]+)/i)?.[1];
+    if (declaredIV) assert.equal(declaredIV.toLowerCase().padStart(32, '0'), iv.toString('hex'));
+    const segment = await fetch(new URL(line, url + item.media.url), { headers: { Cookie: cookie } });
+    assert.equal(segment.status, 200);
+    const encrypted = Buffer.from(await segment.arrayBuffer());
+    assert.ok(encrypted.length > 1000);
+    assert.equal(encrypted.length % 16, 0);
+    const decipher = createDecipheriv('aes-128-cbc', key, iv);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    assert.notDeepEqual(encrypted, decrypted);
+    assert.equal(decrypted.length % 188, 0, 'Decrypted segments contain whole MPEG-TS packets.');
+    for (let offset = 0; offset < decrypted.length; offset += 188) assert.equal(decrypted[offset], 0x47);
+    decodedSegments.push(decrypted);
+    if (decodedSegments.length === 2) break;
+  }
+  assert.equal(decodedSegments.length, 2, 'Check sequence IVs on at least two segments.');
+  return { job, key, decodedSegments };
+}
 
 test('YouTube HLS input with separate audio becomes playable server HLS', { timeout: 30000 }, async t => {
   const { instance, connect, url, cookie, dir } = await start(t);
@@ -39,8 +100,10 @@ test('YouTube HLS input with separate audio becomes playable server HLS', { time
   assert.ok(room.current.media.bufferedUntil >= 8);
   const playlist = await fetch(url + room.current.media.url, { headers: { Cookie: cookie } });
   assert.equal(playlist.status, 200);
-  assert.match(await playlist.text(), /#EXTINF:/);
-  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-headers', `Cookie: ${cookie}\r\n`,
+  const contents = await playlist.text();
+  assert.match(contents, /#EXTINF:/);
+  const first = await encryptedHLS(instance, url, cookie, room.current, contents);
+  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-allowed_extensions', 'ALL', '-headers', `Cookie: ${cookie}\r\n`,
     '-i', url + room.current.media.url, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
 
   t.mock.method(instance.youtube, 'extract', async () => ({ id: 'BaW_jenozKc', duration: 8 }));
@@ -54,12 +117,15 @@ test('YouTube HLS input with separate audio becomes playable server HLS', { time
   assert.equal(next.media.baseTime, 3, 'Next-video conversion starts at the chosen timestamp.');
   assert.ok(next.media.bufferedUntil >= 8);
   const preparedURL = next.media.url;
+  const nextPlaylist = await fetch(url + preparedURL, { headers: { Cookie: cookie } });
+  const prepared = await encryptedHLS(instance, url, cookie, next, await nextPlaylist.text());
+  assert.notDeepEqual(prepared.key, first.key, 'Each YouTube job has a fresh key.');
   instance.rooms.advance(room);
   assert.equal(room.playback.position, 3);
   assert.equal(room.current.media.url, preparedURL, 'Advancing reuses timestamped prebuffering.');
   instance.rooms.tick();
   assert.equal(room.playback.paused, false);
-  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-headers', `Cookie: ${cookie}\r\n`,
+  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-allowed_extensions', 'ALL', '-headers', `Cookie: ${cookie}\r\n`,
     '-i', url + preparedURL, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
 });
 
@@ -105,13 +171,11 @@ test('real FFmpeg streams an incomplete upload, prebuffers the next item, and se
   assert.ok(contents.includes('#EXTINF:'));
   assert.ok(!contents.includes('#EXT-X-ENDLIST'));
   assert.equal((await fetch(url + room.current.media.url)).status, 401);
-  const segment = contents.split('\n').find(s => s.endsWith('.ts'));
-  const segmentURL = url + room.current.media.url.replace('index.m3u8', segment);
-  const segmentResponse = await fetch(segmentURL, { headers: { Cookie: cookie } });
-  assert.equal(segmentResponse.status, 200);
-  assert.ok((await segmentResponse.arrayBuffer()).byteLength > 1000);
-  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-headers', `Cookie: ${cookie}\r\n`,
-    '-i', segmentURL, '-f', 'null', '-']);
+  const encrypted = await encryptedHLS(instance, url, cookie, room.current, contents);
+  const decoding = exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'mpegts',
+    '-i', 'pipe:0', '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
+  decoding.child.stdin.end(Buffer.concat(encrypted.decodedSegments));
+  await decoding;
   await send(uploadId, split, bytes.length);
   await until(() => room.current.media?.complete, 20000);
   const second = await create();
@@ -120,6 +184,12 @@ test('real FFmpeg streams an incomplete upload, prebuffers the next item, and se
   await until(() => room.queue[0]?.media?.bufferedUntil >= 4, 20000);
   const nextId = room.queue[0].id;
   const preparedURL = room.queue[0].media.url;
+  const nextJob = instance.media.jobs.get(nextId);
+  const nextKey = Buffer.from(nextJob.key);
+  assert.notDeepEqual(nextKey, encrypted.key, 'Identical uploads still get independent keys.');
+  await assert.rejects(createApp({ dataDir: dir, port: 0 }), /already in use/);
+  assert.deepEqual(await readFile(path.join(encrypted.job.keyDir, 'key.bin')), encrypted.key,
+    'A backend without the ownership lock cannot clean up live keys.');
   instance.rooms.control(room, { action: 'skip', revision: room.playback.revision });
   assert.equal(room.current.id, nextId);
   assert.equal(room.current.media.url, preparedURL);
@@ -128,13 +198,23 @@ test('real FFmpeg streams an incomplete upload, prebuffers the next item, and se
   instance.rooms.control(room, { action: 'previous', revision: room.playback.revision });
   assert.equal(room.current.source.uploadId, uploadId);
   assert.equal(room.queue[0].id, nextId);
-  t.diagnostic('Next-video segments were ready before skip; FFmpeg decoded a served HLS segment successfully.');
+  t.diagnostic('Next-video segments were ready before skip; FFmpeg decoded decrypted HLS segments successfully.');
   instance.rooms.control(room, { action: 'pause', revision: room.playback.revision });
   instance.rooms.control(room, { action: 'seek', position: 12, revision: room.playback.revision });
   const oldMediaURL = room.current.media.url;
   await instance.close();
+  await assert.rejects(stat(instance.media.keyDir), { code: 'ENOENT' });
+  await assert.rejects(stat(encrypted.job.keyDir), { code: 'ENOENT' });
+  await assert.rejects(stat(nextJob.keyDir), { code: 'ENOENT' });
+  assert.deepEqual(encrypted.job.key, Buffer.alloc(16), 'Closed jobs erase their in-memory keys.');
+  assert.deepEqual(nextJob.key, Buffer.alloc(16));
+  const staleDir = path.join(dir, 'media-keys', 'stale-run', 'old-job');
+  await mkdir(staleDir, { recursive: true, mode: 0o700 });
+  await writeFile(path.join(staleDir, 'key.bin'), encrypted.key, { mode: 0o600 });
+  await writeFile(path.join(staleDir, 'key-info'), 'stale key information', { mode: 0o600 });
   const restarted = await createApp({ dataDir: dir, port: 0 });
   t.after(() => restarted.close());
+  await assert.rejects(stat(staleDir), { code: 'ENOENT' });
   const restartedURL = await restarted.listen(0);
   const viewer = new WebSocket(restartedURL.replace('http', 'ws') + '/ws', { headers: { Cookie: cookie, Origin: restartedURL } });
   t.after(() => viewer.terminate());
@@ -150,9 +230,30 @@ test('real FFmpeg streams an incomplete upload, prebuffers the next item, and se
   assert.equal(recovered.current.media.baseTime, 12);
   assert.notEqual(recovered.current.media.url, oldMediaURL);
   assert.equal(recovered.queue[0].id, nextId);
-  await exec(restarted.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-headers', `Cookie: ${cookie}\r\n`,
+  const recoveredPlaylist = await fetch(restartedURL + recovered.current.media.url, { headers: { Cookie: cookie } });
+  const recoveredEncryption = await encryptedHLS(restarted, restartedURL, cookie, recovered.current, await recoveredPlaylist.text());
+  assert.notEqual(recoveredEncryption.job.id, encrypted.job.id);
+  assert.notDeepEqual(recoveredEncryption.key, encrypted.key, 'Restarted uploads get fresh keys.');
+  assert.notDeepEqual(restarted.media.jobs.get(nextId).key, nextKey);
+  assert.equal((await fetch(`${restartedURL}/direct/media/${encrypted.job.id}/key.bin`, { headers: { Cookie: cookie } })).status, 404);
+  await exec(restarted.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-allowed_extensions', 'ALL', '-headers', `Cookie: ${cookie}\r\n`,
     '-i', restartedURL + recovered.current.media.url, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
+  restarted.rooms.control(recovered, { action: 'seek', position: 4, revision: recovered.playback.revision });
+  await until(() => {
+    assert.notEqual(recovered.current.status, 'error', recovered.current.error);
+    return recovered.current.media?.complete && recovered.current.media.baseTime === 4;
+  }, 20000);
+  const seekPlaylist = await fetch(restartedURL + recovered.current.media.url, { headers: { Cookie: cookie } });
+  const seekEncryption = await encryptedHLS(restarted, restartedURL, cookie, recovered.current, await seekPlaylist.text());
+  assert.notEqual(seekEncryption.job.id, recoveredEncryption.job.id);
+  assert.notDeepEqual(seekEncryption.key, recoveredEncryption.key, 'Out-of-buffer seeks rotate the key and job.');
+  await recoveredEncryption.job.cleanup;
+  await assert.rejects(stat(recoveredEncryption.job.dir), { code: 'ENOENT' });
+  await assert.rejects(stat(recoveredEncryption.job.keyDir), { code: 'ENOENT' });
+  assert.deepEqual(recoveredEncryption.job.key, Buffer.alloc(16), 'Disposed jobs erase their in-memory keys.');
+  assert.equal((await fetch(`${restartedURL}/direct/media/${recoveredEncryption.job.id}/key.bin`, { headers: { Cookie: cookie } })).status, 404);
   await restarted.close();
+  await assert.rejects(stat(restarted.media.keyDir), { code: 'ENOENT' });
   t.diagnostic('A fresh backend rebuilt and decoded the saved upload at 12s and prebuffered the persisted queue.');
 });
 

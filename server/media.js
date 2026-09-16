@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, readdir, stat, rm } from 'node:fs/promises';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { chmod, mkdir, open, readFile, readdir, stat, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export function playlistProgress(contents, baseTime = 0) {
@@ -26,6 +26,7 @@ export class Media {
     this.youtube = youtube;
     this.jobs = new Map();
     this.dir = path.join(config.dataDir, 'media', randomUUID());
+    this.keyDir = path.join(config.dataDir, 'media-keys', path.basename(this.dir));
     this.closed = false;
     this.listening = false;
     this.polling = false;
@@ -37,7 +38,11 @@ export class Media {
 
   async init() {
     await rm(path.dirname(this.dir), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await rm(path.dirname(this.keyDir), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     await mkdir(this.dir, { recursive: true });
+    await mkdir(this.keyDir, { recursive: true, mode: 0o700 });
+    await chmod(path.dirname(this.keyDir), 0o700);
+    await chmod(this.keyDir, 0o700);
     this.rooms.on('prepare', () => this.schedule());
     this.rooms.on('seek', (room, position) => {
       const job = this.jobs.get(room.current.id);
@@ -81,7 +86,7 @@ export class Media {
   start(item, baseTime) {
     const id = randomUUID();
     const job = { id, item, baseTime, dir: path.join(this.dir, id), child: null, done: false, cancelled: false,
-      lastProgress: Date.now(), lastBuffered: baseTime, errors: '' };
+      key: randomBytes(16), keyDir: path.join(this.keyDir, id), lastProgress: Date.now(), lastBuffered: baseTime, errors: '' };
     this.jobs.set(item.id, job);
     item.status = 'processing';
     item.media = null;
@@ -105,6 +110,14 @@ export class Media {
 
   async run(job) {
     await mkdir(job.dir, { recursive: true });
+    await mkdir(job.keyDir, { recursive: true, mode: 0o700 });
+    await chmod(job.keyDir, 0o700);
+    const keyFile = path.resolve(job.keyDir, 'key.bin');
+    const keyInfoFile = path.join(job.keyDir, 'key-info');
+    await writeFile(keyFile, job.key, { flag: 'wx', mode: 0o600 });
+    await writeFile(keyInfoFile, `/direct/media/${job.id}/key.bin\n${keyFile}\n`, { flag: 'wx', mode: 0o600 });
+    await chmod(keyFile, 0o600);
+    await chmod(keyInfoFile, 0o600);
     const { item, baseTime } = job;
     const args = ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y'];
     let inputs;
@@ -146,7 +159,8 @@ export class Media {
       '-threads', '2', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
       '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-avoid_negative_ts', 'make_zero',
       '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'event', '-hls_list_size', '0',
-      '-hls_flags', 'independent_segments+temp_file', '-hls_segment_filename', path.join(job.dir, 'segment-%06d.ts'),
+      '-hls_key_info_file', keyInfoFile,
+      '-hls_flags', 'independent_segments+temp_file+periodic_rekey', '-hls_segment_filename', path.join(job.dir, 'segment-%06d.ts'),
       path.join(job.dir, 'index.m3u8'));
     await new Promise((resolve, reject) => {
       job.child = spawn(this.config.ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -236,7 +250,10 @@ export class Media {
     if (this.jobs.get(job.item.id) === job) this.jobs.delete(job.item.id);
     job.item.media = null;
     job.item.status = 'queued';
-    job.cleanup = Promise.resolve(job.task).then(() => rm(job.dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }))
+    job.cleanup = Promise.resolve(job.task).then(async () => {
+      job.key.fill(0);
+      await Promise.all([job.dir, job.keyDir].map(dir => rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })));
+    })
       .catch(error => console.error('Media cleanup:', error.message));
     this.retiring.add(job.id);
     this.cleanups.add(job.cleanup);
@@ -250,6 +267,6 @@ export class Media {
     const jobs = [...this.jobs.values()];
     for (const job of jobs) this.dispose(job);
     await Promise.all(this.cleanups);
-    await rm(this.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await Promise.all([this.dir, this.keyDir].map(dir => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })));
   }
 }

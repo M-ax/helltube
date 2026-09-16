@@ -30,6 +30,111 @@ npm start
 
 Open **http://127.0.0.1:3000**. To listen on the LAN, set `$env:HOST = '0.0.0.0'` before starting. Use a TLS reverse proxy for Internet access and forward WebSocket upgrades. Set `SECURE_COOKIES=true` and `ALLOWED_ORIGINS` to your exact public origin. Do not expose this application using its seeded password.
 
+## Cloudflare Worker frontend + bare-metal backend
+
+`worker.js` serves the built frontend and proxies API/WebSocket traffic. **Specify your bare-metal hostname as `BARE_METAL_ORIGIN` both in `wrangler.jsonc` and in the backend service environment.** No frontend rebuild is needed when changing the backend setting, but redeploy the Worker with matching settings. Leave the backend setting empty for the original single-server/Vite setup.
+
+```text
+Browser → Worker: frontend, API, WebSocket, YouTube playlists
+Browser → Worker cache: encrypted YouTube segments (90 seconds)
+Worker → bare metal: live authorization before every cached segment
+Browser → bare metal directly: HLS keys, upload bytes, uploaded-video HLS
+```
+
+### Bare metal
+
+Use a public, **DNS-only (not Cloudflare-proxied)** hostname such as `https://metal.example.net`, with a valid browser-trusted TLS certificate and HTTPS terminating on your machine. Do not use Cloudflare Tunnel for this hostname: keys and uploaded data must bypass Cloudflare. A local TLS reverse proxy should forward requests to Node, including WebSocket upgrades. Keep `/internal/*` inaccessible externally; FFmpeg uses it on loopback only. Disable proxy caching for this service, especially `/direct/*`, `/api/*`, and `/media/*`; avoid buffering direct uploads/responses. Preserve `Origin`, cookies, range headers, and `X-Helltube-Edge`.
+
+Set the following in the backend service manager (PowerShell equivalent below). Use a randomly generated secret of at least 32 characters, and configure that **same value** as the Worker's `EDGE_PROXY_SECRET` secret; do not put it in `wrangler.jsonc`, source control, or frontend build variables.
+
+```powershell
+$env:HOST = '127.0.0.1'
+$env:PORT = '3000'
+$env:SECURE_COOKIES = 'true'
+$env:ALLOWED_ORIGINS = 'https://watch.example.com'
+$env:BARE_METAL_ORIGIN = 'https://metal.example.net'
+$env:EDGE_PROXY_SECRET = '<your-random-shared-secret>'
+npm start
+```
+
+`BARE_METAL_ORIGIN` accepts only an HTTPS origin, without credentials, a path, query, or fragment. HTTP is allowed for loopback development. `ALLOWED_ORIGINS` must include the exact frontend origin (no trailing slash); CORS is enabled **only for `/direct/*`**, never the account API. Keys and upload/playback access use resource-scoped URLs rather than cross-site cookies, including when the frontend and backend use unrelated domains. Browser-facing direct requests omit cookies.
+
+### Ubuntu 26.04 LXC bootstrap
+
+For a **dedicated Ubuntu 26.04 container**, copy or clone this trusted checkout into the container, outside `/opt/helltube`, then run from its root:
+
+```bash
+sudo bash scripts/bootstrap-ubuntu.sh
+```
+
+Run as root without `sudo` if your minimal container does not have sudo installed. The script requires a real interactive terminal and a running systemd instance inside the LXC. It supports automatic Node installation on **amd64 and arm64**. It does not configure the LXC host, NAT, firewall, DNS records, or deploy the Worker.
+
+Before running:
+
+- Create a **DNS-only** Cloudflare A record for the backend pointing at your public IPv4 address, and forward TCP **80/443** to the container. This nginx configuration listens on IPv4; do not publish an AAAA record unless you also configure and verify IPv6 listeners/routing. Keep port **3000** private.
+- Prepare the backend hostname, your Let's Encrypt email, and the frontend HTTPS origin (for example `https://watch.example.com`). Leave the frontend origin blank to serve everything from the backend hostname instead.
+- Prepare a Cloudflare **API token** scoped to this zone with **Zone:DNS:Edit** and **Zone:Zone:Read** permissions. Alternatively, choose `key` to use a **Global API Key**, which also requires your Cloudflare account email. A scoped token is preferred because a global key has much broader access.
+- Allow outbound HTTPS and DNS. DNS-01 issuance requires the public zone to be hosted by Cloudflare, but does not require inbound port 80 or the backend record to be orange-cloud proxied.
+
+The bootstrap:
+
+- Installs missing system packages, nginx, Certbot and its Cloudflare DNS plugin, FFmpeg, and an isolated `yt-dlp[default]` Python environment. Enables Ubuntu's Universe repository when needed. Reuses a compatible system-wide Node/npm installation, or downloads the current **Node 24 LTS** archive from nodejs.org and checks its published SHA-256 checksum.
+- Reads the Cloudflare credential **without terminal echo** and writes `/etc/helltube/.secrets/cloudflare.ini`, owned by `root:root` with **mode `600`**, inside a **mode `700`** directory. Credentials never go into the checkout, service environment, or Certbot command-line arguments. Reruns offer to reuse or replace the file.
+- Obtains a Let's Encrypt certificate using DNS-01 with a 60-second propagation wait. Certbot retains the credentials-file reference for renewals. Enables `certbot.timer` and installs an nginx configuration-test/reload deploy hook.
+- Copies the checkout to `/opt/helltube/app`, installs locked npm dependencies and builds the frontend as the unprivileged `helltube` user, then makes application code root-owned. Runs one `helltube.service` process on loopback with persistent data in `/var/lib/helltube`.
+- Replaces seeded/default account passwords before starting the backend, using a generated initial password stored in `/etc/helltube/.secrets/admin-password` (root-only). Existing non-default passwords are preserved. Source-checkout `data` is **not** imported.
+- Configures HTTPS and WebSocket forwarding, blocks `/internal` and `/internal/*`, and disables proxy caching and request/response buffering. Uploads use the app's 512 KiB chunks, so the nginx per-request limit is 2 MiB, not the total video-size limit. Site access/error logs are disabled to prevent bearer URLs appearing in logs.
+- Checks backend readiness, validates nginx configuration, and makes a local HTTPS health request with certificate verification enabled.
+
+Retrieve the initial password privately as root, sign in as `admin`, and change it in Account. The saved initial password will not track later password changes:
+
+```bash
+sudo cat /etc/helltube/.secrets/admin-password
+```
+
+For a split Worker deployment, set the Worker's `BARE_METAL_ORIGIN` to the backend HTTPS origin and provision its `EDGE_PROXY_SECRET` using the value in `/etc/helltube/.secrets/edge-proxy-secret`. The bootstrap sets matching backend values in `/etc/helltube/helltube.env` (mode `600`); it does not change `wrangler.jsonc` or publish secrets to Cloudflare for you.
+
+Verify certificate renewal and inspect services inside the container:
+
+```bash
+sudo certbot renew --cert-name helltube --dry-run
+sudo systemctl status helltube nginx certbot.timer
+sudo journalctl -u helltube -n 100 --no-pager
+```
+
+Rerun from the updated checkout with the same hostname to redeploy. It preserves deployed data, generated secrets, existing changed passwords, and reusable certificates, but **overwrites the managed nginx site, service unit and environment file** and stops the backend during deployment. Back up `/var/lib/helltube` with the service stopped and `/etc/helltube` before upgrades. A failed deployment exits immediately; there is no automatic rollback. Fix the reported error and rerun. Existing nginx sites are left alone; resolve conflicting hostname/listener configurations before deployment.
+
+Node and yt-dlp are not automatically upgraded when already installed. Keep them current; update the managed yt-dlp environment with `sudo /opt/helltube/tools/bin/pip install --upgrade 'yt-dlp[default]'`. Keep the Cloudflare credential file for unattended renewals and protect any backups of it. For slower DNS propagation, adjust the 60-second Certbot setting before issuance.
+
+Bootstrap-specific checks (safe, no package installation or live certificate requests):
+
+```bash
+bash -n scripts/bootstrap-ubuntu.sh
+bash test/bootstrap.test.sh
+node --test test/bootstrap-admin.test.js
+```
+
+### Worker deployment
+
+1. Set `vars.BARE_METAL_ORIGIN` in `wrangler.jsonc` to the same bare-metal origin. `SEGMENT_CACHE_TTL` controls the short internal cache lifetime (default 90 seconds, maximum 120).
+2. Authenticate Wrangler with your Cloudflare account and provision `EDGE_PROXY_SECRET` using Cloudflare's dashboard secret binding or `wrangler secret put EDGE_PROXY_SECRET`. Never store the value as an ordinary Worker variable.
+3. Run `npm run deploy:worker`, then attach your frontend hostname (for example `watch.example.com`) as the Worker's custom domain. Set `ALLOWED_ORIGINS` to match it. The backend hostname must not route back to this Worker.
+4. Change the seeded administrator password before permitting external access.
+
+The deploy script builds `dist` before publishing. Wrangler is a development dependency; no Worker runtime is needed on bare metal. For local split-host testing, build first and use `npm run dev:worker`; put local `BARE_METAL_ORIGIN` and `EDGE_PROXY_SECRET` overrides in an ignored `.dev.vars`, use the same settings on the backend, and allow the local Worker origin in `ALLOWED_ORIGINS`. Keep `SECURE_COOKIES=false` for HTTP loopback. Do not override protected routes with Cloudflare cache rules or expose the assets binding through a separate unauthenticated media route.
+
+### Encryption, caching, and privacy limits
+
+FFmpeg encrypts MPEG-TS HLS using **AES-128**, with a random 16-byte key per job and a sequence-derived IV per segment. Far seeks/restarts create a new job and key. Keys and FFmpeg key-info files are kept separately from public segment directories and cleaned up with their jobs. Standard `hls.js` and native HLS decrypt during playback; no custom player crypto is required.
+
+Only successful, complete encrypted **YouTube** segments enter the shared cache. The Worker checks the live session, room membership, job, and file with the backend **before every hit**. It never caches playlists, API responses, keys, errors, ranges, or uploaded video. Browser-facing media responses are `no-store`; the short public TTL exists only on the private internal cache copy. Do not add CDN cache rules that override these headers. When the authorization server is unavailable, cached content is not served.
+
+The Cache API is local to each Cloudflare data center, not Tiered Cache. Misses, simultaneous requests, expiry, and eviction can still produce multiple origin fetches; this reduces bandwidth but does **not** guarantee one transfer globally. Uploaded videos deliberately consume bare-metal bandwidth per viewer instead. Worker request charges/quotas and applicable Cloudflare video-delivery terms still apply.
+
+Direct access URLs are **bearer credentials restricted to one media job or one upload**. They remain valid only while the issuing session is valid; every use rechecks current membership/ownership. They survive backend restarts and expire with the session, so native HLS can pause/resume without short-lived URL renewal. Logout/revocation immediately blocks new requests. Do not log query strings containing `grant`, publish these URLs, or persist them in browser storage. Already delivered keys, decoded buffers, or saved segments cannot be revoked; this is not DRM.
+
+Cloudflare receives encrypted segment bytes but no key responses in this design. It still sees metadata, sizes, timing, and scoped access URLs through API/playlists, and serves the client JavaScript. This protects against readable segments sitting in its cache, **not an actively untrusted provider obtaining keys or identifying content**. Provider-blind confidentiality needs an independently trusted client and authentication path. Safari/native HLS should be smoke-tested with your actual TLS hostnames before rollout.
+
 ## Watching together
 
 - Create a room or join **The living room**. Paste a YouTube video or playlist URL. Playlist submissions expand up to **200** playable entries per submission; queue size is capped at **500**. A URL with a `list` parameter adds the playlist.
@@ -91,6 +196,8 @@ Environment variables (set in PowerShell or your service manager; `.env` is not 
 | `CLEANUP_INTERVAL_MS` | `60000` | Interval for sweeping unreferenced uploads and streaming files |
 | `SECURE_COOKIES` | `false` | Set `true` behind HTTPS |
 | `ALLOWED_ORIGINS` | localhost Vite origins | Comma-separated additional trusted browser origins; same-origin always accepted |
+| `BARE_METAL_ORIGIN` | empty | Public DNS-only HTTPS backend origin for direct keys, uploaded-video playback, and upload chunks; also set in `wrangler.jsonc` |
+| `EDGE_PROXY_SECRET` | empty | Shared backend/Worker secret (at least 32 characters) enabling authenticated edge authorization; store as a Worker secret |
 
 Durable application state lives in **`data\helltube.sqlite`**, using Node's built-in SQLite support (no separate database installation). This includes accounts with salted scrypt hashes, sessions and their expiry/revocation, volume/mute preferences, rooms, ordered queues/playlist groups, five-item history, shared playback checkpoints, and upload metadata/offsets. Existing `users.json` accounts migrate transactionally without changing IDs or passwords; legacy account files are removed only after a successful migration. Invalid databases are not silently reset.
 
@@ -113,6 +220,7 @@ npm test
 npm run test:media
 npm run build
 npm run test:browser
+npm run test:worker
 # Optional: contacts YouTube (requires a working Internet connection and current yt-dlp).
 npm run test:youtube
 ```
@@ -120,5 +228,7 @@ npm run test:youtube
 `npm test` covers SQLite migration/rollback, session and volume persistence, restart recovery, periodic cleanup and retention, room clocks, queues/playlists/history, upload resumption/pacing, URL validation, and real HTTP/WebSocket connections. It requires FFmpeg for capability checks but does not contact YouTube. `test:media` generates a synthetic video with FFmpeg, confirms playable HLS **before upload completion**, decodes served media before and after a server restart, checks next-video preparation/history, and rejects malicious uploaded playlists. Fixtures live under ignored `test-artifacts` and clean themselves up. No external YouTube availability is assumed by the deterministic test suite.
 
 `test:browser` requires installed Google Chrome. It builds the app and uses Playwright to test two separate user sessions, admin creation/deletion, uploaded video decoding, sub-second synchronization, shared pause/seek, offline recovery, display-name changes, and mobile overflow. It also checks WebGL pixels against native decoded frames, fullscreen/HiDPI resizing, context recovery, native fallback, joystick spring motion/alignment, and reduced motion. Desktop/mobile screenshots are saved under `test-artifacts`. `test:youtube` exercises the complete real YouTube-to-HLS path; set `YOUTUBE_TEST_URL` to test another public video or playlist. Its success depends on YouTube availability and access policies.
+
+`test:worker` uses local Wrangler and Chrome with distinct frontend/backend origins. It checks real WebSocket proxying, direct upload and encrypted playback, cookie-free key delivery, shared segment caching, and authorization of warm cache hits using synthetic media; it does not deploy to Cloudflare or contact YouTube. Production DNS/TLS configuration, global cache behavior, and Safari/native HLS still require deployment smoke tests.
 
 Implementation: `server\rooms.js` (state engine), `server\media.js` (job scheduler/HLS), `server\uploads.js` (growing sources/pacing), `server\youtube.js` (extraction), `server\auth.js` (accounts), `server\app.js` (HTTP/WebSockets), and `src` (Svelte client). See `CONTRACT.md` for API details.

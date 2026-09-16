@@ -9,10 +9,13 @@
   "scripts": {
     "dev": "concurrently -k -n server,web \"node --watch server/main.js\" \"vite --host 127.0.0.1\"",
     "build": "vite build",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "npm run build && wrangler deploy",
     "start": "node server/main.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:media": "node --test test/media.integration.js",
     "test:browser": "npm run build && node --test test/browser.integration.js",
+    "test:worker": "npm run build && node --test test/worker.integration.js",
     "test:youtube": "node --test test/youtube.integration.js"
   },
   "dependencies": {
@@ -25,6 +28,7 @@
     "@sveltejs/vite-plugin-svelte": "^6.2.0",
     "concurrently": "^9.2.1",
     "playwright": "^1.63.0",
-    "vite": "^7.1.7"
+    "vite": "^7.1.7",
+    "wrangler": "^4.132.0"
   }
 }

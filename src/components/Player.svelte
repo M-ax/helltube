@@ -3,7 +3,8 @@
     import Hls from 'hls.js';
     import Icon from './Icon.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
-    import {targetPosition, driftCorrection, mediaUrl, time} from '../lib/format.js';
+    import {targetPosition, driftCorrection, time} from '../lib/format.js';
+    import {delivery, isSameOriginUrl} from '../lib/delivery.js';
     import {createVideoRenderer} from '../lib/video-renderer.js';
     import {createSeekPreview} from '../lib/seek-preview.js';
 
@@ -31,6 +32,7 @@
     let hls;
     let sourceKey = '';
     let sourceGeneration = 0;
+    let sourceController;
     let initialAlign = true;
     let alignedRevision = -1;
     let playPending = false;
@@ -203,6 +205,8 @@
 
     function cleanupSource() {
         sourceGeneration++;
+        sourceController?.abort();
+        sourceController = null;
         playing = false;
         controlsVisible = true;
         seekCenter = null;
@@ -221,7 +225,7 @@
         playPending = false;
     }
 
-    function attach(id, url, baseTime) {
+    async function attach(id, url, baseTime) {
         const key = `${id || ''}|${url || ''}|${baseTime || 0}`;
         if (sourceKey === key) return;
         cleanupSource();
@@ -233,11 +237,18 @@
         scrubbing = false;
         position = targetPosition(room, clockOffset);
         if (!url) return;
-        const source = mediaUrl(url);
-        if (!source) {
-            playerError = 'The server supplied an invalid media URL. Media must be served from this Helltube instance.';
+        const generation = sourceGeneration;
+        sourceController = new AbortController();
+        let source;
+        try {
+            source = await delivery.resolveMediaUrl(url, {signal: sourceController.signal});
+        } catch (error) {
+            if (generation !== sourceGeneration) return;
+            playerError = error.message || 'The video access URL could not be loaded. Please retry playback.';
+            localBuffering = false;
             return;
         }
+        if (generation !== sourceGeneration) return;
         const target = Math.max(0, targetPosition(room, clockOffset) - (baseTime || 0));
         if (Hls.isSupported()) {
             const instance = new Hls({
@@ -251,8 +262,8 @@
                 maxLiveSyncPlaybackRate: 1,
                 liveMaxLatencyDurationCount: Infinity,
                 lowLatencyMode: false,
-                xhrSetup: (xhr) => {
-                    xhr.withCredentials = true;
+                xhrSetup: (xhr, url) => {
+                    xhr.withCredentials = isSameOriginUrl(url);
                 },
             });
             hls = instance;
@@ -261,11 +272,15 @@
                 renderer?.setGhost(frame);
             });
             let recovered = false;
-            instance.on(Hls.Events.MEDIA_ATTACHED, () => instance.loadSource(source));
+            instance.on(Hls.Events.MEDIA_ATTACHED, () => {
+                if (generation === sourceGeneration) instance.loadSource(source);
+            });
             instance.on(Hls.Events.MANIFEST_PARSED, () => {
+                if (generation !== sourceGeneration) return;
                 instance.startLoad(Math.max(0, targetPosition(room, clockOffset) - (baseTime || 0)));
             });
             instance.on(Hls.Events.ERROR, (_event, data) => {
+                if (generation !== sourceGeneration) return;
                 if (!data.fatal) return;
                 if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
                     recovered = true;
@@ -420,7 +435,7 @@
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + 28}px`}>
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video bind:this={video} playsinline preload="auto" class:video-visible={!!media}
+        <video bind:this={video} playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
                class:webgl-source={webglActive}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
                on:canplay={sync} on:waiting={() => localBuffering = true}

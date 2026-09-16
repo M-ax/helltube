@@ -1,5 +1,6 @@
 import {get, writable} from 'svelte/store';
 import {api} from './api.js';
+import {delivery, DeliveryError, uploadTransferUrl} from './delivery.js';
 
 export const videoFileAccept = 'video/*,.mkv,.mov,.mp4,.webm,.avi,.m4v,.ts,.mts,.m2ts,.m2t,.mpg,.mpeg,.mpe,.m1v,.m2v,.ogv,.ogm,.3gp,.3g2,.flv,.f4v,.wmv,.asf,.vob,.divx,.qt,.mxf,.rm,.rmvb';
 
@@ -52,6 +53,7 @@ export function readVideoMetadata(file, signal) {
 
 export function createUploadManager(userId, {
     request = api,
+    getDeliveryConfig = delivery.getConfig,
     wait = sleep,
     now = () => performance.now(),
     metadata = readVideoMetadata,
@@ -99,6 +101,7 @@ export function createUploadManager(userId, {
         workers.set(id, controller);
         patch(id, {state: 'checking', error: '', rate: 0});
         let status = null;
+        let config;
         let retries = 0;
         try {
             while (!signal.aborted) {
@@ -120,12 +123,15 @@ export function createUploadManager(userId, {
                     patch(id, {state: delay ? 'pacing' : 'uploading', error: ''});
                     if (delay) await wait(delay, signal);
                     signal.throwIfAborted();
+                    config ??= await getDeliveryConfig();
+                    signal.throwIfAborted();
+                    const destination = uploadTransferUrl(id, status.transferUrl, config);
                     const offset = status.received;
                     const chunk = item.file.slice(offset, Math.min(offset + item.chunkSize, item.size));
                     patch(id, {state: 'uploading'});
                     // Only the PUT round trip is measured. Server-imposed waits never reduce the measured transfer rate.
                     const started = now();
-                    status = checkStatus(await request(`/api/uploads/${encodeURIComponent(id)}?offset=${offset}`, {
+                    status = checkStatus(await request(`${destination}${destination.includes('?') ? '&' : '?'}offset=${offset}`, {
                         method: 'PUT', body: chunk, signal,
                     }), item.size);
                     const elapsed = Math.max(1, now() - started);
@@ -139,6 +145,7 @@ export function createUploadManager(userId, {
                     retries = 0;
                 } catch (error) {
                     if (signal.aborted) throw error;
+                    if (error instanceof DeliveryError) throw error;
                     if (error.status && error.status < 500 && ![408, 409, 429].includes(error.status)) throw error;
                     if (++retries > 5) throw error;
                     patch(id, {state: 'retrying', error: error.message, rate: 0});

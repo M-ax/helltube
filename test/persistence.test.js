@@ -116,9 +116,14 @@ test('periodic cleanup deletes unreferenced files but protects current, queue an
     uploads.push(instance.uploads.get(uploadId));
   }
   const historyDir = path.join(instance.media.dir, 'history-job');
+  const historyKeyDir = path.join(instance.media.keyDir, 'history-job');
   await mkdir(historyDir);
+  await mkdir(historyKeyDir);
   await writeFile(path.join(historyDir, 'index.m3u8'), 'keep');
-  instance.media.jobs.set(uploads[2].item.id, { id: 'history-job', item: uploads[2].item, done: true, dir: historyDir });
+  const key = Buffer.alloc(16, 1);
+  await writeFile(path.join(historyKeyDir, 'key.bin'), key);
+  instance.media.jobs.set(uploads[2].item.id, { id: 'history-job', item: uploads[2].item, done: true,
+    dir: historyDir, keyDir: historyKeyDir, key });
   for (let i = 0; i < 7; i++) instance.rooms.advance(room);
   await writeFile(path.join(instance.uploads.dir, 'orphan'), 'delete');
   await mkdir(path.join(instance.media.dir, 'orphan-job'));
@@ -132,9 +137,12 @@ test('periodic cleanup deletes unreferenced files but protects current, queue an
   }
   for (const upload of uploads.slice(2)) assert.ok((await stat(upload.file)).isFile());
   assert.equal(await readFile(path.join(historyDir, 'index.m3u8'), 'utf8'), 'keep');
+  assert.deepEqual(await readFile(path.join(historyKeyDir, 'key.bin')), key);
   instance.rooms.advance(room);
   await instance.cleanup();
   await assert.rejects(stat(historyDir), { code: 'ENOENT' });
+  await assert.rejects(stat(historyKeyDir), { code: 'ENOENT' });
+  assert.deepEqual(key, Buffer.alloc(16));
   await assert.rejects(stat(uploads[2].file), { code: 'ENOENT' });
   assert.ok((await stat(instance.store.file)).isFile());
 });

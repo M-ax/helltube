@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { setImmediate as tick } from 'node:timers/promises';
 import { get } from 'svelte/store';
 import { createUploadManager } from '../src/lib/uploads.js';
 import { until } from './helpers.js';
 
+const localDeliveryConfig = async () => ({ bareMetalOrigin: '' });
+
 test('upload manager restores from the server without browser storage and resumes the acknowledged offset', async t => {
   const requests = [];
   const file = new File(['partrest'], 'clip.mp4', { lastModified: 123 });
-  const manager = createUploadManager('viewer', { request: async (url, options = {}) => {
+  const manager = createUploadManager('viewer', { getDeliveryConfig: localDeliveryConfig, request: async (url, options = {}) => {
     requests.push({ url, options });
     if (url === '/api/uploads') return { uploads: [{ id: 'saved', roomId: 'lobby', roomName: 'Room', name: file.name,
       size: 8, received: 4, lastModified: 123, chunkSize: 512 * 1024 }] };
@@ -29,7 +32,7 @@ test('upload manager restores from the server without browser storage and resume
 
 test('late upload restoration cannot duplicate a newly created transfer or revive a disposed manager', async t => {
   let resolveRestore;
-  const manager = createUploadManager('viewer', { metadata: async () => 10, request: async (url, options = {}) => {
+  const manager = createUploadManager('viewer', { getDeliveryConfig: localDeliveryConfig, metadata: async () => 10, request: async (url, options = {}) => {
     if (url === '/api/uploads') return new Promise(resolve => { resolveRestore = resolve; });
     if (options.method === 'POST') {
       assert.equal(options.body.lastModified, 123);
@@ -74,6 +77,7 @@ test('batch uploads probe at most four files and preserve ordered metadata, IDs,
   const result = { uploads: files.map((_, index) => ({ uploadId: `batch-${index}`, chunkSize: 2 })),
     playlistId: 'playlist-1', playlistTitle: 'Server-inferred series' };
   const manager = createUploadManager('viewer', {
+    getDeliveryConfig: localDeliveryConfig,
     metadata: file => {
       active++;
       peak = Math.max(peak, active);
@@ -164,6 +168,7 @@ test('batch validation accepts video MIME types or common video extensions, incl
     : new File(['video'], names[index % names.length], { type: 'application/octet-stream' }));
   let posts = 0;
   const manager = createUploadManager('viewer', {
+    getDeliveryConfig: localDeliveryConfig,
     metadata: async () => undefined,
     request: async (url, options = {}) => {
       if (url === '/api/uploads') return { uploads: [] };
@@ -306,6 +311,7 @@ test('add and one-file addMany retain the single upload endpoint and ungrouped r
       const result = { uploadId: 'single', chunkSize: 524288 };
       let uploaded = '';
       const manager = createUploadManager('viewer', {
+        getDeliveryConfig: localDeliveryConfig,
         metadata: async () => method === 'add' ? 12 : undefined,
         request: async (url, options = {}) => {
           requests.push({ url, options });
@@ -336,6 +342,7 @@ test('batch registration returns while inactive files wait and every file gets i
   let activateLater = false;
   let releaseWait;
   const manager = createUploadManager('viewer', {
+    getDeliveryConfig: localDeliveryConfig,
     metadata: async () => 10,
     wait: (delay, signal) => {
       assert.ok(delay >= 1000);
@@ -368,4 +375,193 @@ test('batch registration returns while inactive files wait and every file gets i
   releaseWait();
   await until(() => get(manager.transfers).every(item => item.state === 'complete'));
   assert.deepEqual(uploaded, ['one', 'two', 'three']);
+});
+
+test('direct uploads keep metadata proxied but send bounded chunks only to the granted destination', async t => {
+  const origin = 'https://delivery.example';
+  const id = '13bbba2f-6c67-42c7-abca-3bdf28241cc5';
+  const file = new File(['abcdefghij'], 'clip.mp4', { lastModified: 123 });
+  const requests = [];
+  const waits = [];
+  const rates = [];
+  let received = 2;
+  let version = 0;
+  let clock = 0;
+  let loseResponse = true;
+  const status = () => ({ received, complete: received === file.size, active: true, delayMs: 250,
+    transferUrl: `${origin}/direct/uploads/${id}?grant=opaque%2Bsession-${version}` });
+  const manager = createUploadManager('viewer', {
+    getDeliveryConfig: async () => ({ bareMetalOrigin: origin }),
+    metadata: async () => 10,
+    now: () => clock,
+    wait: async delay => { waits.push(delay); clock += delay; },
+    request: async (url, options = {}) => {
+      requests.push({ url, options });
+      if (url === '/api/uploads') return { uploads: [] };
+      if (options.method === 'POST') return { uploadId: id, chunkSize: 3 };
+      if (options.method === 'DELETE') return {};
+      if (options.method === 'PUT') {
+        assert.equal(url, `${status().transferUrl}&offset=${received}`);
+        const chunk = await options.body.text();
+        assert.ok(options.body.size <= 3);
+        assert.equal(chunk, (await file.text()).slice(received, received + 3));
+        received += chunk.length;
+        version++;
+        clock += 100;
+        if (loseResponse) {
+          loseResponse = false;
+          throw new Error('Response lost after saving the chunk');
+        }
+      } else assert.equal(url, `/api/uploads/${id}`);
+      return status();
+    },
+  });
+  t.after(() => manager.dispose());
+  t.after(manager.transfers.subscribe(items => { if (items[0]?.rate) rates.push(items[0].rate); }));
+  await manager.ready;
+  await manager.add(file, { id: 'room', name: 'Room' });
+  await until(() => ['complete', 'error'].includes(get(manager.transfers)[0].state));
+  assert.equal(get(manager.transfers)[0].state, 'complete', get(manager.transfers)[0].error);
+  const puts = requests.filter(item => item.options.method === 'PUT');
+  assert.deepEqual(puts.map(item => Number(new URL(item.url).searchParams.get('offset'))), [2, 5, 8]);
+  assert.equal(puts.every(item => item.url.startsWith(`${origin}/direct/uploads/`)), true);
+  assert.equal(requests.some(item => item.options.body instanceof Blob && item.url.startsWith('/api/')), false);
+  assert.deepEqual(waits, [250, 1000, 250, 250]);
+  assert.deepEqual([...new Set(rates)], [30, 27], 'pacing and recovery waits must not reduce the measured byte rate');
+  assert.equal(requests.filter(item => item.url === `/api/uploads/${id}`).length, 2);
+  assert.equal(requests.find(item => item.options.method === 'POST').url, '/api/rooms/room/uploads');
+  await manager.cancel(id);
+  assert.equal(requests.at(-1).url, `/api/uploads/${id}`);
+  assert.equal(requests.at(-1).options.method, 'DELETE');
+});
+
+test('direct upload configuration and missing or invalid grants fail closed without sending any bytes', async t => {
+  const origin = 'https://delivery.example';
+  const id = '13bbba2f-6c67-42c7-abca-3bdf28241cc5';
+  const valid = `${origin}/direct/uploads/${id}?grant=opaque`;
+  const cases = [
+    ...[undefined, null, '', `/api/uploads/${id}`, valid.replace(origin, 'https://other.example'),
+      valid.replace('https:', 'http:'), valid.replace(id, 'different-id'), `${valid}#hash`,
+      valid.replace('delivery.example', 'user:pass@delivery.example'),
+      valid.replace('/direct/uploads/', '/direct/media/'), `${valid}&offset=0`, valid.replace('grant=opaque', 'grant=')]
+      .map(transferUrl => ({ config: { bareMetalOrigin: origin }, transferUrl, error: /invalid direct upload URL/ })),
+    { config: {}, transferUrl: valid, error: /invalid delivery configuration/ },
+    { config: { bareMetalOrigin: 'http://public.example' }, transferUrl: valid, error: /invalid delivery configuration/ },
+    { config: { bareMetalOrigin: '' }, transferUrl: valid, error: /invalid direct upload URL/ },
+    { failure: new Error('Configuration unavailable'), transferUrl: undefined, error: /Configuration unavailable/ },
+  ];
+  for (const [index, { config, transferUrl, failure, error }] of cases.entries()) {
+    await t.test(`invalid destination ${index + 1}`, async t => {
+      const requests = [];
+      const manager = createUploadManager('viewer', {
+        getDeliveryConfig: async () => { if (failure) throw failure; return config; },
+        metadata: async () => 10,
+        wait: async () => {},
+        request: async (url, options = {}) => {
+          requests.push({ url, options });
+          if (url === '/api/uploads') return { uploads: [] };
+          if (options.method === 'POST') return { uploadId: id, chunkSize: 2 };
+          if (options.method === 'PUT') return { received: 4, complete: true };
+          return { received: 0, complete: false, active: true, transferUrl };
+        },
+      });
+      t.after(() => manager.dispose());
+      await manager.ready;
+      await manager.add(new File(['data'], 'clip.mp4'), { id: 'room', name: 'Room' });
+      await until(() => ['error', 'complete'].includes(get(manager.transfers)[0].state));
+      assert.equal(get(manager.transfers)[0].state, 'error');
+      assert.match(get(manager.transfers)[0].error, error);
+      assert.equal(requests.some(item => item.options.method === 'PUT'), false);
+      assert.equal(requests.some(item => item.options.body instanceof Blob), false);
+    });
+  }
+});
+
+test('a direct PUT response must supply a valid destination for the next chunk; resuming reacquires status', async t => {
+  const origin = 'https://delivery.example';
+  const id = '13bbba2f-6c67-42c7-abca-3bdf28241cc5';
+  const requests = [];
+  let received = 0;
+  let grant = 'first';
+  const manager = createUploadManager('viewer', {
+    getDeliveryConfig: async () => ({ bareMetalOrigin: origin }),
+    metadata: async () => 10,
+    request: async (url, options = {}) => {
+      requests.push({ url, options });
+      if (url === '/api/uploads') return { uploads: [] };
+      if (options.method === 'POST') return { uploadId: id, chunkSize: 2 };
+      if (options.method === 'PUT') {
+        received += options.body.size;
+        return { received, complete: received === 4 };
+      }
+      return { received, complete: false, active: true, transferUrl: `${origin}/direct/uploads/${id}?grant=${grant}` };
+    },
+  });
+  t.after(() => manager.dispose());
+  await manager.ready;
+  await manager.add(new File(['data'], 'clip.mp4'), { id: 'room', name: 'Room' });
+  await until(() => ['error', 'complete'].includes(get(manager.transfers)[0].state));
+  assert.equal(get(manager.transfers)[0].state, 'error');
+  assert.match(get(manager.transfers)[0].error, /invalid direct upload URL/);
+  assert.equal(received, 2);
+  assert.equal(requests.filter(item => item.options.method === 'PUT').length, 1);
+  grant = 'resumed';
+  manager.resume(id);
+  await until(() => get(manager.transfers)[0].state === 'complete');
+  assert.deepEqual(requests.filter(item => item.options.method === 'PUT').map(item => item.url), [
+    `${origin}/direct/uploads/${id}?grant=first&offset=0`, `${origin}/direct/uploads/${id}?grant=resumed&offset=2`,
+  ]);
+  assert.equal(requests.filter(item => item.url === `/api/uploads/${id}`).length, 2);
+});
+
+test('pause, cancel, and disposal stop direct uploads during config loading, pacing, or an in-flight PUT', async t => {
+  for (const stage of ['config', 'pacing', 'PUT']) {
+    for (const action of ['pause', 'cancel', 'dispose']) {
+      await t.test(`${action} during ${stage}`, async t => {
+        const id = '13bbba2f-6c67-42c7-abca-3bdf28241cc5';
+        const origin = 'https://delivery.example';
+        const config = { bareMetalOrigin: origin };
+        const status = { received: 0, complete: false, active: true, delayMs: stage === 'pacing' ? 1000 : 0,
+          transferUrl: `${origin}/direct/uploads/${id}?grant=opaque` };
+        const entered = Promise.withResolvers();
+        const pending = Promise.withResolvers();
+        const requests = [];
+        const manager = createUploadManager('viewer', {
+          getDeliveryConfig: async () => {
+            if (stage !== 'config') return config;
+            entered.resolve();
+            return pending.promise;
+          },
+          metadata: async () => 10,
+          wait: async () => { entered.resolve(); return pending.promise; },
+          request: async (url, options = {}) => {
+            requests.push({ url, options });
+            if (url === '/api/uploads') return { uploads: [] };
+            if (options.method === 'POST') return { uploadId: id, chunkSize: 2 };
+            if (options.method === 'PUT') { entered.resolve(); return pending.promise; }
+            if (options.method === 'DELETE') return {};
+            return status;
+          },
+        });
+        t.after(() => manager.dispose());
+        await manager.ready;
+        await manager.add(new File(['data'], 'clip.mp4'), { id: 'room', name: 'Room' });
+        await entered.promise;
+        const before = get(manager.transfers);
+        await manager[action](id);
+        pending.resolve(stage === 'config' ? config : { ...status, received: 2 });
+        await tick();
+        const puts = requests.filter(item => item.options.method === 'PUT');
+        assert.equal(puts.length, stage === 'PUT' ? 1 : 0);
+        assert.equal(puts.every(item => item.url.startsWith(`${origin}/direct/uploads/`) && item.options.signal.aborted), true);
+        if (action === 'pause') assert.equal(get(manager.transfers)[0].state, 'paused');
+        if (action === 'dispose') assert.equal(get(manager.transfers), before);
+        if (action === 'cancel') {
+          assert.deepEqual(get(manager.transfers), []);
+          assert.equal(requests.at(-1).url, `/api/uploads/${id}`);
+          assert.equal(requests.at(-1).options.method, 'DELETE');
+        }
+      });
+    }
+  }
 });

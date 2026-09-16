@@ -1,6 +1,7 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -11,6 +12,8 @@ import { Uploads, chunkSize } from './uploads.js';
 import { YouTube } from './youtube.js';
 import { Media, available } from './media.js';
 import { StateStore } from './store.js';
+import { DirectAccess, equalSecret } from './direct-access.js';
+import { deploymentOrigin, securityHeaders } from '../shared/deployment.js';
 
 export function validOrigin(origin, host, config) {
   return !origin || origin === `http://${host}` || origin === `https://${host}` || config.origins.includes(origin);
@@ -18,6 +21,8 @@ export function validOrigin(origin, host, config) {
 
 export async function createApp(overrides = {}) {
   const config = { ...defaults, ...overrides };
+  config.bareMetalOrigin = deploymentOrigin(config.bareMetalOrigin);
+  if (config.edgeProxySecret && config.edgeProxySecret.length < 32) throw new Error('EDGE_PROXY_SECRET must be at least 32 characters.');
   const store = new StateStore(config.dataDir);
   await store.init();
   try {
@@ -49,6 +54,7 @@ export async function createApp(overrides = {}) {
     throw error;
   }
   const capabilities = { ffmpeg: await available(config.ffmpeg), youtube: await available(config.ytdlp, ['--version']) };
+  const directAccess = new DirectAccess(accounts);
   const app = express();
   const server = createServer(app);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8192, perMessageDeflate: false });
@@ -57,11 +63,31 @@ export async function createApp(overrides = {}) {
   app.disable('x-powered-by');
   app.use((req, res, next) => {
     req.startedAt = performance.now();
-    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
-      'X-Frame-Options': 'DENY',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://i.ytimg.com data:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
-    if (!validOrigin(req.headers.origin, req.headers.host, config) || req.headers['sec-fetch-site'] === 'cross-site') {
+    res.set(securityHeaders(config.bareMetalOrigin));
+    if (/^\/(api|media|direct|internal)(\/|$)/.test(req.path)) res.set('Cache-Control', 'no-store');
+    req.edge = equalSecret(req.headers['x-helltube-edge'], config.edgeProxySecret);
+    if (req.headers['x-helltube-edge'] !== undefined && !req.edge) return next(httpError(403, 'Invalid edge proxy credentials.'));
+    const direct = req.path === '/direct' || req.path.startsWith('/direct/');
+    const trustedDirect = direct && config.bareMetalOrigin && config.origins.includes(req.headers.origin);
+    if (!validOrigin(req.headers.origin, req.headers.host, config) ||
+      (req.headers['sec-fetch-site'] === 'cross-site' && !trustedDirect)) {
       return next(httpError(403, 'Cross-origin requests are not allowed.'));
+    }
+    if (direct) {
+      if (req.edge) return next(httpError(403, 'Direct traffic must bypass the edge proxy.'));
+      if (trustedDirect) {
+        res.set('Access-Control-Allow-Origin', req.headers.origin);
+        res.vary('Origin');
+        res.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+      }
+      if (req.method === 'OPTIONS') {
+        const headers = String(req.headers['access-control-request-headers'] || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean);
+        if (!trustedDirect || !['GET', 'HEAD', 'PUT'].includes(req.headers['access-control-request-method']) ||
+          headers.some(header => !['content-type', 'range'].includes(header))) return next(httpError(403, 'Invalid direct request preflight.'));
+        res.set({ 'Access-Control-Allow-Methods': 'GET, HEAD, PUT', 'Access-Control-Allow-Headers': 'Content-Type, Range',
+          'Access-Control-Max-Age': '600' });
+        return res.status(204).end();
+      }
     }
     next();
   });
@@ -91,6 +117,25 @@ export async function createApp(overrides = {}) {
     return room;
   };
   const requireMedia = () => { if (!capabilities.ffmpeg) throw httpError(503, 'FFmpeg is missing. Install it and restart the server.'); };
+  const directUrl = (route, auth, scope) => `${config.bareMetalOrigin}${route}?grant=${directAccess.issue(auth, scope)}`;
+  const uploadStatus = (upload, auth, status = uploads.status(upload)) => ({ ...status,
+    ...(config.bareMetalOrigin ? { transferUrl: directUrl(`/direct/uploads/${upload.id}`, auth, `upload:${upload.id}`) } : {}) });
+  const identifyDirect = scope => (req, res, next) => {
+    if (req.query.grant !== undefined) {
+      req.auth = directAccess.authenticate(req.query.grant, scope(req));
+      return next();
+    }
+    if (config.bareMetalOrigin) return next(httpError(401, 'A direct access grant is required.'));
+    identify(req, res, next);
+  };
+  const mediaJob = (jobId, auth) => {
+    const job = [...media.jobs.values()].find(value => value.id === jobId && !value.cancelled);
+    if (!job) throw httpError(404, 'Media not found.');
+    const allowed = [...rooms.rooms.values()].some(room => [...room.members.values()].some(user => user.id === auth.user.id) &&
+      [room.current, ...room.queue, ...room.history].some(item => item?.id === job.item.id));
+    if (!allowed) throw httpError(403, 'Join the room to watch its media.');
+    return job;
+  };
   app.get('/api/health', (_req, res) => res.json({ ok: true, capabilities }));
   app.post('/api/login', async (req, res) => {
     limit(`login:${req.socket.remoteAddress}`, 10);
@@ -98,6 +143,22 @@ export async function createApp(overrides = {}) {
     res.set('Set-Cookie', cookie(token)).json({ user: publicUser(user), capabilities });
   });
   app.use('/api', identify, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.get('/api/config', (_req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin }));
+  app.get('/api/media/:jobId/access', (req, res) => {
+    const job = mediaJob(req.params.jobId, req.auth);
+    res.json({ url: config.bareMetalOrigin && job.item.kind === 'upload'
+      ? directUrl(`/direct/media/${job.id}/index.m3u8`, req.auth, `media:${job.id}`)
+      : `/media/${job.id}/index.m3u8` });
+  });
+  app.get('/api/edge/media/:jobId/:file', async (req, res) => {
+    if (!req.edge) throw httpError(403, 'Edge proxy credentials required.');
+    const job = mediaJob(req.params.jobId, req.auth);
+    if (job.item.kind !== 'youtube' || !Buffer.isBuffer(job.key) || job.key.length !== 16 ||
+      !/^segment-\d{6,}\.ts$/.test(req.params.file)) throw httpError(403, 'This media is not edge-cacheable.');
+    const file = await stat(path.join(job.dir, req.params.file)).catch(() => null);
+    if (!file?.isFile()) throw httpError(404, 'Media not found.');
+    res.json({ cacheable: true });
+  });
   app.post('/api/logout', (req, res) => {
     accounts.logout(req.auth.token);
     expireSockets();
@@ -163,10 +224,18 @@ export async function createApp(overrides = {}) {
     res.status(201).json(result);
   });
   app.get('/api/uploads', (req, res) => res.json({ uploads: uploads.list(req.auth.user.id) }));
-  app.get('/api/uploads/:id', (req, res) => res.json(uploads.status(uploads.get(req.params.id, req.auth.user.id))));
-  app.put('/api/uploads/:id', express.raw({ type: 'application/octet-stream', limit: chunkSize }), async (req, res) => {
+  app.get('/api/uploads/:id', (req, res) => res.json(uploadStatus(uploads.get(req.params.id, req.auth.user.id), req.auth)));
+  app.put('/api/uploads/:id', (req, _res, next) => next(config.bareMetalOrigin || req.edge
+    ? httpError(409, 'Send upload bytes directly to the transferUrl from the upload status endpoint.') : undefined),
+  express.raw({ type: 'application/octet-stream', limit: chunkSize }), async (req, res) => {
     const upload = uploads.get(req.params.id, req.auth.user.id);
     res.json(await uploads.append(upload, Number(req.query.offset), req.body, performance.now() - req.startedAt));
+  });
+  app.put('/direct/uploads/:id', identifyDirect(req => `upload:${req.params.id}`),
+  express.raw({ type: 'application/octet-stream', limit: chunkSize }), async (req, res) => {
+    const upload = uploads.get(req.params.id, req.auth.user.id);
+    const status = await uploads.append(upload, Number(req.query.offset), req.body, performance.now() - req.startedAt);
+    res.json(uploadStatus(upload, req.auth, status));
   });
   app.delete('/api/uploads/:id', async (req, res) => {
     const upload = uploads.get(req.params.id, req.auth.user.id);
@@ -179,22 +248,44 @@ export async function createApp(overrides = {}) {
     res.json({ ok: true });
   });
 
-  app.get('/media/:jobId/:file', identify, (req, res, next) => {
-    const job = [...media.jobs.values()].find(j => j.id === req.params.jobId);
-    if (!job || !/^(index\.m3u8|segment-\d{6,}\.ts)$/.test(req.params.file)) throw httpError(404, 'Media not found.');
-    const allowed = [...rooms.rooms.values()].some(room => [...room.members.values()].some(u => u.id === req.auth.user.id) &&
-      [room.current, ...room.queue, ...room.history].some(i => i?.id === job.item.id));
-    if (!allowed) throw httpError(403, 'Join the room to watch its media.');
-    res.set('Cache-Control', req.params.file.endsWith('.m3u8') ? 'no-store' : 'private, max-age=3600');
+  const serveMedia = async (req, res, next) => {
+    const job = mediaJob(req.params.jobId, req.auth);
+    if (!/^(index\.m3u8|segment-\d{6,}\.ts)$/.test(req.params.file)) throw httpError(404, 'Media not found.');
+    if (config.bareMetalOrigin && job.item.kind === 'upload' && !req.path.startsWith('/direct/')) {
+      throw httpError(409, 'Uploaded media must be streamed directly from bare metal.');
+    }
+    res.set('Cache-Control', 'no-store');
     res.type(req.params.file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
-    res.sendFile(path.join(job.dir, req.params.file), error => { if (error) next(error); });
+    if (req.params.file === 'index.m3u8' && config.bareMetalOrigin) {
+      let contents;
+      try { contents = await readFile(path.join(job.dir, 'index.m3u8'), 'utf8'); }
+      catch (error) { if (error.code === 'ENOENT') throw httpError(404, 'Media not found.'); throw error; }
+      const scope = `media:${job.id}`;
+      const keyUrl = directUrl(`/direct/media/${job.id}/key.bin`, req.auth, scope);
+      contents = contents.replace(/URI="[^"]*"/g, `URI="${keyUrl}"`);
+      if (job.item.kind === 'upload') {
+        contents = contents.replace(/^segment-\d{6,}\.ts$/gm, file => directUrl(`/direct/media/${job.id}/${file}`, req.auth, scope));
+      }
+      return res.send(contents);
+    }
+    if (req.params.file.endsWith('.ts') && job.key?.length === 16) res.set('X-Helltube-Encrypted', 'aes-128');
+    res.sendFile(path.join(job.dir, req.params.file), { cacheControl: false }, error => { if (error) next(error); });
+  };
+  app.get('/media/:jobId/:file', identify, serveMedia);
+  app.get('/direct/media/:jobId/key.bin', identifyDirect(req => `media:${req.params.jobId}`), (req, res) => {
+    const job = mediaJob(req.params.jobId, req.auth);
+    if (!Buffer.isBuffer(job.key) || job.key.length !== 16) throw httpError(404, 'Media key not found.');
+    res.set('Cache-Control', 'no-store').type('application/octet-stream').send(job.key);
   });
+  app.get('/direct/media/:jobId/:file', identifyDirect(req => `media:${req.params.jobId}`), serveMedia);
+  app.use(['/media', '/direct'], (_req, _res, next) => next(httpError(404, 'Media endpoint not found.')));
   app.use('/api', (_req, _res, next) => next(httpError(404, 'API endpoint not found.')));
   const dist = path.resolve(fileURLToPath(new URL('../dist', import.meta.url)));
   app.use(express.static(dist));
   app.get('/', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   app.use((error, _req, res, _next) => {
     if (res.headersSent) return res.destroy();
+    res.set('Cache-Control', 'no-store');
     const status = error.status || (error.type === 'entity.too.large' ? 413 : 500);
     if (status >= 500) console.error('Request:', error.message);
     res.status(status).json({ error: status >= 500 && !error.status ? 'The server could not complete this request. Check the server log.' : error.message });
@@ -276,6 +367,7 @@ export async function createApp(overrides = {}) {
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) { if (!ws.alive) ws.terminate(); else { ws.alive = false; ws.ping(); } }
     for (const [key, value] of limits) if (value.until < Date.now()) limits.delete(key);
+    directAccess.prune();
   }, 15000);
   tick.unref();
   heartbeat.unref();

@@ -1,8 +1,11 @@
 # Helltube client/server contract
 
-All HTTP requests are same-origin, cookie authenticated. JSON responses are objects. Errors are `{error: string}` with a non-2xx status. Passwords: 10–128 characters; usernames: 3–32 letters/numbers/underscore/hyphen. New installations seed `admin` / `garbageTime_` (show a reminder to change it).
+Account/control HTTP requests are same-origin and cookie authenticated; an optional Cloudflare Worker proxies them to bare metal. Direct media and upload requests use resource-scoped grants when `BARE_METAL_ORIGIN` is configured. JSON responses are objects. Errors are `{error: string}` with a non-2xx status. Passwords: 10–128 characters; usernames: 3–32 letters/numbers/underscore/hyphen. New installations seed `admin` / `garbageTime_` (show a reminder to change it).
 
 ## HTTP
+
+- `GET /api/config` -> `{bareMetalOrigin:string}` (authenticated). Empty means local/same-origin delivery. Only this configured origin may receive direct requests; never send cookies there.
+- `GET /api/media/:jobId/access` -> `{url}` after session/room authorization. Resolve each new `media.url` through this endpoint before attaching playback: YouTube remains same-origin, configured uploaded media uses a granted absolute bare-metal playlist URL.
 
 - `GET /api/me` -> `{user: {id,username,displayName,role,defaultPassword,preferences:{volume,muted}}, capabilities: {youtube,ffmpeg}}`, or 401. Volume defaults to `0.8`, mute to `false`.
 - `POST /api/login` `{username,password}` -> same shape as me.
@@ -19,9 +22,19 @@ All HTTP requests are same-origin, cookie authenticated. JSON responses are obje
 - `POST /api/rooms/:id/uploads` `{name,size,duration,mime,lastModified?:number,insertAt?:number}` -> `{uploadId,chunkSize:524288}`. Duration is obtained from a local video metadata element (or omitted if unavailable). Membership required. Queues the item immediately.
 - `POST /api/rooms/:id/uploads/batch` `{files:[{name,size,duration?,mime,lastModified?}],insertAt?:number}` -> `{uploads:[{uploadId,chunkSize:524288}],playlistId,playlistTitle}`. Accepts 1–100 files in selection order; responses correspond to files in that order. Two or more files share a new playlist ID and a server-inferred title from the longest common whole-word phrase in their filenames, ignoring extensions/case/separators (fallback: `Uploaded videos`). One file has null playlist fields. Validates the whole batch and atomically saves the queue and upload records before broadcasting; no partial additions on rejection. Counts as one submission; existing queue/storage limits still apply. Each upload uses the normal chunk/status endpoints below.
 - `GET /api/uploads` -> `{uploads:[{id,roomId,roomName,name,size,lastModified,received,duration,chunkSize}]}`. Own unfinished uploads from SQLite, allowing file reselection and resume after browser/server restart without browser storage.
-- `GET /api/uploads/:id` -> `{received,complete,delayMs,bufferSeconds,slow,active}` (uploader only). If `active:false`, wait before sending more chunks; media preparation is limited to current + next video.
+- `GET /api/uploads/:id` -> `{received,complete,delayMs,bufferSeconds,slow,active,transferUrl?}` (uploader only). If `active:false`, wait before sending more chunks; media preparation is limited to current + next video. In split deployments `transferUrl` is the scoped bare-metal URL for chunk PUTs; append `&offset=N`. Do not send file bytes through the Worker.
 - `PUT /api/uploads/:id?offset=N` binary chunk with `Content-Type: application/octet-stream` -> same status shape. Exactly one chunk in flight; retry with GET to recover offset; wait `delayMs` before next chunk. All size bytes arriving marks complete. `delayMs` is adaptive backpressure, not a fixed bandwidth cap.
 - `DELETE /api/uploads/:id` cancels own upload and removes its queued item -> `{ok:true}`.
+
+### Media and direct delivery
+
+- `/media/:jobId/index.m3u8` and `/media/:jobId/segment-NNNNNN.ts` are cookie/room authenticated. In split deployments only YouTube uses this route; uploaded media is rejected rather than proxied. Playlists are always uncached.
+- `/direct/media/:jobId/key.bin?grant=...` returns exactly 16 AES-128 key bytes, `Cache-Control: no-store`, after live session/room checks. FFmpeg playlists reference this URI; in split deployments it is absolute and must bypass Cloudflare. Keys are never served as segment files.
+- `/direct/media/:jobId/index.m3u8?grant=...` and `/direct/media/:jobId/segment-NNNNNN.ts?grant=...` deliver uploaded HLS from bare metal, uncached, with range support. Playlist key and segment URLs retain the scoped grant.
+- `PUT /direct/uploads/:id?grant=...&offset=N` uses the same bounded raw chunks, ownership checks, offsets, backpressure, and response shape as local uploads. Direct CORS permits only allowlisted frontend origins and GET/HEAD/PUT; OPTIONS allows `Content-Type` and `Range`. No credentialed cross-site cookies are required. In local mode `/direct/*` also accepts the normal session cookie.
+- `/api/edge/media/:jobId/:file` requires the shared `X-Helltube-Edge` secret plus the viewer cookie and room authorization, and returns `{cacheable:true}` only for existing encrypted YouTube segments. The Worker calls it before **every** segment cache lookup and fails closed on failure. The Worker rejects `/direct/*` and binary upload proxying; the backend rejects direct traffic carrying the edge marker too.
+
+Direct grants are session-bound HMAC capabilities, scoped to one media job or upload, not general API credentials. They expire with/revoke with the session and membership/ownership is checked on every use, so no periodic renewal or short-lived-grant revocation window is needed. Never log `grant` query strings. Cache lifetime is independent (90 seconds by default, 120 maximum); browser-facing data remains `no-store`. Native HLS and hls.js use standard AES-128 segment decryption with a fresh key per job and sequence-number IVs. A delivered key cannot be revoked.
 
 ## WebSocket `/ws`
 
