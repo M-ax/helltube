@@ -74,16 +74,21 @@ Before running:
 - Create a **DNS-only** Cloudflare A record for the backend pointing at your public IPv4 address, and forward TCP **80/443** to the container. This nginx configuration listens on IPv4; do not publish an AAAA record unless you also configure and verify IPv6 listeners/routing. Keep port **3000** private.
 - Prepare the backend hostname, your Let's Encrypt email, and the frontend HTTPS origin (for example `https://watch.example.com`). Leave the frontend origin blank to serve everything from the backend hostname instead.
 - Prepare a Cloudflare **API token** scoped to this zone with **Zone:DNS:Edit** and **Zone:Zone:Read** permissions. Alternatively, choose `key` to use a **Global API Key**, which also requires your Cloudflare account email. A scoped token is preferred because a global key has much broader access.
+- Optionally prepare a YouTube-only Netscape cookies export using [YouTube authentication](#youtube-authentication) below. This is an account session, **not a YouTube Data API key**; leave it unconfigured if anonymous extraction works.
+- To route YouTube through a VPN, prepare a standard WireGuard client profile outside the checkout. See [YouTube WireGuard VPN](#youtube-wireguard-vpn) for profile and LXC requirements.
 - Allow outbound HTTPS and DNS. DNS-01 issuance requires the public zone to be hosted by Cloudflare, but does not require inbound port 80 or the backend record to be orange-cloud proxied.
 
 The bootstrap:
 
 - Installs missing system packages, nginx, Certbot and its Cloudflare DNS plugin, FFmpeg, and an isolated `yt-dlp[default]` Python environment. Enables Ubuntu's Universe repository when needed. Reuses a compatible system-wide Node/npm installation, or downloads the current **Node 24 LTS** archive from nodejs.org and checks its published SHA-256 checksum.
 - Reads the Cloudflare credential **without terminal echo** and writes `/etc/helltube/.secrets/cloudflare.ini`, owned by `root:root` with **mode `600`**, inside a **mode `700`** directory. Credentials never go into the checkout, service environment, or Certbot command-line arguments. Reruns offer to reuse or replace the file.
+- Optionally imports a YouTube cookies file into `/etc/helltube/.secrets/youtube-cookies.txt` (`root:root`, **mode `600`**). Uses systemd `LoadCredential` to expose only that secret to the backend, without granting access to the other secrets. Reruns offer reuse, replacement, or disabling authentication; disabling retains the protected saved file.
+- Optionally imports `/etc/helltube/.secrets/youtube-wireguard.conf` (`root:root`, **mode `600`**) and installs WireGuard tools, nftables and a private Tinyproxy service. Both yt-dlp and YouTube FFmpeg downloads use the VPN; nginx, uploads and certificate renewal retain normal networking. Saved VPN profiles default to reuse, not disabling.
 - Obtains a Let's Encrypt certificate using DNS-01 with a 60-second propagation wait. Certbot retains the credentials-file reference for renewals. Enables `certbot.timer` and installs an nginx configuration-test/reload deploy hook.
 - Copies the checkout to `/opt/helltube/app`, installs locked npm dependencies and builds the frontend as the unprivileged `helltube` user, then makes application code root-owned. Runs one `helltube.service` process on loopback with persistent data in `/var/lib/helltube`.
 - Replaces seeded/default account passwords before starting the backend, using a generated initial password stored in `/etc/helltube/.secrets/admin-password` (root-only). Existing non-default passwords are preserved. Source-checkout `data` is **not** imported.
 - Configures HTTPS and WebSocket forwarding, blocks `/internal` and `/internal/*`, and disables proxy caching and request/response buffering. Uploads use the app's 512 KiB chunks, so the nginx per-request limit is 2 MiB, not the total video-size limit. Site access/error logs are disabled to prevent bearer URLs appearing in logs.
+- Offers opt-in [automatic bare-metal updates](#automatic-bare-metal-updates) from the repository's `main` branch, with isolated builds and a systemd timer. Blank preserves the current timer setting on reruns; new installations default to disabled.
 - Checks backend readiness, validates nginx configuration, and makes a local HTTPS health request with certificate verification enabled.
 
 Retrieve the initial password privately as root, sign in as `admin`, and change it in Account. The saved initial password will not track later password changes:
@@ -112,7 +117,115 @@ Bootstrap-specific checks (safe, no package installation or live certificate req
 bash -n scripts/bootstrap-ubuntu.sh
 bash test/bootstrap.test.sh
 node --test test/bootstrap-admin.test.js
+node --test test/youtube-cookies.test.js
+node --test test/youtube-vpn.test.js
+python3 test/wireguard.test.py
+# Linux/root: updater tests use temporary files and mocked external commands, not installed services:
+sudo python3 test/update.test.py
+# Linux with systemd and Tinyproxy installed (validates units; does not start them):
+bash test/bootstrap-units.test.sh
+# Optional root-only Linux network test; uses synthetic peers in private namespaces:
+sudo python3 test/wireguard.integration.py --run
 ```
+
+### Automatic bare-metal updates
+
+The bootstrap can install **`helltube-update.timer`** to poll **[`M-ax/helltube`, branch `main`](https://github.com/M-ax/helltube)** approximately every **five minutes**, with up to 30 seconds of jitter and an initial check two minutes after boot. Only that branch is tracked, not every branch or tag. Polling needs outbound HTTPS to GitHub and the npm registry, but **no GitHub token, webhook, inbound port, or additional secret**.
+
+**Enable on an existing container:** update your trusted checkout outside `/opt/helltube`, then rerun the bootstrap and answer **`yes`** to automatic updates. Reuse your existing secrets/VPN settings as appropriate; this one-time bootstrap redeploy still prompts for configuration.
+
+```bash
+git pull --ff-only
+sudo bash scripts/bootstrap-ubuntu.sh
+```
+
+The timer is enabled only after the bootstrap's deployment health checks succeed. Its first successful update establishes the Git revision baseline, so expect one build/restart even if your manual checkout was already current. Later checks do nothing when `main` has not changed. A successful manual bootstrap resets that baseline.
+
+For each new commit, the updater:
+
+- Fetches the exact observed commit into a fresh staging directory. If the branch changes between checking and fetching, it aborts safely and retries on a later check.
+- Runs locked `npm ci`, `npm test`, and the frontend build as a separate **`helltube-build`** account in a restricted systemd service, without access to production data or secrets. The existing backend remains online during this work. Builds have a 20-minute limit; unsupported Node/dependency requirements fail instead of silently upgrading the runtime.
+- Makes the candidate code root-owned, stops the backend, replaces `/opt/helltube/app`, and starts it again. It requires three consecutive loopback `/api/health` successes before recording the deployed revision. Restarts briefly interrupt playback/connections; this is not zero-downtime deployment.
+- Preserves `/var/lib/helltube` and `/etc/helltube`, including accounts, uploads, environment settings, certificates, cookies, and the WireGuard profile. A shared deployment lock prevents overlap with another update or the bootstrap. An already-stopped backend is left stopped.
+
+**Trust and scope:** enabling this automatically trusts future `main` commits and their npm dependencies to run as your backend, with its data and configured YouTube account access. Protect repository write access and review/merge changes accordingly. The updater does not verify commit signatures. Builds are isolated from production files, but still use host networking. Keep space under `/opt/helltube` for the running app, a staged build/npm cache, and one previous app copy.
+
+Updates replace application code, **not** nginx/systemd configuration, OS packages, Node, yt-dlp, or the Cloudflare Worker. The privileged updater and WireGuard helper are pinned in `/usr/local/lib/helltube` by the trusted bootstrap; downloaded app code is never used as a root deployment hook. Rerun the bootstrap to adopt infrastructure/helper changes. **Deploy the Worker separately** when frontend/API changes require it; this timer cannot keep a separately deployed Worker in sync.
+
+```bash
+# Check schedule and recent update/build results:
+sudo systemctl list-timers helltube-update.timer
+sudo journalctl -u helltube-update.service -n 200 --no-pager
+
+# Check for an update immediately (waits for build/restart if needed):
+sudo systemctl start helltube-update.service
+
+# Pause future automatic checks; this does not cancel an in-progress update:
+sudo systemctl disable --now helltube-update.timer
+
+# Resume automatic checks after setup/recovery:
+sudo systemctl enable --now helltube-update.timer
+```
+
+**Failures and recovery:** fetch, dependency, test, or build failures leave the old backend running and are retried on later checks. A failed startup/health check stops the candidate and leaves `/opt/helltube/update-state/pending.json`, which blocks further automatic deployments. Interrupted cutovers also require administrator review. The previous code is retained at `/opt/helltube/update-state/previous-app` after replacement; it is **not a data backup**. Before candidate startup, a failed code swap restores the old backend where possible.
+
+There is deliberately **no automatic rollback after candidate startup**: the new server may already have migrated SQLite or changed uploads. Disable the timer, inspect both update and backend journals, and back up the stopped server's data before repairing it. Use a trusted, schema-compatible checkout and rerun the bootstrap (choose updates disabled until the problem in `main` is resolved). Only a successful bootstrap clears the failure marker and revision baseline. Do not just delete the marker or copy old code over a potentially migrated database. Continue keeping your own consistent data/secrets backups as described above.
+
+### YouTube WireGuard VPN
+
+Helltube uses **yt-dlp**, with **FFmpeg fetching the extracted video/audio URLs**. VPN mode sends both through the same private HTTP proxy inside a WireGuard-only network namespace. This preserves the same public egress IP for extraction and playback, without changing the container's default route or moving nginx/the backend into the VPN.
+
+**Enable:** export/download a standard WireGuard client profile from your VPN provider, transfer it privately into the container **outside the checkout** (for example `/root/youtube-wireguard.conf`), and restrict it with `chmod 600`. Run `sudo bash scripts/bootstrap-ubuntu.sh` from the updated checkout and supply its absolute path at the WireGuard prompt. The profile is validated and atomically imported as `/etc/helltube/.secrets/youtube-wireguard.conf`, owned by `root:root`, mode **`600`**, inside the existing **`700`** secrets directory. Neither the app nor the proxy receives its private key. After import, remove your transfer copies and protect backups. Never put VPN keys in Worker secrets or frontend settings.
+
+Requirements:
+
+- The **LXC host kernel** must support WireGuard. The container must be permitted to create network/mount namespaces and veth interfaces and manage nftables (`CAP_NET_ADMIN` and namespace/mount permissions). An unprivileged/restricted LXC may need narrowly scoped host configuration; the bootstrap does not change the host or disable its security policy. Allow outbound UDP to the VPN endpoint. Failure aborts deployment, rather than enabling direct fallback.
+- Use one `[Interface]` with `PrivateKey`, `Address` and **numeric `DNS` server addresses reachable through the VPN**, and one `[Peer]` with `PublicKey`, `Endpoint` and `AllowedIPs` containing **`0.0.0.0/0`**. Optional `MTU`, `ListenPort`, `PresharedKey` and `PersistentKeepalive` are supported. IPv6 needs both a VPN IPv6 address and `::/0`; otherwise IPv6 egress is blocked. Localhost/link-local DNS stubs such as `127.0.0.53` are not supported.
+- Shell hooks (`PreUp`, `PostUp`, `PreDown`, `PostDown`), `SaveConfig`, custom `Table`, multiple peers and vendor-specific extensions are rejected, not executed. Use a plain full-tunnel profile; the bootstrap owns routing and DNS. Do not also start this profile with `wg-quick`.
+- The transport subnet **`169.254.77.0/30`** and names `helltube-youtube`, `ht-wg0`, `ht-vpn-host`, `ht-vpn-peer` are reserved by this deployment. Conflicts cause setup to fail.
+
+The proxy listens only on **`169.254.77.2:8888`**, accepts connections from the container's `169.254.77.1`, and is not an Internet-facing proxy. Its namespace has no ordinary Internet gateway: nftables allows outbound traffic through WireGuard and only established proxy replies over the veth link. DNS lookups for YouTube/media happen inside the VPN, without using the host's resolver daemon. Resolving a **VPN endpoint hostname itself** happens on the host before tunnel creation; use a numeric endpoint if that bootstrap DNS lookup must also be avoided. No request URLs are logged by the proxy. The bootstrap verifies a proxied HTTPS request to YouTube's public `robots.txt` before starting the backend; a successful handshake alone is not treated as a working connection.
+
+**Fail-closed:** a dead tunnel or stopped proxy makes YouTube requests fail; there is no automatic direct retry. Inherited `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` variants are removed from proxied subprocesses. The web app and upload playback remain on their original networking. This is egress isolation for these YouTube requests, not a sandbox for a compromised media parser; browser thumbnail fetches and browser-to-server traffic are not tunneled.
+
+Reruns offer **reuse / replace / disable**, with **blank meaning reuse** when a profile exists. Explicitly disabling restores direct YouTube access and stops the managed VPN/proxy, but retains the protected profile. To rotate credentials, rerun and choose replacement. After an administrator manually replaces the saved profile, restart **both services**:
+
+```bash
+sudo systemctl restart helltube-vpn helltube-youtube-proxy
+sudo systemctl status helltube-vpn helltube-youtube-proxy
+sudo journalctl -u helltube-vpn -n 100 --no-pager
+sudo ip netns exec helltube-youtube wg show ht-wg0 latest-handshakes
+# This third-party endpoint sees the VPN's public IP, not credentials.
+curl --fail --max-time 30 --noproxy '' --proxy http://169.254.77.2:8888 https://api.ipify.org
+```
+
+Confirm that IP matches your VPN provider, then add/play a video through your normal site. To verify the kill switch during a maintenance window, bring `ht-wg0` down inside `helltube-youtube` and repeat the explicit-proxy curl: it must fail, while `/api/health` and uploads remain reachable. Bring the interface back up afterward. Do not use `wg showconf` or publish profiles/dumps containing private keys.
+
+For a non-bootstrap deployment, **`YOUTUBE_PROXY=http://proxy-host:port`** applies to both yt-dlp and YouTube FFmpeg inputs. Only credential-free HTTP proxy origins are accepted; setting this variable alone does **not** create a VPN or firewall. You must supply equivalent isolated proxy networking. Empty/unset retains the existing direct behavior. A VPN does not guarantee that YouTube bot checks disappear, and does not remove the cookie-account ban risk described below.
+
+### YouTube authentication
+
+Helltube uses **yt-dlp**, not youtube-dl. A **YouTube Data API key does not sign in your account** and will not fix “Sign in to confirm you're not a bot.” Optional browser cookies are supplied to both metadata/playlist extraction and playback-source extraction, even with yt-dlp's `--ignore-config` option.
+
+**Account risk:** [yt-dlp's maintainers warn of temporary or permanent account bans](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies). Low-volume use by a few friends does not guarantee safety; there is no published ban-safe request threshold. Avoid using a valuable primary Google account. Everyone using this Helltube backend shares the configured YouTube identity, potentially including access to account-only content; this is not per-user YouTube login. Only share content you are authorized to access and redistribute.
+
+Export cookies on your own computer, not inside the headless LXC:
+
+1. Choose a reputable Netscape-format exporter from [yt-dlp's cookie-export FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp), such as **Get cookies.txt LOCALLY** for Chrome or **cookies.txt** for Firefox. Review its permissions and allow it in private browsing only when needed. Do not use online cookie-conversion services.
+2. Open a fresh private/incognito window and sign in to YouTube with the account you intend the backend to use. Complete any legitimate sign-in or verification prompts normally.
+3. In the **same tab**, navigate to `https://www.youtube.com/robots.txt`, keeping it the only private/incognito tab. Export **only `youtube.com` and its subdomain cookies** to `youtube-cookies.txt` in Netscape format, then close the entire private window and do not reopen that session. This follows yt-dlp's advice to avoid browser-driven cookie rotation.
+4. Transfer the export privately to a file inside the container, outside the checkout (for example `/root/youtube-cookies.txt` when using a root SSH account). Restrict it to its owner with `chmod 600 /root/youtube-cookies.txt`. Never paste cookies into chat, tickets, shell commands, frontend settings, or Worker secrets. Do not export your entire browser profile: it includes unrelated accounts and the bootstrap rejects non-YouTube cookie domains.
+5. From the updated checkout, run `sudo bash scripts/bootstrap-ubuntu.sh` and provide that file's absolute path at the optional YouTube cookies prompt. On later deployments choose reuse, replace, or disable as appropriate. The bootstrap validates/imports the file and restarts the backend. After successful import, remove the transfer/export copies you created, including the local browser download.
+
+The original secret remains root-only. The service receives a read-only credential snapshot, and each yt-dlp invocation uses its own temporary **mode `600`** working copy in a **mode `700`** directory. Working copies are removed after subprocess completion, including handled failures/cancellation; yt-dlp's cookie updates are deliberately not written back to the saved secret. Raw extractor errors are hidden while cookies are configured because malformed-cookie diagnostics can contain credential values.
+
+To refresh expired or revoked cookies, repeat the export and rerun the bootstrap choosing replacement. A direct administrator replacement of the saved file also requires `sudo systemctl restart helltube` to reload systemd's snapshot. To disable use, rerun the bootstrap and choose disable; revoke the exported session in your Google account as well if it may have leaked. Merely disabling Helltube's use does not revoke the session.
+
+For a non-bootstrap deployment, set **`YTDLP_COOKIES_FILE`** to a private, backend-readable Netscape file path and restart the backend. On Linux restrict the file to its owning service account (`600`) and parent directory (`700`); on Windows use equivalent account-only NTFS permissions. The source can be read-only because yt-dlp receives a copy. An unset/empty variable retains anonymous behavior; an unreadable configured file fails rather than silently continuing anonymously. Keep credentials outside the checkout; the ignore rules are only an additional safeguard.
+
+Cookies are **not a guaranteed bot-check fix**: keep yt-dlp and its JavaScript runtime current, avoid repeated retries and unnecessarily large playlists, and remember that queue preparation/seeks can make more requests than the number of videos pasted. Extraction is shared per media job, not repeated for every viewer. YouTube can still reject the container's IP or require a [Proof of Origin token](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide); automated PO-token provisioning is not included here.
+
+If you separately need a **YouTube Data API key** for an application using Google's official metadata API: create/select a project in [Google Cloud Console](https://console.cloud.google.com/), enable **YouTube Data API v3** under **APIs & Services → Library**, then choose **Credentials → Create credentials → API key**. Restrict it to **YouTube Data API v3** and the appropriate application restriction (for a server, its public egress IP). That key identifies the Cloud project, not a logged-in YouTube account; private account data needs OAuth authorization. Helltube does not consume that key.
 
 ### Worker deployment
 
@@ -190,6 +303,8 @@ Environment variables (set in PowerShell or your service manager; `.env` is not 
 | `DATA_DIR` | `data` | SQLite database, retained upload sources, and disposable streaming segments |
 | `FFMPEG_PATH` | `ffmpeg` | FFmpeg executable path |
 | `YTDLP_PATH` | `yt-dlp` | yt-dlp executable path |
+| `YTDLP_COOKIES_FILE` | empty | Optional private Netscape YouTube cookies file; backend-readable path, never the cookie contents (bootstrap configures this via systemd credentials) |
+| `YOUTUBE_PROXY` | empty | Optional HTTP proxy origin used by both yt-dlp and YouTube FFmpeg downloads; bootstrap sets its WireGuard-isolated proxy automatically |
 | `MAX_TRANSCODERS` | `4` | Global concurrent media jobs |
 | `MAX_UPLOAD_BYTES` | `10737418240` | Maximum individual upload (10 GiB) |
 | `MAX_STORAGE_BYTES` | `32212254720` | Shared upload/media budget (30 GiB; checked every 10s) |
@@ -211,7 +326,7 @@ Run **one Node process** per data directory, not a load-balanced cluster. A data
 
 Session cookies are HttpOnly/SameSite=Strict; HTTP and WebSocket origin checks, role checks, login/command/submission rate limits, bounded message/chunk sizes, upload ownership, and authenticated room-media checks are enforced. Password/role changes revoke sessions. The last administrator cannot be deleted or demoted. Only validated YouTube URLs reach yt-dlp, subprocesses do not use a shell, and uploaded network-playlist formats are denied to FFmpeg.
 
-Run media processing as an unprivileged OS account/container with CPU/disk limits and restricted egress if admitting untrusted users: FFmpeg and yt-dlp are external parsers, not a complete sandbox. The storage budget is a guardrail, not a filesystem quota. Native HLS fallback depends on browser buffering behavior; Chrome/Edge/Firefox use hls.js. YouTube live broadcasts, DRM, private/paid/age-gated content, and cookie-authenticated extraction are not supported. YouTube may rate-limit or require bot verification; those failures surface as errors and can be skipped. Only stream content you have permission to access and share.
+Run media processing as an unprivileged OS account/container with CPU/disk limits and restricted egress if admitting untrusted users: FFmpeg and yt-dlp are external parsers, not a complete sandbox. The storage budget is a guardrail, not a filesystem quota. Native HLS fallback depends on browser buffering behavior; Chrome/Edge/Firefox use hls.js. YouTube live broadcasts and DRM are not supported; private/paid/age-gated content is not guaranteed even with [optional cookie authentication](#youtube-authentication). YouTube may rate-limit or require bot verification; those failures surface as errors and can be skipped. Only stream content you have permission to access and share.
 
 ## Verification
 

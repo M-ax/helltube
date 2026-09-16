@@ -130,7 +130,9 @@ test('YouTube HLS input with separate audio becomes playable server HLS', { time
 });
 
 test('real FFmpeg streams an incomplete upload, prebuffers the next item, and serves authorized HLS', { timeout: 90000 }, async t => {
-  const { instance, api, connect, url, cookie, dir } = await start(t, { ffmpegLogLevel: 'debug' });
+  const { instance, api, connect, url, cookie, dir } = await start(t, {
+    ffmpegLogLevel: 'debug', youtubeProxy: 'http://127.0.0.1:1',
+  });
   assert.equal(instance.capabilities.ffmpeg, true);
   const sample = path.join(dir, 'sample.mp4');
   await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',

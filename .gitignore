@@ -7,3 +7,10 @@ data/
 .wrangler/
 coverage/
 test-artifacts/
+.secrets/
+cookies.txt
+youtube-cookies.txt
+youtube-wireguard.conf
+wg*.conf
+scripts/__pycache__/
+test/__pycache__/

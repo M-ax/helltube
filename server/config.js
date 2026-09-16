@@ -6,6 +6,8 @@ export const config = {
   dataDir: path.resolve(process.env.DATA_DIR || 'data'),
   ffmpeg: process.env.FFMPEG_PATH || 'ffmpeg',
   ytdlp: process.env.YTDLP_PATH || 'yt-dlp',
+  ytdlpCookiesFile: process.env.YTDLP_COOKIES_FILE || '',
+  youtubeProxy: process.env.YOUTUBE_PROXY || '',
   secureCookies: process.env.SECURE_COOKIES === 'true',
   origins: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173').split(',').map(value => value.trim()),
   bareMetalOrigin: process.env.BARE_METAL_ORIGIN || '',

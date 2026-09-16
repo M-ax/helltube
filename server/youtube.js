@@ -1,8 +1,12 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { httpError } from './config.js';
 import { makeItem } from './rooms.js';
 import { parseStartTime, youtubeTimeArgument } from '../shared/youtube-time.js';
+import { youtubeNetwork } from './youtube-network.js';
 
 function videoId(url) {
   return url.hostname === 'youtu.be' ? url.pathname.slice(1)
@@ -25,9 +29,9 @@ export function youtubeURL(value) {
   throw httpError(400, 'The URL must identify a YouTube video or playlist.');
 }
 
-export function runJSON(command, args, { signal, timeout = 90000 } = {}) {
+export function runJSON(command, args, { signal, timeout = 90000, redactErrors = false, env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true, signal, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { windowsHide: true, signal, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     let errors = '';
     let failure;
@@ -37,11 +41,13 @@ export function runJSON(command, args, { signal, timeout = 90000 } = {}) {
       if (output.length > 16 * 1024 * 1024) { failure = new Error('YouTube response was too large.'); child.kill(); }
     });
     child.stderr.on('data', data => { errors = (errors + data).slice(-3000); });
-    child.on('error', error => { clearTimeout(timer); reject(error); });
+    child.on('error', error => { failure ||= error; });
     child.on('close', code => {
       clearTimeout(timer);
       if (failure) return reject(failure);
-      if (code !== 0) return reject(new Error(errors.trim() || `yt-dlp exited with code ${code}.`));
+      if (code !== 0) return reject(new Error(redactErrors
+        ? 'YouTube extraction failed with configured cookies. Refresh the cookies and update yt-dlp; YouTube may still require bot verification. Raw diagnostics are hidden to protect credentials.'
+        : errors.trim() || `yt-dlp exited with code ${code}.`));
       try { resolve(JSON.parse(output)); } catch { reject(new Error('yt-dlp returned invalid metadata.')); }
     });
   });
@@ -58,8 +64,30 @@ export class YouTube {
     if (this.pending.size >= 4) throw httpError(429, 'YouTube is busy. Try again shortly.');
     const controller = new AbortController();
     this.pending.add(controller);
-    try { return await runJSON(this.config.ytdlp, [...this.baseArgs, ...args], { signal: controller.signal }); }
-    finally { this.pending.delete(controller); }
+    let cookieDir;
+    try {
+      const network = youtubeNetwork(this.config);
+      const proxyArgs = network.proxy ? ['--proxy', network.proxy] : [];
+      const cookieArgs = [];
+      if (this.config.ytdlpCookiesFile) {
+        try {
+          cookieDir = await mkdtemp(path.join(os.tmpdir(), 'helltube-youtube-'));
+          await chmod(cookieDir, 0o700);
+          const cookieFile = path.join(cookieDir, 'cookies.txt');
+          // yt-dlp rewrites its cookie jar; never share it between concurrent extractions.
+          await writeFile(cookieFile, await readFile(this.config.ytdlpCookiesFile), { mode: 0o600, flag: 'wx' });
+          cookieArgs.push('--cookies', cookieFile);
+        } catch {
+          throw new Error('Cannot prepare YouTube cookies. Check YTDLP_COOKIES_FILE is readable and the temporary directory is writable.');
+        }
+      }
+      return await runJSON(this.config.ytdlp, [...this.baseArgs, ...proxyArgs, ...cookieArgs, ...args], {
+        signal: controller.signal, redactErrors: !!this.config.ytdlpCookiesFile, env: network.env,
+      });
+    } finally {
+      this.pending.delete(controller);
+      if (cookieDir) await rm(cookieDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+    }
   }
 
   async items(value, user, startAt) {

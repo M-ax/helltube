@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir, open, readFile, readdir, stat, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { youtubeNetwork } from './youtube-network.js';
 
 export function playlistProgress(contents, baseTime = 0) {
   const durations = [...contents.matchAll(/^#EXTINF:([\d.]+)/gm)].map(m => Number(m[1]));
@@ -119,6 +120,7 @@ export class Media {
     await chmod(keyFile, 0o600);
     await chmod(keyInfoFile, 0o600);
     const { item, baseTime } = job;
+    const network = youtubeNetwork(item.kind === 'youtube' ? this.config : {});
     const args = ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y'];
     let inputs;
     if (item.kind === 'youtube') {
@@ -147,10 +149,11 @@ export class Media {
     const inputFormats = 'mov,matroska,webm,avi,mpegts,mpeg,mpegvideo,ogg' + (item.kind === 'youtube' ? ',hls' : '');
     for (const input of inputs) {
       if (baseTime > 0) args.push('-ss', String(baseTime));
+      if (network.proxy) args.push('-http_proxy', network.proxy);
       const headers = Object.entries(input.headers).filter(([key, value]) =>
         /^[a-zA-Z-]+$/.test(key) && !/[\r\n]/.test(String(value))).map(([k, v]) => `${k}: ${v}\r\n`).join('');
       if (headers) args.push('-headers', headers);
-      args.push('-rw_timeout', '120000000', '-protocol_whitelist', 'http,https,tcp,tls,crypto',
+      args.push('-rw_timeout', '120000000', '-protocol_whitelist', `http,https,tcp,tls,crypto${network.proxy ? ',httpproxy' : ''}`,
         '-format_whitelist', inputFormats, '-i', input.url);
     }
     args.push('-map', '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
@@ -163,7 +166,7 @@ export class Media {
       '-hls_flags', 'independent_segments+temp_file+periodic_rekey', '-hls_segment_filename', path.join(job.dir, 'segment-%06d.ts'),
       path.join(job.dir, 'index.m3u8'));
     await new Promise((resolve, reject) => {
-      job.child = spawn(this.config.ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      job.child = spawn(this.config.ffmpeg, args, { windowsHide: true, env: network.env, stdio: ['ignore', 'ignore', 'pipe'] });
       job.child.stderr.on('data', data => { job.errors = (job.errors + data).slice(-12000); });
       job.child.on('error', error => reject(new Error(`Could not start FFmpeg: ${error.code || error.message}`)));
       job.child.on('close', code => {
