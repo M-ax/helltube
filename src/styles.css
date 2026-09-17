@@ -1860,6 +1860,7 @@ ul, ol {
 
 .composer-heading {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 14px;
@@ -1878,6 +1879,8 @@ ul, ol {
 
 .source-switch {
     display: inline-flex;
+    flex-wrap: wrap;
+    max-width: 100%;
     gap: 2px;
     padding: 3px;
     border: 1px solid #383039;
@@ -1900,6 +1903,22 @@ ul, ol {
     color: #f1b08c;
     background: #362821;
 }
+
+.desktop-share-panel, .desktop-sharing-status {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px;
+    padding: 16px;
+    border: 1px solid #483833;
+    border-radius: 7px;
+    background: #19171c;
+}
+
+.desktop-share-panel > div { flex: 1 1 240px; min-width: 0; }
+.desktop-share-panel p { color: #b0a3ae; font-size: 12px; line-height: 1.6; margin: 7px 0 0; }
+.desktop-sharing-status { margin-top: 12px; justify-content: space-between; }
+.desktop-sharing-status > span { display: flex; align-items: center; gap: 8px; font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
 
 .source-switch button:hover:not(.active) {
     color: #e7d1d0;

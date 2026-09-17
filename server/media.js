@@ -87,7 +87,7 @@ export class Media {
     let running = [...this.jobs.values()].filter(j => !j.done).length;
     for (const item of wanted) {
       if (running >= this.config.maxTranscoders) break;
-      if (this.jobs.has(item.id) || item.status === 'error') continue;
+      if (this.jobs.has(item.id) || item.status === 'error' || item.kind === 'desktop') continue;
       if (item.kind === 'upload') {
         const upload = this.uploads.uploads.get(item.source.uploadId);
         if (!upload || (!upload.complete && upload.received < 64 * 1024)) continue;
@@ -97,9 +97,9 @@ export class Media {
     }
   }
 
-  start(item, baseTime) {
+  start(item, baseTime, input = null) {
     const id = randomUUID();
-    const job = { id, item, baseTime, dir: path.join(this.dir, id), child: null, done: false, cancelled: false,
+    const job = { id, item, baseTime, input, dir: path.join(this.dir, id), child: null, done: false, cancelled: false,
       key: randomBytes(16), keyDir: path.join(this.keyDir, id), lastProgress: Date.now(), lastBuffered: baseTime, errors: '' };
     this.jobs.set(item.id, job);
     item.status = 'processing';
@@ -180,6 +180,8 @@ export class Media {
       if (baseTime > 0 && item.duration > 0 && baseTime >= item.duration) {
         throw new Error(`Start time must be before the end of the video (${item.duration} seconds).`);
       }
+    } else if (item.kind === 'desktop') {
+      inputs = [{url: 'pipe:0', headers: {}}];
     } else {
       const upload = this.uploads.get(item.source.uploadId);
       job.inputComplete = upload.complete;
@@ -202,6 +204,11 @@ export class Media {
     const inputArgs = (start) => {
       const result = [];
       for (const input of inputs) {
+        if (item.kind === 'desktop') {
+          result.push('-probesize', '1048576', '-analyzeduration', '1000000',
+            '-protocol_whitelist', 'pipe', '-f', 'webm', '-i', 'pipe:0');
+          continue;
+        }
         if (start > 0) result.push('-ss', String(start));
         if (network.proxy) result.push('-http_proxy', network.proxy);
         const headers = Object.entries(input.headers).filter(([key, value]) =>
@@ -247,7 +254,7 @@ export class Media {
     }
     args.push(...inputArgs(baseTime));
     args.push('-progress', 'pipe:1', '-stats_period', '0.5', '-nostats',
-      '-map', item.kind === 'http' ? '0:v:0?' : '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
+      '-map', item.kind === 'http' ? '0:v:0?' : '0:v:0', '-map', item.kind === 'desktop' ? '0:a:0' : inputs.length > 1 ? '1:a:0?' : '0:a:0?',
       '-vf', 'scale=w=min(1280\\,iw):h=min(720\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '3000k', '-bufsize', '6000k',
       '-threads', '2', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
@@ -268,7 +275,11 @@ export class Media {
     await new Promise((resolve, reject) => {
       const command = /[\\/]/.test(this.config.ffmpeg) ? path.resolve(this.config.ffmpeg) : this.config.ffmpeg;
       job.child = spawn(command, args, { windowsHide: true, env: network.env,
-        ...(job.clearDir ? {cwd: job.clearDir} : {}), stdio: ['ignore', 'pipe', 'pipe'] });
+        ...(job.clearDir ? {cwd: job.clearDir} : {}), stdio: [job.input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+      if (job.input) {
+        job.child.stdin.on('error', () => {}); // FFmpeg reports input failures on close.
+        job.input.pipe(job.child.stdin);
+      }
       job.child.stdout.on('data', createProgressReader(progress => {
         if (job.cancelled || !reportProgress) return;
         job.item.preparation = { ...job.item.preparation, ...progress };
@@ -372,6 +383,7 @@ export class Media {
   }
 
   dispose(job) {
+    job.input?.destroy();
     if (job.cancelled) return;
     job.cancelled = true;
     job.probeController?.abort();

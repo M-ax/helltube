@@ -38,6 +38,13 @@ export class Rooms extends EventEmitter {
 
   persist(room) {
     if (!this.store) return;
+    // Live captures cannot survive a restart and must not appear in history.
+    // Persist the interrupted video/queue as the resumable room instead.
+    if (room.current?.kind === 'desktop') {
+      const current = room.queue[0] || null;
+      room = {...room, current, queue: room.queue.slice(1), resumeWhenReady: !!current,
+        playback: {...room.playback, paused: true, position: current?.resumeAt ?? current?.startAt ?? 0}};
+    }
     const itemState = item => item ? { ...item, media: null, preparation: null } : null;
     const state = { id: room.id, name: room.name, ownerId: room.ownerId, current: itemState(room.current),
       queue: room.queue.map(itemState), history: room.history.map(itemState), version: room.version,
@@ -145,10 +152,11 @@ export class Rooms extends EventEmitter {
   }
 
   advance(room) {
-    if (room.current) room.history = [room.current, ...room.history.filter(i => i.id !== room.current.id)].slice(0, 5);
+    if (room.current && room.current.kind !== 'desktop') room.history = [room.current, ...room.history.filter(i => i.id !== room.current.id)].slice(0, 5);
     room.current = room.queue.shift() || null;
     room.resumeWhenReady = !!room.current;
-    this.stamp(room, sponsorPosition(room.current, room.current?.startAt || 0), true);
+    this.stamp(room, sponsorPosition(room.current, room.current?.resumeAt ?? room.current?.startAt ?? 0), true);
+    if (room.current) delete room.current.resumeAt;
     if (room.current && (room.current.source.startAt || 0) !== room.playback.position) {
       this.emit('seek', room, room.playback.position);
     }
@@ -157,6 +165,7 @@ export class Rooms extends EventEmitter {
   }
 
   replay(room, itemId) {
+    if (room.current?.kind === 'desktop') throw httpError(409, 'Stop desktop sharing before playing a video from history.');
     const index = room.history.findIndex(i => i.id === itemId);
     if (index < 0) throw httpError(404, 'This video is no longer in the recent history.');
     const [item] = room.history.splice(index, 1);
@@ -173,6 +182,7 @@ export class Rooms extends EventEmitter {
     if (message.revision !== room.playback.revision) throw httpError(409, 'Playback changed. Please try again.');
     const { action } = message;
     if (action === 'skip') return this.advance(room);
+    if (room.current?.kind === 'desktop') throw httpError(409, 'Desktop sharing is live. Stop or skip the share to return to videos.');
     if (action === 'previous') {
       if (!room.history.length) throw httpError(409, 'No previous video yet.');
       return this.replay(room, room.history[0].id);
@@ -237,6 +247,9 @@ export class Rooms extends EventEmitter {
   tick() {
     for (const room of this.rooms.values()) {
       const item = room.current;
+      if (item?.kind === 'desktop' && item.media && this.position(room) < item.media.bufferedUntil - 8) {
+        this.stamp(room, Math.max(0, item.media.bufferedUntil - 4), false);
+      }
       const elapsed = room.playback.paused ? 0 : Math.max(0, (this.now() - room.playback.updatedAt) / 1000);
       const position = sponsorPosition(item, room.playback.position, elapsed);
       const linearPosition = room.playback.position + elapsed;

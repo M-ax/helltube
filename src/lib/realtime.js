@@ -10,6 +10,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     WebSocketImpl = WebSocket, now = () => performance.now(), request = api}) {
     const emptyReactions = () => ({roomId: null, ball: null, serverTime: 0, events: []});
     const reactions = writable(emptyReactions());
+    const desktopMessages = writable(null);
     const state = writable({
         status: 'offline', rooms: [], room: null, selectedRoomId: null,
         joined: false, clockOffset: 0, rtt: null, clockReady: false, overlay: null,
@@ -179,7 +180,9 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
             if (!message || typeof message !== 'object') return;
             lastResponse = now();
             attempt = 0;
-            if (message.type === 'pong') {
+            if (message.type?.startsWith('desktop:')) {
+                desktopMessages.set(message);
+            } else if (message.type === 'pong') {
                 const rtt = Date.now() - message.sentAt;
                 if (!Number.isFinite(rtt) || rtt < 0 || rtt > 20000 || !Number.isFinite(message.serverTime)) return;
                 samples.push({rtt, offset: message.serverTime - (message.sentAt + rtt / 2)});
@@ -297,5 +300,12 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         open();
     }
 
-    return {state, reactions, connect, disconnect, join, command, retry};
+    function sendCapture(blob) {
+        const current = get(state);
+        if (!current.joined || current.status !== 'connected' || !socket ||
+            socket.readyState !== WebSocketImpl.OPEN || socket.bufferedAmount + blob.size > 4 * 1024 * 1024) return false;
+        try { socket.send(blob); return true; } catch { reconnect(); return false; }
+    }
+
+    return {state, reactions, desktopMessages, sendCapture, connect, disconnect, join, command, retry};
 }

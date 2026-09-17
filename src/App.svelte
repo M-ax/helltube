@@ -14,6 +14,7 @@
     import {createRealtime} from './lib/realtime.js';
     import {createUploadManager} from './lib/uploads.js';
     import {watchDeployment} from './lib/deployment-updates.js';
+    import {createDesktopShare} from './lib/desktop-share.js';
 
     const deployedCommit = __DEPLOYED_COMMIT__;
     let backendCommit = null;
@@ -46,6 +47,8 @@
     const toastTimers = new Map();
     const client = createRealtime({onMessage: notify, onSessionEnded: sessionEnded});
     const realtimeState = client.state;
+    const desktop = createDesktopShare(client);
+    const desktopState = desktop.state;
     const reactions = client.reactions;
     $: room = $realtimeState.room;
     $: connected = $realtimeState.status === 'connected' && $realtimeState.joined && browserOnline;
@@ -274,7 +277,7 @@
 
     onMount(() => {
         const stopWatching = watchDeployment({
-            buildId: import.meta.env.PROD ? __BUILD_ID__ : null, canReload: () => !manager?.hasPendingFiles(),
+            buildId: import.meta.env.PROD ? __BUILD_ID__ : null, canReload: () => !manager?.hasPendingFiles() && !desktop.active(),
             onBackendCommit: commit => backendCommit = commit,
         });
         void checkSession();
@@ -285,6 +288,7 @@
         };
     });
     onDestroy(() => {
+        desktop.dispose();
         resetPreferences();
         client.disconnect();
         manager?.dispose();
@@ -493,9 +497,10 @@
                         {#key preferenceKey}
                             <Player username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
                                     overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
+                                    captureMuted={$desktopState.status !== 'idle' && $desktopState.status !== 'choosing'}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
-                        <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify}
+                        <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify} {desktop}
                                   onPreparation={value => preparation = value}/>
                         <Uploads {manager}/>
                         <section class="room-company" aria-label="People in this room">

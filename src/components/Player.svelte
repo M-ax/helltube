@@ -35,6 +35,7 @@
     export let preferences = {volume: 0.8, muted: false};
     export let preferenceKey = null;
     export let onPreferencesChange;
+    export let captureMuted = false;
     let video;
     let canvas;
     let effectsCanvas;
@@ -91,6 +92,7 @@
     const VOLUME_CURVE = 100;
 
     $: item = room?.current;
+    $: live = item?.kind === 'desktop';
     $: qualities = availableQualities(item?.media);
     $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
     $: crtVisible = !media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error');
@@ -109,14 +111,14 @@
     $: updateReactionRoom(connected ? room?.id : null);
     $: if (renderer) renderer.setBeachBallState(beachBall ? reactions.ball : null, (Date.now() + clockOffset - reactions.serverTime) / 1000);
     $: receiveReactions(reactions, connected, room?.id, reactionsEnabled);
-    $: if (soundMuted || muted || volume <= 0) reactionAudio?.stop();
+    $: if (soundMuted || muted || captureMuted || volume <= 0) reactionAudio?.stop();
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
     $: volumePosition = Math.round(Math.log1p(volume * (VOLUME_CURVE - 1)) / Math.log(VOLUME_CURVE) * 100) / 100;
     $: if (video) attach(item?.id, media?.url, media?.baseTime);
     $: if (video) {
         video.volume = volume;
-        video.muted = muted;
+        video.muted = muted || captureMuted;
     }
     $: if (!connected && video) video.pause();
     $: if (!connected || playerError || item?.status === 'error') previewRelative(null);
@@ -492,7 +494,7 @@
     }
 
     function control(action, value) {
-        if (!connected) return;
+        if (!connected || (live && action !== 'skip')) return;
         onCommand({type: 'control', action, ...(value !== undefined ? {position: value} : {})});
     }
 
@@ -558,7 +560,7 @@
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
             activeReactions = [...activeReactions.slice(-39), event];
-            if (event.kind === 'hitmarker' && !soundMuted && !muted) reactionAudio?.play(volume);
+            if (event.kind === 'hitmarker' && !soundMuted && !muted && !captureMuted) reactionAudio?.play(volume);
             const timer = setTimeout(() => {
                 activeReactions = activeReactions.filter(value => value.id !== event.id);
                 reactionTimers.delete(timer);
@@ -587,11 +589,11 @@
     }
 
     function pipeImpact() {
-        if (reactionsEnabled && connected && !soundMuted && !muted && !document.hidden) reactionAudio?.play(volume, 'metalpipe');
+        if (reactionsEnabled && connected && !soundMuted && !muted && !captureMuted && !document.hidden) reactionAudio?.play(volume, 'metalpipe');
     }
 
     function reactionSound(kind, level = 1) {
-        if (reactionsEnabled && connected && !soundMuted && !muted && !document.hidden) {
+        if (reactionsEnabled && connected && !soundMuted && !muted && !captureMuted && !document.hidden) {
             return reactionAudio?.play(volume * level, kind);
         }
     }
@@ -813,7 +815,7 @@
             {/if}
             <div class="seek-track" style={`--progress: ${progress}%; --buffered: ${buffered}%`}>
                 <input type="range" min="0" max={seekMax} step="0.1" value={displayedPosition}
-                       disabled={!connected || !media} aria-label="Seek shared video"
+                       disabled={!connected || !media || live} aria-label="Seek shared video"
                        aria-valuetext={`${time(displayedPosition)}${duration ? ` of ${time(duration)}` : ''}`}
                        on:input={(event) => { scrubbing = true; scrubPosition = Number(event.currentTarget.value); }}
                        on:change={seek} on:blur={() => scrubbing = false}/>
@@ -821,13 +823,13 @@
             <div class="transport-row" bind:clientHeight={transportRowHeight}>
                 <div class="shared-controls">
                     <button class="icon-button" title="Play previous video for everyone"
-                            aria-label="Play previous video for everyone" disabled={!connected || !room?.history?.length}
+                            aria-label="Play previous video for everyone" disabled={!connected || !room?.history?.length || live}
                             on:click={() => control('previous')}>
                         <Icon name="previous" size={19}/>
                     </button>
                     <button class="play-button"
                             aria-label={room?.playback.paused ? 'Play for everyone' : 'Pause for everyone'}
-                            disabled={!connected || !media || item?.status === 'error'}
+                            disabled={!connected || !media || item?.status === 'error' || live}
                             on:click={() => control(room.playback.paused ? 'play' : 'pause')}>
                         <Icon name={room?.playback.paused || !item ? 'play' : 'pause'} size={21}/>
                     </button>
@@ -835,11 +837,11 @@
                             disabled={!connected || !item} on:click={() => control('skip')}>
                         <Icon name="next" size={19}/>
                     </button>
-                    <span class="time-display">{time(displayedPosition)}<span> / {time(duration)}</span></span>
+                    <span class="time-display">{#if live}LIVE{:else}{time(displayedPosition)}<span> / {time(duration)}</span>{/if}</span>
                 </div>
                 <div class="relative-seek-control">
                     {#key `${room?.id}|${sourceKey}`}
-                        <SeekJoystick disabled={!connected || !media || !!playerError || item?.status === 'error'}
+                        <SeekJoystick disabled={!connected || !media || !!playerError || item?.status === 'error' || live}
                                       onSeek={seekRelative} onPreview={previewRelative}/>
                     {/key}
                 </div>
@@ -852,9 +854,9 @@
                             {/each}
                         </select>
                     {/if}
-                    <button class="icon-button" aria-label={muted ? 'Unmute on this device' : 'Mute on this device'}
-                            title="Volume is just for you" on:click={toggleMute}>
-                        <Icon name={muted || volume === 0 ? 'mute' : 'volume'} size={19}/>
+                    <button class="icon-button" aria-label={captureMuted ? 'Playback muted while sharing' : muted ? 'Unmute on this device' : 'Mute on this device'}
+                            disabled={captureMuted} title="Volume is just for you" on:click={toggleMute}>
+                        <Icon name={muted || captureMuted || volume === 0 ? 'mute' : 'volume'} size={19}/>
                     </button>
                     <input class="volume-range" aria-label="Volume on this device" type="range" min="0" max="1" step="0.01"
                            value={volumePosition} aria-valuetext={`${Math.round(volumePosition * 100)}%`}
@@ -873,6 +875,7 @@
            onEnabledToggle={toggleReactions}
            onSoundToggle={() => { soundMuted = !soundMuted; reactionAudio?.unlock(); }}/>
 <div class="now-playing">
+    {#if captureMuted}<p class="field-help" role="status">Your player is muted while sharing to prevent audio feedback. Viewers receive your shared audio.</p>{/if}
     <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
         <div class="now-playing-heading">
             <h2>{item?.title || 'A little less scrolling. A little more watching.'}</h2>

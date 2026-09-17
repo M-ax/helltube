@@ -34,6 +34,14 @@ Production browsers check the frontend's uncached `version.json` every 30 second
 
 Open **http://127.0.0.1:3000**. To listen on the LAN, set `$env:HOST = '0.0.0.0'` before starting. Use a TLS reverse proxy for Internet access and forward WebSocket upgrades. Set `SECURE_COOKIES=true` and `ALLOWED_ORIGINS` to your exact public origin. Do not expose this application using its seeded password.
 
+## Desktop sharing
+
+Open a room, choose **Share desktop**, then **Choose screen to share**. The browser picker lets you select an entire display, a window, or a tab. Enable **Share audio** in that picker. Helltube requires a live audio track and explains how to retry if the browser supplies video only. Chrome/Edge tab audio is an alternative when your browser or operating system cannot capture window/display audio; window sharing can include system-wide sound. No extension is required. Sharing requires HTTPS (or localhost for development), browser screen-capture permission, a compatible WebM/VP8/Opus MediaRecorder, and server FFmpeg.
+
+Sharing starts immediately for everyone, including people joining later. The current video is placed first in the queue at its interrupted position; stopping the share returns to that queue. The sender's player stays muted to prevent feedback without changing saved volume preferences. Live shares cannot be paused, sought, or replayed from history. Use **Stop sharing**, the browser's stop button, or the room's skip button to end the share. Leaving the room, signing out, disconnecting, or losing the audio/video capture also stops it; reconnecting requires a fresh screen selection. Automatic frontend updates wait until sharing ends.
+
+Video and audio travel together over the authenticated room WebSocket and are converted to the existing encrypted HLS stream (up to 720p, with several seconds of buffering). This is view-only sharing, not remote keyboard/mouse control. Temporary segments count toward `MAX_STORAGE_BYTES` and are removed when sharing ends. Shares have a four-hour limit; a stalled sender or overloaded connection is stopped instead of accumulating an unlimited buffer. The existing `/ws` proxy route supports capture with both local and Worker deployments.
+
 ## Cloudflare Worker frontend + bare-metal backend
 
 `worker.js` serves the built frontend and proxies API/WebSocket traffic. **Set `BARE_METAL_ORIGIN` to your bare-metal HTTPS origin both as a Worker runtime binding and in the backend service environment.** This checkout uses a Worker secret for that binding; it is intentionally not set in `wrangler.jsonc`. No frontend rebuild is needed when changing the backend setting, but deploy the Worker with matching settings. Leave the backend setting empty for the original single-server/Vite setup.

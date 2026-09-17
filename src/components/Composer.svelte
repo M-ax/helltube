@@ -7,6 +7,7 @@
     import {sourceKind, twitchURL} from '../../shared/media-source.js';
     import {videoFileAccept} from '../lib/uploads.js';
     import {parseStartTime, youtubeTimeArgument} from '../../shared/youtube-time.js';
+    import {desktopSupport} from '../lib/desktop-share.js';
 
     export let room = null;
     export let connected = false;
@@ -14,6 +15,9 @@
     export let manager;
     export let notify;
     export let onPreparation;
+    export let desktop;
+    const desktopState = desktop.state;
+    const desktopUnavailable = desktopSupport();
     let mode = 'youtube';
     let url = '';
     let insertAt = 'end';
@@ -78,7 +82,7 @@
         section?.scrollIntoView({behavior: 'smooth', block: 'center'});
         await tick();
         if (mode === 'youtube') urlInput?.focus({preventScroll: true});
-        else section?.querySelector('.upload-choose')?.focus({preventScroll: true});
+        else section?.querySelector(mode === 'desktop' ? '.desktop-start' : '.upload-choose')?.focus({preventScroll: true});
     }
 
     function position() {
@@ -223,6 +227,8 @@
                     on:dragover={dragOver} on:dragleave={event => dragLeave(event, 'files')} on:drop={dropFiles}>
                 <Icon name="upload" size={16}/>
                 <span>Your files</span></button>
+            <button class:active={mode === 'desktop'} aria-pressed={mode === 'desktop'} on:click={() => mode = 'desktop'}>
+                <Icon name="desktop" size={17}/><span>Share desktop</span></button>
         </div>
     </div>
     {#if mode === 'youtube'}
@@ -264,7 +270,7 @@
         </form>
         {#if busy === 'youtube'}<p class="field-help" role="status">Loading media information. This
             can take a minute; please don’t submit it again.</p>{/if}
-    {:else}
+    {:else if mode === 'upload'}
         <div class="upload-dropzone" class:drag-active={dropzoneDragDepth > 0 && !uploadUnavailable}
              role="group" aria-label="Upload local videos" aria-describedby="upload-help"
              aria-disabled={uploadUnavailable} aria-busy={busy === 'upload'}
@@ -285,7 +291,37 @@
         <input class="sr-only" tabindex="-1" aria-label="Select a local video to upload" type="file"
                multiple accept={videoFileAccept} bind:this={fileInput} on:change={chooseFile}
                disabled={uploadUnavailable}/>
+    {:else}
+        <div class="desktop-share-panel">
+            <span class="upload-symbol"><Icon name="desktop" size={23}/></span>
+            <div><strong>Your screen, live with sound.</strong>
+                <p id="desktop-help">Choose a window, an entire display, or a browser tab in the picker, and enable Share audio.
+                    Audio choices depend on your browser and operating system; a Chrome or Edge tab supports tab audio.
+                    Window sharing may include all system sound. Sharing starts now and returns to the queue when stopped.</p></div>
+            {#if $desktopState.status === 'idle'}
+                <button class="button primary desktop-start" aria-describedby="desktop-help"
+                        disabled={unavailable || !!busy || !!desktopUnavailable || room?.current?.kind === 'desktop'}
+                        on:click={desktop.start}>Choose screen to share</button>
+            {/if}
+        </div>
+        {#if desktopUnavailable}<p class="inline-note">{desktopUnavailable}</p>{/if}
+        {#if room?.current?.kind === 'desktop' && $desktopState.status === 'idle'}
+            <p class="field-help">{room.current.addedBy} is sharing. Skip the live share to return to videos.</p>
+        {/if}
     {/if}
+    {#if $desktopState.status !== 'idle'}
+        <div class="desktop-sharing-status" role="status">
+            <span><Icon name="desktop" size={17}/>{
+                $desktopState.status === 'choosing' ? 'Choose a screen and enable audio in the browser picker.' :
+                $desktopState.status === 'starting' ? 'Starting desktop sharing…' : `Sharing ${$desktopState.label} · Audio included`
+            }</span>
+            <button class="button secondary" on:click={() => desktop.stop()}>{
+                $desktopState.status === 'choosing' ? 'Cancel sharing' : 'Stop sharing'
+            }</button>
+        </div>
+    {/if}
+    {#if $desktopState.error}<p class="form-error" role="alert"><Icon name="warning" size={16}/>{$desktopState.error}</p>{/if}
+    {#if mode !== 'desktop'}
     <div class="composer-bottom">
         <p>{mode === 'youtube' ? 'YouTube videos and playlists, Twitch VODs, or public HTTP/HTTPS video and audio files.' : 'Playback can start while uploading, when the container allows.'}</p>
         <label for="insert-position">Insert<select id="insert-position" bind:value={insertAt}
@@ -295,6 +331,7 @@
                 <option value={String(index)}>{index === 0 ? 'Play next' : `At position ${index + 1}`}</option>
             {/each}
         </select></label></div>
+    {/if}
     {#if error}
         <p class="form-error" role="alert">
             <Icon name="warning" size={16}/>{error}</p>

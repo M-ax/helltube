@@ -23,5 +23,5 @@ export function twitchURL(value) {
   return `https://www.twitch.tv/videos/${id}`;
 }
 
-export const sourceLabels = { youtube: 'YouTube', twitch: 'Twitch VOD', http: 'Hosted media', upload: 'Local video' };
-export const sourceIcons = { youtube: 'youtube', twitch: 'twitch', http: 'link', upload: 'file' };
+export const sourceLabels = { youtube: 'YouTube', twitch: 'Twitch VOD', http: 'Hosted media', upload: 'Local video', desktop: 'Live desktop' };
+export const sourceIcons = { youtube: 'youtube', twitch: 'twitch', http: 'link', upload: 'file', desktop: 'desktop' };

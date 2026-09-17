@@ -21,6 +21,7 @@ import { StateStore } from './store.js';
 import { DirectAccess, equalSecret } from './direct-access.js';
 import { deploymentOrigin, securityHeaders, normalizeCommit } from '../shared/deployment.js';
 import { Deployment } from './deployment.js';
+import { DesktopShares } from './desktop.js';
 import { encryptedMediaFile, publicMediaFile, mediaContentType } from '../shared/media-files.js';
 
 export function validOrigin(origin, host, config) {
@@ -74,7 +75,8 @@ export async function createApp(overrides = {}) {
   const directAccess = new DirectAccess(accounts);
   const app = express();
   const server = createServer(app);
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 8192, perMessageDeflate: false });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024, perMessageDeflate: false });
+  const desktop = new DesktopShares(rooms, media, send);
   const reactions = new Reactions({ broadcast(roomId, message) {
     for (const ws of wss.clients) if (ws.roomId === roomId) send(ws, message);
   } });
@@ -380,6 +382,7 @@ export async function createApp(overrides = {}) {
     for (const ws of wss.clients) if (ws.roomId === room.id) send(ws, value);
   }
   function leave(ws) {
+    desktop.stop(ws);
     if (!ws.roomId) return;
     const room = rooms.get(ws.roomId);
     room.members.delete(ws.id);
@@ -418,12 +421,18 @@ export async function createApp(overrides = {}) {
     ws.alive = true;
     ws.on('pong', () => { ws.alive = true; });
     send(ws, { type: 'rooms', rooms: rooms.list() });
-    ws.on('message', bytes => {
+    ws.on('message', (bytes, binary) => {
+      let message;
       try {
         const current = accounts.authenticate(ws.cookie);
         if (!current) { expireSockets(); return; }
+        if (binary) {
+          limit(`capture:${ws.id}`, 80, 1000);
+          return desktop.write(ws, bytes);
+        }
         limit(`ws:${ws.id}`, 40, 1000);
-        const message = JSON.parse(bytes.toString());
+        if (bytes.length > 8192) throw httpError(400, 'Room command is too large.');
+        message = JSON.parse(bytes.toString());
         if (!message || typeof message !== 'object') throw httpError(400, 'Invalid message.');
         if (message.type === 'ping') return send(ws, { type: 'pong', sentAt: message.sentAt, serverTime: Date.now() });
         if (message.type === 'join') {
@@ -439,7 +448,13 @@ export async function createApp(overrides = {}) {
         }
         if (!ws.roomId) throw httpError(403, 'Join a room first.');
         const room = rooms.get(ws.roomId);
-        if (message.type === 'reaction') {
+        if (message.type === 'desktop:start') {
+          requireMedia();
+          limit(`desktop:${ws.userId}`, 12);
+          desktop.start(room, ws, current.user, message);
+        } else if (message.type === 'desktop:stop') {
+          if (desktop.sessions.get(ws.id)?.requestId === message.requestId) desktop.stop(ws);
+        } else if (message.type === 'reaction') {
           limit(`reaction:${ws.id}`, 8, 1000);
           reactions.react(room.id, current.user.id, message);
         } else if (message.type === 'reaction:pointer') {
@@ -449,15 +464,19 @@ export async function createApp(overrides = {}) {
         else if (message.type?.startsWith('queue:')) rooms.mutateQueue(room, message);
         else if (message.type === 'history:play') rooms.replay(room, message.itemId);
         else throw httpError(400, 'Unknown message type.');
-      } catch (error) { send(ws, { type: 'error', message: error.status ? error.message : 'Invalid room command.' }); }
+      } catch (error) {
+        if (binary) desktop.stop(ws, error.status ? error.message : 'Desktop stream failed.');
+        send(ws, { type: message?.type === 'desktop:start' ? 'desktop:error' : 'error',
+          requestId: message?.requestId, message: error.status ? error.message : 'Invalid room command.' });
+      }
     });
     ws.on('close', () => {
       leave(ws);
-      for (const prefix of ['ws', 'reaction', 'pointer']) limits.delete(`${prefix}:${ws.id}`);
+      for (const prefix of ['ws', 'reaction', 'pointer', 'capture']) limits.delete(`${prefix}:${ws.id}`);
     });
     ws.on('error', () => ws.terminate());
   });
-  const tick = setInterval(() => { expireSockets(); rooms.tick(); }, 750);
+  const tick = setInterval(() => { expireSockets(); desktop.tick(); rooms.tick(); }, 750);
   const reactionTick = setInterval(() => reactions.tick(), 50);
   reactionTick.unref();
   const heartbeat = setInterval(() => {
@@ -479,7 +498,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, rooms, reactions, uploads, media, youtube, twitch, remote, capabilities, store, cleanup,
+  return { app, server, accounts, rooms, reactions, desktop, uploads, media, youtube, twitch, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;
@@ -495,7 +514,7 @@ export async function createApp(overrides = {}) {
         clearInterval(heartbeat);
         clearInterval(housekeeping);
         const stopped = server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve();
-        for (const ws of wss.clients) ws.terminate();
+        for (const ws of wss.clients) { desktop.stop(ws); ws.terminate(); }
         wss.close();
         for (const room of rooms.rooms.values()) {
           room.resumeWhenReady ||= !room.playback.paused;
