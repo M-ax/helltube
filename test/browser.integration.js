@@ -345,9 +345,10 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   await viewer.mouse.up();
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.equal(await previewLabel.count(), 0, 'An abandoned decoder must not publish a late ghost.');
-  const ball = viewer.getByRole('button', { name: 'Beach ball test', exact: true });
+  const ball = viewer.getByRole('button', { name: 'Beach ball', exact: true });
   const withoutBall = await canvasSamples(viewer);
   await ball.click();
+  await until(async () => await ball.getAttribute('aria-pressed') === 'true');
   assert.equal(await ball.getAttribute('aria-pressed'), 'true');
   const withBall = await canvasSamples(viewer);
   assert.ok(withBall.some((value, i) => Math.abs(value - withoutBall[i]) > 20), 'The beach ball renders over paused video.');
@@ -356,7 +357,7 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
     return moved.some((value, i) => Math.abs(value - withBall[i]) > 50);
   });
   assert.equal(room.playback.revision, previewRevision + 1, 'The test effect does not change shared playback.');
-  assert.equal(await admin.getByRole('button', { name: 'Beach ball test', exact: true }).getAttribute('aria-pressed'), 'false');
+  await until(async () => await admin.getByRole('button', { name: 'Beach ball', exact: true }).getAttribute('aria-pressed') === 'true');
   const uploadsDuringAnimation = await viewer.locator('.video-canvas').evaluate(async canvas => {
     const gl = canvas.getContext('webgl');
     const upload = gl.texImage2D;
@@ -387,13 +388,15 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
     'Restoring WebGL clears the fallback so effects are not drawn twice.');
   await viewer.screenshot({ path: path.resolve('test-artifacts', 'beach-ball.png') });
   await ball.click();
+  await until(async () => await ball.getAttribute('aria-pressed') === 'false');
   assert.deepEqual(await canvasSamples(viewer), withoutBall, 'Toggling off restores clean video.');
   await viewer.emulateMedia({ reducedMotion: 'reduce' });
   await ball.click();
+  await until(async () => await ball.getAttribute('aria-pressed') === 'true');
   const reducedBall = await canvasSamples(viewer);
-  await new Promise(resolve => setTimeout(resolve, 150));
-  assert.deepEqual(await canvasSamples(viewer), reducedBall, 'Reduced motion keeps the test ball stationary.');
+  await until(async () => (await canvasSamples(viewer)).some((value, i) => Math.abs(value - reducedBall[i]) > 50));
   await ball.click();
+  await until(async () => await ball.getAttribute('aria-pressed') === 'false');
   await viewer.emulateMedia({ reducedMotion: 'no-preference' });
   await dragJoystick(-40 / 3);
   await viewer.mouse.up();
@@ -500,9 +503,11 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   await assertPosition(41);
   await touch.detach();
   await ball.click();
+  await until(async () => await ball.getAttribute('aria-pressed') === 'true');
   await viewer.screenshot({ path: path.resolve('test-artifacts', 'mobile.png'), fullPage: true });
   assert.equal(await viewer.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true, 'Mobile layout must not overflow horizontally.');
   await ball.click();
+  await until(async () => await ball.getAttribute('aria-pressed') === 'false');
   const fallbackContext = await browser.newContext();
   await fallbackContext.addInitScript(() => {
     const getContext = HTMLCanvasElement.prototype.getContext;
@@ -516,8 +521,9 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   await until(async () => await fallback.locator('video').evaluate(video => video.readyState >= 2 && video.videoWidth > 0));
   assert.equal(await fallback.locator('.video-viewport').getAttribute('data-renderer'), 'native');
   assert.equal(await fallback.locator('video').evaluate(video => getComputedStyle(video).opacity), '1');
-  const fallbackBall = fallback.getByRole('button', { name: 'Beach ball test', exact: true });
+  const fallbackBall = fallback.getByRole('button', { name: 'Beach ball', exact: true });
   await fallbackBall.click();
+  await until(async () => await fallbackBall.getAttribute('aria-pressed') === 'true');
   const effectAlpha = () => fallback.locator('.player-effects').evaluate(canvas => {
     const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
     let max = 0;
@@ -525,8 +531,9 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
     return max;
   });
   const ballAlpha = await effectAlpha();
-  assert.ok(ballAlpha > 100 && ballAlpha < 220, `Fallback ball is semi-transparent, alpha ${ballAlpha}.`);
+  assert.ok(ballAlpha >= 240 && ballAlpha < 255, `Fallback ball is nearly opaque, alpha ${ballAlpha}.`);
   await fallbackBall.click();
+  await until(async () => await fallbackBall.getAttribute('aria-pressed') === 'false');
   assert.equal(await effectAlpha(), 0, 'Fallback effects clear when disabled.');
   const fallbackStick = fallback.getByRole('slider', { name: 'Relative seek joystick', exact: true });
   await until(async () => await fallback.locator('video').evaluate(v => v.buffered.length &&

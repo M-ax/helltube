@@ -1,8 +1,11 @@
 <script>
-    import {onMount, onDestroy} from 'svelte';
+    import {onMount, onDestroy, tick} from 'svelte';
     import Hls from 'hls.js';
     import Icon from './Icon.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
+    import Reactions from './Reactions.svelte';
+    import {createReactionAudio} from '../lib/reaction-audio.js';
+    import {ballArena, BALL_WIDTH, BALL_HEIGHT} from '../../shared/beach-ball.js';
     import {targetPosition, driftCorrection, time} from '../lib/format.js';
     import {delivery, isSameOriginUrl} from '../lib/delivery.js';
     import {createVideoRenderer} from '../lib/video-renderer.js';
@@ -13,6 +16,7 @@
     export let clockOffset = 0;
     export let rtt = null;
     export let overlay = null;
+    export let reactions = {roomId: null, ball: null, serverTime: 0, events: []};
     export let onCommand;
     export let onAdd;
     export let preferences = {volume: 0.8, muted: false};
@@ -26,7 +30,16 @@
     let seekCenter = null;
     let previewOffset = null;
     let previewPosition = null;
-    let beachBall = false;
+    let hitmarkerArmed = false;
+    let hitmarkerTarget;
+    let aim = {x: 0.5, y: 0.5};
+    let activeReactions = [];
+    let reactionRoom = null;
+    let reactionAudio;
+    let soundMuted = false;
+    const seenReactions = new Set();
+    const reactionTimers = new Set();
+    const reactionEmoji = {heart: '❤️', laugh: '😂', clap: '👏'};
     let webglActive = false;
     let playerShell;
     let hls;
@@ -65,7 +78,11 @@
     $: preparing = item && !media && item.status !== 'error';
     $: canAutoHide = !!media && connected && playing && !room?.playback.paused && !preparing
         && !localBuffering && !blocked && !playerError && item?.status !== 'error';
-    $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null;
+    $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed;
+    $: beachBall = connected && reactions.roomId === room?.id && !!reactions.ball;
+    $: updateReactionRoom(connected ? room?.id : null);
+    $: if (renderer) renderer.setBeachBallState(beachBall ? reactions.ball : null, (Date.now() + clockOffset - reactions.serverTime) / 1000);
+    $: receiveReactions(reactions, connected, room?.id);
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
     $: volumePosition = Math.round(Math.log1p(volume * (VOLUME_CURVE - 1)) / Math.log(VOLUME_CURVE) * 100) / 100;
@@ -188,7 +205,7 @@
             pointers.set(event.pointerId, event.target);
             activePointerCount = pointers.size;
             revealControls();
-            if (hidden && event.target.closest('.video-viewport')) {
+            if (hidden && !hitmarkerArmed && event.target.closest('.video-viewport')) {
                 event.preventDefault();
                 event.stopPropagation();
                 return;
@@ -406,9 +423,119 @@
         seekPreview?.request(frameTime - (media.baseTime || 0));
     }
 
-    function toggleBeachBall() {
-        beachBall = !beachBall;
-        renderer?.setBeachBall(beachBall);
+    function updateReactionRoom(id) {
+        if (reactionRoom === id) return;
+        reactionRoom = id;
+        hitmarkerArmed = false;
+        activeReactions = [];
+        seenReactions.clear();
+        for (const timer of reactionTimers) clearTimeout(timer);
+        reactionTimers.clear();
+    }
+
+    function receiveReactions(state, online, roomId) {
+        if (!online || state.roomId !== roomId) return;
+        for (const event of state.events) {
+            if (seenReactions.has(event.id)) continue;
+            seenReactions.add(event.id);
+            const lifetime = event.kind === 'hitmarker' ? 450 : 1800;
+            const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
+            if (age >= lifetime || document.hidden) continue;
+            activeReactions = [...activeReactions.slice(-39), event];
+            if (event.kind === 'hitmarker' && !soundMuted && !muted) reactionAudio?.play(volume);
+            const timer = setTimeout(() => {
+                activeReactions = activeReactions.filter(value => value.id !== event.id);
+                reactionTimers.delete(timer);
+            }, lifetime - age);
+            reactionTimers.add(timer);
+        }
+        if (seenReactions.size > 200) {
+            seenReactions.clear();
+            for (const event of state.events) seenReactions.add(event.id);
+        }
+    }
+
+    async function react(kind) {
+        if (!connected) return;
+        reactionAudio?.unlock();
+        if (kind === 'hitmarker') {
+            hitmarkerArmed = !hitmarkerArmed;
+            aim = {x: 0.5, y: 0.5};
+            await tick();
+            hitmarkerTarget?.focus({preventScroll: true});
+        } else if (kind === 'beachball') {
+            onCommand({type: 'reaction', kind, enabled: !beachBall});
+        } else {
+            onCommand({type: 'reaction', kind, x: 0.2 + Math.random() * 0.6, y: 0.65});
+        }
+    }
+
+    function placeHitmarker(event) {
+        if (!connected || !hitmarkerArmed) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        const point = event.detail === 0 ? aim : {
+            x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+            y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+        };
+        reactionAudio?.unlock();
+        onCommand({type: 'reaction', kind: 'hitmarker', ...point});
+        hitmarkerArmed = false;
+        playerShell.focus({preventScroll: true});
+    }
+
+    function aimHitmarker(event) {
+        const direction = {ArrowLeft: [-0.03, 0], ArrowRight: [0.03, 0], ArrowUp: [0, -0.03], ArrowDown: [0, 0.03]}[event.key];
+        if (!direction) return;
+        event.preventDefault();
+        aim = {x: Math.max(0, Math.min(1, aim.x + direction[0])), y: Math.max(0, Math.min(1, aim.y + direction[1]))};
+    }
+
+    function trackReactionPointer(node) {
+        let point = null;
+        let lastSent = 0;
+        let sent = false;
+        let pointerRoom = null;
+        function sendPoint() {
+            if (pointerRoom !== room?.id) { point = null; sent = false; }
+            if (!connected || !beachBall || !point) return;
+            onCommand({type: 'reaction:pointer', ...point});
+            lastSent = performance.now();
+            sent = true;
+        }
+        function leave() {
+            point = null;
+            if (sent && connected) onCommand({type: 'reaction:pointer', x: null, y: null});
+            sent = false;
+        }
+        function move(event) {
+            if (!beachBall || event.target.closest('.player-controls, button:not(.hitmarker-target), input, a')) return leave();
+            const rect = node.getBoundingClientRect();
+            const inset = parseFloat(getComputedStyle(node).getPropertyValue('--controls-height')) || 71;
+            const arena = ballArena(rect.width, rect.height, inset);
+            const x = (event.clientX - rect.left - arena.x) / (BALL_WIDTH * arena.scale);
+            const y = (event.clientY - rect.top - arena.y) / (BALL_HEIGHT * arena.scale);
+            if (x < 0 || x > 1 || y < 0 || y > 1) return leave();
+            point = {x, y};
+            pointerRoom = room?.id;
+            if (performance.now() - lastSent >= 60) sendPoint();
+        }
+        function release(event) { if (event.pointerType !== 'mouse') leave(); }
+        const heartbeat = setInterval(() => { if (performance.now() - lastSent >= 500) sendPoint(); }, 500);
+        node.addEventListener('pointermove', move);
+        node.addEventListener('pointerdown', move);
+        node.addEventListener('pointerleave', leave);
+        node.addEventListener('pointercancel', leave);
+        window.addEventListener('pointerup', release);
+        window.addEventListener('blur', leave);
+        return {destroy() {
+            clearInterval(heartbeat);
+            node.removeEventListener('pointermove', move);
+            node.removeEventListener('pointerdown', move);
+            node.removeEventListener('pointerleave', leave);
+            node.removeEventListener('pointercancel', leave);
+            window.removeEventListener('pointerup', release);
+            window.removeEventListener('blur', leave);
+        }};
     }
 
     function retryPlayback() {
@@ -428,10 +555,22 @@
     }
 
     onMount(() => {
+        reactionAudio = createReactionAudio();
+        const unlockAudio = () => reactionAudio.unlock();
+        const cancelReaction = event => { if (event.key === 'Escape') hitmarkerArmed = false; };
+        document.addEventListener('pointerdown', unlockAudio);
+        document.addEventListener('keydown', unlockAudio);
+        document.addEventListener('keydown', cancelReaction);
+        if (navigator.userActivation?.hasBeenActive) unlockAudio();
         renderer = createVideoRenderer(canvas, video, active => webglActive = active, effectsCanvas);
         const timer = setInterval(sync, 250);
         document.addEventListener('visibilitychange', sync);
         return () => {
+            document.removeEventListener('pointerdown', unlockAudio);
+            document.removeEventListener('keydown', unlockAudio);
+            document.removeEventListener('keydown', cancelReaction);
+            reactionAudio.destroy();
+            for (const timer of reactionTimers) clearTimeout(timer);
             renderer.destroy();
             renderer = null;
             clearInterval(timer);
@@ -445,7 +584,7 @@
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
          data-controls-visible={controlsVisible}>
-    <div class="video-viewport" data-renderer={webglActive ? 'webgl' : 'native'}
+    <div class="video-viewport" use:trackReactionPointer data-renderer={webglActive ? 'webgl' : 'native'}
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + 28}px`}>
         <!-- svelte-ignore a11y_media_has_caption -->
@@ -458,6 +597,24 @@
                on:error={() => { if (!hls && media) playerError = 'The video stream could not be played. Retry playback or use another browser.'; }}></video>
         <canvas bind:this={canvas} class="video-canvas" class:video-visible={!!media && webglActive} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
+        <div class="reaction-overlay" aria-hidden="true">
+            {#each activeReactions as reaction (reaction.id)}
+                <span class="player-reaction" class:hitmarker={reaction.kind === 'hitmarker'}
+                      data-reaction={reaction.kind} data-reaction-id={reaction.id}
+                      style={`left: ${reaction.x * 100}%; top: ${reaction.y * 100}%`}>
+                    {#if reaction.kind === 'hitmarker'}
+                        <svg viewBox="0 0 40 40"><path d="M5 5l9 9m12 12 9 9M35 5l-9 9m-12 12-9 9"/></svg>
+                    {:else}{reactionEmoji[reaction.kind]}{/if}
+                </span>
+            {/each}
+        </div>
+        {#if hitmarkerArmed}
+            <button class="hitmarker-target" bind:this={hitmarkerTarget} type="button"
+                    aria-label="Place hit marker on video. Arrow keys aim; Enter places; Escape cancels."
+                    on:click={placeHitmarker} on:keydown={aimHitmarker}>
+                <span class="hitmarker-aim" style={`left: ${aim.x * 100}%; top: ${aim.y * 100}%`}>+</span>
+            </button>
+        {/if}
         {#if previewPosition !== null}
             <div class="seek-preview-label">Seek preview · {time(previewPosition)}</div>
         {/if}
@@ -578,12 +735,9 @@
             </div>
         </div>
     </div>
-    <div class="player-test-tools">
-        <button class="button secondary small" type="button" aria-pressed={beachBall}
-                on:click={toggleBeachBall}>Beach ball test</button>
-        <span>Temporary · on this device only</span>
-    </div>
 </section>
+<Reactions {connected} {beachBall} armed={hitmarkerArmed} {soundMuted} onReact={react}
+           onSoundToggle={() => { soundMuted = !soundMuted; reactionAudio?.unlock(); }}/>
 <div class="now-playing">
     <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
         <h2>{item?.title || 'A little less scrolling. A little more watching.'}</h2>

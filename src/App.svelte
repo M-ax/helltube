@@ -43,6 +43,7 @@
     const toastTimers = new Map();
     const client = createRealtime({onMessage: notify, onSessionEnded: sessionEnded});
     const realtimeState = client.state;
+    const reactions = client.reactions;
     $: room = $realtimeState.room;
     $: connected = $realtimeState.status === 'connected' && $realtimeState.joined && browserOnline;
     $: if (user && user.role !== 'admin' && modal === 'admin') modal = null;
@@ -471,7 +472,7 @@
                     <section class="stage" aria-label="Watch together">
                         {#key preferenceKey}
                             <Player {room} {connected} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
-                                    overlay={$realtimeState.overlay} onCommand={client.command} onAdd={focusComposer}
+                                    overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
                         <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify}/>

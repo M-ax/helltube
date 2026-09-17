@@ -1097,20 +1097,118 @@ ul, ol {
     z-index: 2;
 }
 
-.player-test-tools {
+.reactions-panel {
+    margin-top: 12px;
+    padding: 15px 17px 12px;
+    border: 1px solid #383036;
+    border-radius: 11px;
+    background: #19171c;
+}
+
+.reactions-heading {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 10px;
-    padding: 8px 15px;
-    border-top: 1px solid #ffffff0b;
-    background: #19171c;
-    flex-shrink: 0;
+    gap: 6px 12px;
+    margin-bottom: 12px;
 }
 
-.player-test-tools > span {
+.reactions-heading h3 { margin: 0; font-size: 13px; }
+.reactions-heading > span { color: var(--muted); font-size: 11px; }
+.reaction-sound {
+    margin-left: auto;
+    border: 0;
+    background: transparent;
     color: var(--muted);
-    font-size: 10px;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 5px;
+}
+
+.reaction-buttons {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.reaction-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 38px;
+    padding: 7px 11px;
+    border: 1px solid #ffffff14;
+    border-radius: 8px;
+    color: var(--text);
+    background: #ffffff05;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+.reaction-button > span { font-size: 19px; }
+.beach-ball-icon {
+    width: 19px;
+    height: 19px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 32% 25%, #ffffff99, transparent 65%, #0004),
+        conic-gradient(#ff665c 0deg 60deg, #fff0cf 60deg 120deg, #43bddd 120deg 180deg, #ffe166 180deg 240deg, #f8faf0 240deg 300deg, #58ce9e 300deg);
+}
+.reaction-button:hover:not(:disabled), .reaction-button[aria-pressed="true"] {
+    background: #ef68491a;
+    border-color: var(--accent);
+    color: #fff;
+}
+.reaction-button:disabled { opacity: .4; cursor: default; }
+.reaction-button:focus-visible, .reaction-sound:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.hitmarker-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.5; }
+.reaction-help {
+    margin: 11px 0 0;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.5;
+}
+.reaction-overlay, .hitmarker-target {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 3;
+}
+.reaction-overlay { pointer-events: none; overflow: hidden; }
+.player-reaction {
+    position: absolute;
+    font-size: clamp(28px, 4vw, 46px);
+    line-height: 1;
+    transform: translate(-50%, -50%);
+    filter: drop-shadow(0 2px 3px #0008);
+    animation: reaction-float 1.8s ease-out forwards;
+}
+.player-reaction.hitmarker { width: 38px; height: 38px; animation: hitmarker-flash .45s ease-out forwards; }
+.hitmarker svg { width: 100%; height: 100%; fill: none; stroke: #fff; stroke-width: 2.5; }
+.hitmarker-target {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    cursor: crosshair;
+    touch-action: manipulation;
+}
+.hitmarker-target:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.hitmarker-aim { position: absolute; color: #fff; font: 28px var(--mono); transform: translate(-50%, -50%); pointer-events: none; }
+.hitmarker-target:not(:focus-visible) .hitmarker-aim { visibility: hidden; }
+@keyframes reaction-float {
+    0% { opacity: 0; transform: translate(-50%, -10%) scale(.7); }
+    15% { opacity: 1; }
+    75% { opacity: 1; }
+    100% { opacity: 0; transform: translate(-50%, -220%) scale(1.1); }
+}
+@keyframes hitmarker-flash {
+    0%, 45% { opacity: 1; }
+    100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .player-reaction, .player-reaction.hitmarker { animation: none; }
 }
 
 .screen-topline {

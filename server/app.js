@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { config as defaults, httpError, text } from './config.js';
 import { Accounts, publicUser } from './auth.js';
 import { Rooms } from './rooms.js';
+import { Reactions } from './reactions.js';
 import { Uploads, chunkSize } from './uploads.js';
 import { YouTube } from './youtube.js';
 import { Media, available } from './media.js';
@@ -58,6 +59,9 @@ export async function createApp(overrides = {}) {
   const app = express();
   const server = createServer(app);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8192, perMessageDeflate: false });
+  const reactions = new Reactions({ broadcast(roomId, message) {
+    for (const ws of wss.clients) if (ws.roomId === roomId) send(ws, message);
+  } });
   server.requestTimeout = 120000;
   server.headersTimeout = 20000;
   app.disable('x-powered-by');
@@ -316,6 +320,7 @@ export async function createApp(overrides = {}) {
     if (!ws.roomId) return;
     const room = rooms.get(ws.roomId);
     room.members.delete(ws.id);
+    reactions.leave(room.id, ws.id, room.members.size === 0);
     ws.roomId = null;
     broadcastState(room);
     broadcastRooms();
@@ -327,6 +332,7 @@ export async function createApp(overrides = {}) {
   }
   rooms.on('state', broadcastState);
   rooms.on('deleted', room => {
+    reactions.rooms.delete(room.id);
     for (const ws of wss.clients) if (ws.roomId === room.id) ws.roomId = null;
   });
   rooms.on('rooms', broadcastRooms);
@@ -364,20 +370,32 @@ export async function createApp(overrides = {}) {
           room.members.set(ws.id, current.user);
           broadcastState(room);
           broadcastRooms();
+          send(ws, reactions.snapshot(room.id));
           return;
         }
         if (!ws.roomId) throw httpError(403, 'Join a room first.');
         const room = rooms.get(ws.roomId);
-        if (message.type === 'control') rooms.control(room, message);
+        if (message.type === 'reaction') {
+          limit(`reaction:${ws.id}`, 8, 1000);
+          reactions.react(room.id, current.user.id, message);
+        } else if (message.type === 'reaction:pointer') {
+          limit(`pointer:${ws.id}`, 25, 1000);
+          reactions.pointer(room.id, ws.id, message);
+        } else if (message.type === 'control') rooms.control(room, message);
         else if (message.type?.startsWith('queue:')) rooms.mutateQueue(room, message);
         else if (message.type === 'history:play') rooms.replay(room, message.itemId);
         else throw httpError(400, 'Unknown message type.');
       } catch (error) { send(ws, { type: 'error', message: error.status ? error.message : 'Invalid room command.' }); }
     });
-    ws.on('close', () => { leave(ws); limits.delete(`ws:${ws.id}`); });
+    ws.on('close', () => {
+      leave(ws);
+      for (const prefix of ['ws', 'reaction', 'pointer']) limits.delete(`${prefix}:${ws.id}`);
+    });
     ws.on('error', () => ws.terminate());
   });
   const tick = setInterval(() => { expireSockets(); rooms.tick(); }, 750);
+  const reactionTick = setInterval(() => reactions.tick(), 50);
+  reactionTick.unref();
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) { if (!ws.alive) ws.terminate(); else { ws.alive = false; ws.ping(); } }
     for (const [key, value] of limits) if (value.until < Date.now()) limits.delete(key);
@@ -397,7 +415,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, rooms, uploads, media, youtube, capabilities, store, cleanup,
+  return { app, server, accounts, rooms, reactions, uploads, media, youtube, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;
@@ -409,6 +427,7 @@ export async function createApp(overrides = {}) {
       if (closing) return closing;
       closing = (async () => {
         clearInterval(tick);
+        clearInterval(reactionTick);
         clearInterval(heartbeat);
         clearInterval(housekeeping);
         const stopped = server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve();

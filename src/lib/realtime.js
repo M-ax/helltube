@@ -2,6 +2,8 @@ import {get, writable} from 'svelte/store';
 import {api} from './api.js';
 
 export function createRealtime({onMessage, onSessionEnded}) {
+    const emptyReactions = () => ({roomId: null, ball: null, serverTime: 0, events: []});
+    const reactions = writable(emptyReactions());
     const state = writable({
         status: 'offline', rooms: [], room: null, selectedRoomId: null,
         joined: false, clockOffset: 0, rtt: null, clockReady: false, overlay: null,
@@ -23,6 +25,7 @@ export function createRealtime({onMessage, onSessionEnded}) {
     }
 
     function join(roomId) {
+        reactions.set(emptyReactions());
         state.update((current) => ({...current, selectedRoomId: roomId, joined: false, room: null, overlay: null}));
         try {
             localStorage.setItem(storageKey, roomId);
@@ -33,6 +36,7 @@ export function createRealtime({onMessage, onSessionEnded}) {
 
     function open() {
         if (stopped) return;
+        reactions.set(emptyReactions());
         if (navigator.onLine === false) {
             state.update((current) => ({...current, status: 'offline', joined: false}));
             return;
@@ -77,6 +81,7 @@ export function createRealtime({onMessage, onSessionEnded}) {
                 state.update((current) => ({...current, rooms: message.rooms}));
                 const selected = get(state).selectedRoomId;
                 if (selected && !message.rooms.some((room) => room.id === selected)) {
+                    reactions.set(emptyReactions());
                     state.update((current) => ({...current, selectedRoomId: null, room: null, joined: false}));
                 }
             } else if (message.type === 'state') {
@@ -88,6 +93,13 @@ export function createRealtime({onMessage, onSessionEnded}) {
                         clockOffset: current.clockReady ? current.clockOffset : message.serverTime - Date.now(),
                     };
                 });
+            } else if (message.type === 'reactions:state' || message.type === 'reaction') {
+                const current = get(state);
+                if (!current.joined || message.roomId !== current.selectedRoomId) return;
+                reactions.update(value => message.type === 'reactions:state'
+                    ? {...value, roomId: message.roomId, ball: message.ball, serverTime: message.serverTime}
+                    : {...value, roomId: message.roomId,
+                        events: [...value.events.filter(event => event.serverTime > message.serverTime - 2000), message].slice(-40)});
             } else if (message.type === 'overlay') {
                 state.update((current) => ({
                     ...current,
@@ -111,6 +123,7 @@ export function createRealtime({onMessage, onSessionEnded}) {
                 return;
             }
             state.update((current) => ({...current, status: 'reconnecting', joined: false}));
+            reactions.set(emptyReactions());
             void api('/api/me').catch((error) => {
                 if (error.status === 401 && generation === activeGeneration && !stopped) {
                     disconnect();
@@ -148,6 +161,7 @@ export function createRealtime({onMessage, onSessionEnded}) {
     }
 
     function offline() {
+        reactions.set(emptyReactions());
         generation++;
         clearTimeout(retryTimer);
         clearInterval(heartbeat);
@@ -157,6 +171,7 @@ export function createRealtime({onMessage, onSessionEnded}) {
     }
 
     function disconnect() {
+        reactions.set(emptyReactions());
         stopped = true;
         window.removeEventListener('offline', offline);
         window.removeEventListener('online', retry);
@@ -189,5 +204,5 @@ export function createRealtime({onMessage, onSessionEnded}) {
         open();
     }
 
-    return {state, connect, disconnect, join, command, retry};
+    return {state, reactions, connect, disconnect, join, command, retry};
 }

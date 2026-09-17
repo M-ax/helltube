@@ -48,6 +48,9 @@ Client sends:
 - `{type:'queue:remove',itemId}`
 - `{type:'queue:remove-playlist',playlistId}` (removes all queued entries in the group, not current playback)
 - `{type:'history:play',itemId}` (select one of five previously played entries)
+- `{type:'reaction',kind:'hitmarker'|'heart'|'laugh'|'clap',x,y}` places a transient reaction at normalized player coordinates (0–1).
+- `{type:'reaction',kind:'beachball',enabled:boolean}` shows or removes the room's shared ball.
+- `{type:'reaction:pointer',x,y}` sends normalized cursor coordinates in the centered 1600×900 ball arena, at most 25 times/second. Send both coordinates as null on leave. Clients send at most once per 60ms, with a 500ms stationary heartbeat.
 
 Server sends:
 - `{type:'state',room,serverTime}` every 750ms and immediately after mutations. No per-client ended command; server advances the authoritative timeline.
@@ -55,6 +58,8 @@ Server sends:
 - `{type:'error'|'notice',message}`
 - `{type:'overlay',message,expiresAt}`; display over player until expiry.
 - `{type:'session-ended'}`; return to login.
+- `{type:'reaction',roomId,id,userId,kind,x,y,serverTime}` is broadcast only to the sender's room, including the sender. Deduplicate by ID; expired reactions are discarded and never replayed on reconnect. Limit: 8 reactions/second per socket.
+- `{type:'reactions:state',roomId,ball,serverTime}` supplies the shared ball on join and at 20Hz while active. The server owns gravity, friction, bounces and cursor collisions; clients extrapolate briefly between snapshots. Reaction state is transient and cleared when the last viewer leaves or the room is deleted. Playback revisions and persistence are unaffected.
 
 `room = {id,name,members:[{id,displayName}],current:item|null,queue:[item],history:[item],playback:{paused,position,updatedAt,revision},version}`. History is most recent first, capped at 5. Timeline is server wall-clock based: `position + (paused ? 0 : (Date.now()+clockOffset-updatedAt)/1000)`. Playback only begins when media is ready. During buffering the server freezes the timeline and resumes when ready.
 
@@ -67,6 +72,8 @@ Server sends:
 Distinctive polished dark cinema / Discord-inspired layout: left room rail, central player and transport, right queue with playlist grouping and one-click group removal. Everyone controls playback. Queue insertion at selected index, reorder (accessible up/down sufficient), remove, previous, skip, last-five history selection. Login; account panel; admin user CRUD. Upload progress, queued/buffering status, backend capability warnings, actionable errors and reconnect state. No fake room members, media or activity. Responsive layout and keyboard-accessible controls.
 
 Controls overlay the bottom of the video with a progressively blurred/darkened backdrop. After three idle seconds while playing, transport fades and the seek bar becomes a thin bottom line with no thumb. Activity restores controls, and focus/drag/pause/buffering/errors keep them visible. Respect reduced motion and provide a gradient fallback without backdrop-filter support.
+
+The Reactions panel sits below, outside the player shell. Hit marker arms a one-shot placement target; click/tap the picture, or aim with arrow keys and press Enter. Escape cancels. Hit-marker audio follows device volume/mute and the panel's local sound toggle, and unlocks after browser user interaction. Hearts, laughter and applause float briefly; reduced motion removes the flourish. The ball is 96% opaque, shared even while video is paused, and uses a fixed-aspect arena above the controls so desktop/mobile/fullscreen clients agree on collisions and can reach the resting ball.
 
 ## Persistence and cleanup
 

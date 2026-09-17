@@ -1,4 +1,5 @@
-import {advanceBeachBall, createBeachBall, paintBeachBall, resizeBeachBall} from './beach-ball.js';
+import {paintBeachBall} from './beach-ball.js';
+import {advanceBeachBall, displayBeachBall} from '../../shared/beach-ball.js';
 
 const vertexSource = `
     attribute vec2 a_position;
@@ -76,6 +77,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let ghost = null;
     let ghostDirty = false;
     let ball = null;
+    let ballBottomInset = 0;
     let ballSprite = null;
     let overlayDirty = true;
     let hasViewport = false;
@@ -255,10 +257,11 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             } catch { /* The parent can release its preview image at any time. */ }
         }
         if (ball) {
-            overlay.globalAlpha = 0.65;
-            overlay.translate(ball.x, ball.y);
-            overlay.rotate(ball.angle);
-            overlay.drawImage(getBallSprite(), -ball.radius, -ball.radius, ball.radius * 2, ball.radius * 2);
+            const visible = displayBeachBall(ball, width, height, ballBottomInset);
+            overlay.globalAlpha = 0.96;
+            overlay.translate(visible.x, visible.y);
+            overlay.rotate(visible.angle);
+            overlay.drawImage(getBallSprite(), -visible.radius, -visible.radius, visible.radius * 2, visible.radius * 2);
         }
         overlay.restore();
         overlayDirty = true;
@@ -274,7 +277,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             clearOverlay();
             return;
         }
-        if (ball) ball = resizeBeachBall(ball, width, height);
+        if (ball) ballBottomInset = parseFloat(getComputedStyle(canvas.parentElement).getPropertyValue('--controls-height')) || 71;
         if (gl && !failed && !lost) {
             try {
                 resizeCanvas(canvas, width, height, maxSize);
@@ -304,7 +307,8 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
                             ballTexture = createTexture();
                             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, getBallSprite());
                         }
-                        drawTexture(ballTexture, [ball.x - ball.radius, ball.y - ball.radius, ball.radius * 2, ball.radius * 2], 0.65, ball.angle);
+                        const visible = displayBeachBall(ball, width, height, ballBottomInset);
+                        drawTexture(ballTexture, [visible.x - visible.radius, visible.y - visible.radius, visible.radius * 2, visible.radius * 2], 0.96, visible.angle);
                     }
                     if (!active && gl.getError() !== gl.NO_ERROR) throw new Error('Video rendering failed.');
                     setActive(true);
@@ -421,10 +425,11 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             }
             redraw();
         },
-        setBeachBall(enabled) {
-            if (destroyed || !!ball === !!enabled) return;
-            if (enabled) ball = createBeachBall(0, 0);
+        setBeachBallState(snapshot, elapsed = 0) {
+            if (destroyed || (!snapshot && !ball)) return;
+            if (snapshot) ball = advanceBeachBall(snapshot, Math.max(0, Math.min(0.1, elapsed)));
             else releaseBall();
+            lastBallTime = null;
             redraw();
         },
         destroy() {
