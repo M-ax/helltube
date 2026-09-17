@@ -23,6 +23,8 @@
     let manager;
     let composer;
     let roomName = '';
+    let editingRoom = null;
+    let confirmRoomDelete = false;
     let roomBusy = false;
     let roomError = '';
     let roomsLoading = false;
@@ -210,8 +212,10 @@
         sidebarOpen = false;
     }
 
-    function openRoomForm() {
-        roomName = '';
+    function openRoomForm(entry = null) {
+        editingRoom = entry?.id ? entry : null;
+        confirmRoomDelete = false;
+        roomName = editingRoom?.name || '';
         roomError = '';
         modal = 'room';
     }
@@ -221,8 +225,25 @@
         roomBusy = true;
         roomError = '';
         try {
-            const result = await api('/api/rooms', {method: 'POST', body: {name: roomName.trim()}});
-            joinRoom(result.room.id);
+            const result = await api(editingRoom ? `/api/rooms/${encodeURIComponent(editingRoom.id)}` : '/api/rooms', {
+                method: editingRoom ? 'PATCH' : 'POST', body: {name: roomName.trim()}
+            });
+            if (!editingRoom) joinRoom(result.room.id);
+            modal = null;
+            void refreshRooms();
+        } catch (cause) {
+            roomError = cause.message;
+        } finally {
+            roomBusy = false;
+        }
+    }
+
+    async function deleteRoom() {
+        if (roomBusy || !editingRoom) return;
+        roomBusy = true;
+        roomError = '';
+        try {
+            await api(`/api/rooms/${encodeURIComponent(editingRoom.id)}`, {method: 'DELETE'});
             modal = null;
             void refreshRooms();
         } catch (cause) {
@@ -299,6 +320,7 @@
             </div>
             <nav class="room-list" aria-label="Screening rooms">
                 {#each $realtimeState.rooms as entry (entry.id)}
+                    <div class="room-navigation-row">
                     <button class="room-button" class:active={$realtimeState.selectedRoomId === entry.id}
                             aria-current={$realtimeState.selectedRoomId === entry.id ? 'page' : undefined}
                             on:click={() => joinRoom(entry.id)}><span class="room-hash"><Icon name="room"
@@ -307,6 +329,11 @@
                             class="member-count" title={`${entry.memberCount} in room`}><Icon name="users"
                                                                                               size={11}/>{entry.memberCount}</span>
                     </button>
+                    {#if user.role === 'admin' || entry.ownerId === user.id}
+                        <button class="icon-button room-edit" title={`Manage ${entry.name}`} aria-label={`Manage ${entry.name}`}
+                                on:click={() => openRoomForm(entry)}><Icon name="edit" size={15}/></button>
+                    {/if}
+                    </div>
                 {/each}
                 {#if !$realtimeState.rooms.length}<p
                         class="sidebar-empty">{roomsLoading ? 'Finding your rooms…' : 'No rooms yet. Start one and make it yours.'}</p>{/if}
@@ -469,22 +496,33 @@
     {:else if modal === 'admin' && user.role === 'admin'}
         <Admin {user} onClose={() => modal = null} onUpdate={updateUser}/>
     {:else if modal === 'room'}
-        <Modal title="Make room for a good night."
-               subtitle="Give your gathering a name. Everyone with an account can join." onClose={() => modal = null}>
+        <Modal title={editingRoom ? `Manage ${editingRoom.name}` : 'Make room for a good night.'}
+               subtitle="Give your gathering a name. Everyone with an account can join." onClose={() => { if (!roomBusy) modal = null; }}>
             <form class="stack-form" on:submit|preventDefault={createRoom}><label for="room-name">Room
                 name</label><input id="room-name" data-initial-focus bind:value={roomName}
-                                   placeholder="e.g. The late-night rabbit hole" required maxlength="64"
+                                   placeholder="e.g. The late-night rabbit hole" required maxlength="50" disabled={roomBusy}
                                    autocomplete="off"/>
                 <p class="field-help">A shared queue, a synchronized screen, and a place for your people.</p>
                 {#if roomError}<p class="form-error" role="alert">{roomError}</p>{/if}
                 <button class="button primary" type="submit" disabled={roomBusy || !roomName.trim()}>
-                    {#if roomBusy}<span class="spinner"></span>Creating…
+                    {#if roomBusy}<span class="spinner"></span>Saving…
                     {:else}
-                        <Icon name="plus" size={18}/>
-                        Create and join room
+                        <Icon name={editingRoom ? 'edit' : 'plus'} size={18}/>
+                        {editingRoom ? 'Save room' : 'Create and join room'}
                     {/if}
                 </button>
             </form>
+            {#if editingRoom}
+                <div class="stack-form room-delete">
+                    {#if confirmRoomDelete}
+                        <p>Delete “{editingRoom.name}” and its queue? Everyone in this room will return to the room list. This cannot be undone.</p>
+                        <button class="button danger-button" disabled={roomBusy} on:click={deleteRoom}>Confirm delete room</button>
+                        <button class="button secondary" disabled={roomBusy} on:click={() => confirmRoomDelete = false}>Cancel</button>
+                    {:else}
+                        <button class="button danger-button" disabled={roomBusy} on:click={() => confirmRoomDelete = true}><Icon name="trash" size={16}/>Delete room</button>
+                    {/if}
+                </div>
+            {/if}
         </Modal>
     {/if}
 {/if}

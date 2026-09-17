@@ -18,7 +18,7 @@ export class Rooms extends EventEmitter {
     this.saved = new Map();
     this.rooms = new Map();
     for (const saved of store?.load('rooms') || []) {
-      const room = { ...saved, members: new Map() };
+      const room = { ownerId: null, ...saved, members: new Map() };
       for (const item of [room.current, ...room.queue, ...room.history].filter(Boolean)) {
         item.media = null;
         if (item.status !== 'error') item.status = item.kind === 'upload' && !item.source.complete ? 'uploading' : 'queued';
@@ -29,13 +29,14 @@ export class Rooms extends EventEmitter {
       if (room.current) room.current.source.startAt = room.playback.position;
       this.rooms.set(room.id, room);
     }
-    if (!this.rooms.size) this.create('The living room', 'lobby');
+    if (!this.rooms.size && !store?.load('settings').some(setting => setting.id === 'rooms-initialized')) this.create('The living room', 'lobby');
+    store?.save('settings', 'rooms-initialized', { id: 'rooms-initialized' });
   }
 
   persist(room) {
     if (!this.store) return;
     const itemState = item => item ? { ...item, media: null } : null;
-    const state = { id: room.id, name: room.name, current: itemState(room.current),
+    const state = { id: room.id, name: room.name, ownerId: room.ownerId, current: itemState(room.current),
       queue: room.queue.map(itemState), history: room.history.map(itemState), version: room.version,
       resumeWhenReady: room.resumeWhenReady,
       playback: { ...room.playback, position: this.position(room),
@@ -53,9 +54,9 @@ export class Rooms extends EventEmitter {
     });
   }
 
-  create(name, id = randomUUID()) {
+  create(name, id = randomUUID(), ownerId = null) {
     if (this.rooms.size >= this.maxRooms) throw httpError(409, 'Room limit reached.');
-    const room = { id, name: text(name, 'Room name', 50), members: new Map(), current: null,
+    const room = { id, ownerId, name: text(name, 'Room name', 50), members: new Map(), current: null,
       queue: [], history: [], playback: { paused: true, position: 0, updatedAt: this.now(), revision: 0 },
       version: 0, resumeWhenReady: false };
     this.rooms.set(id, room);
@@ -68,6 +69,33 @@ export class Rooms extends EventEmitter {
     const room = this.rooms.get(id);
     if (!room) throw httpError(404, 'Room not found.');
     return room;
+  }
+
+  manage(id, user) {
+    const room = this.get(id);
+    if (user.role !== 'admin' && room.ownerId !== user.id) throw httpError(403, 'Only the room owner or an administrator can manage this room.');
+    return room;
+  }
+
+  rename(id, name, user) {
+    const room = this.manage(id, user);
+    const draft = { ...room, name: text(name, 'Room name', 50), version: room.version + 1 };
+    this.persist(draft);
+    Object.assign(room, draft);
+    this.emit('state', room);
+    this.emit('rooms');
+    return this.snapshot(room);
+  }
+
+  remove(id, user) {
+    const room = this.manage(id, user);
+    this.store?.delete('rooms', id);
+    this.rooms.delete(id);
+    this.saved.delete(id);
+    this.emit('deleted', room);
+    room.members.clear();
+    this.emit('rooms');
+    this.emit('prepare');
   }
 
   position(room) {
@@ -86,6 +114,7 @@ export class Rooms extends EventEmitter {
   }
 
   add(room, items, insertAt = room.queue.length, persistItems = () => {}) {
+    if (this.get(room.id) !== room) throw httpError(404, 'Room not found.');
     if (!Number.isInteger(insertAt) || insertAt < 0 || insertAt > room.queue.length) {
       throw httpError(400, 'Invalid queue insertion position.');
     }
@@ -220,7 +249,7 @@ export class Rooms extends EventEmitter {
   }
 
   list() {
-    return [...this.rooms.values()].map(room => ({ id: room.id, name: room.name,
+    return [...this.rooms.values()].map(room => ({ id: room.id, name: room.name, ownerId: room.ownerId,
       memberCount: new Set([...room.members.values()].map(u => u.id)).size,
       currentTitle: room.current?.title || null }));
   }
@@ -231,7 +260,7 @@ export class Rooms extends EventEmitter {
       const { source, ...safe } = item;
       return safe;
     };
-    return { id: room.id, name: room.name, version: room.version,
+    return { id: room.id, name: room.name, ownerId: room.ownerId, version: room.version,
       members: [...new Map([...room.members.values()].map(u => [u.id, { id: u.id, displayName: u.displayName }])).values()],
       current: expose(room.current), queue: room.queue.map(expose), history: room.history.map(expose),
       playback: { ...room.playback } };

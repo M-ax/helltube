@@ -617,6 +617,11 @@ ul, ol {
     gap: 5px;
 }
 
+.room-navigation-row { display: flex; align-items: center; gap: 2px; }
+.room-navigation-row .room-button { flex: 1; min-width: 0; }
+.room-edit { flex-shrink: 0; }
+.room-delete { margin-top: 24px; }
+
 .room-button {
     width: 100%;
     min-height: 62px;

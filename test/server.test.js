@@ -3,6 +3,38 @@ import assert from 'node:assert/strict';
 import { start, until } from './helpers.js';
 import { makeItem } from '../server/rooms.js';
 
+test('room owners and administrators can manage rooms, while other users cannot', async t => {
+  const { instance, api, connect } = await start(t, { maxTranscoders: 0 });
+  const member = (await api('/api/users', { method: 'POST', body: { username: 'roomowner', password: 'owner-password', role: 'user' } })).data.user;
+  const login = await api('/api/login', { method: 'POST', body: { username: 'roomowner', password: 'owner-password' } });
+  const auth = login.response.headers.get('set-cookie').split(';')[0];
+  const created = await api('/api/rooms', { auth, method: 'POST', body: { name: 'Owned room', ownerId: 'forged' } });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.room.ownerId, member.id);
+  const id = created.data.room.id;
+  const other = (await api('/api/rooms', { method: 'POST', body: { name: 'Another owner' } })).data.room;
+  for (const method of ['PATCH', 'DELETE']) {
+    assert.equal((await api(`/api/rooms/${other.id}`, { auth, method, body: { name: 'Forbidden' } })).status, 403);
+    assert.equal((await api('/api/rooms/lobby', { auth, method, body: { name: 'Forbidden' } })).status, 403);
+    assert.equal((await api(`/api/rooms/${id}`, { auth: '', method, body: { name: 'Forbidden' } })).status, 401);
+  }
+  const ws = await connect(auth);
+  ws.send(JSON.stringify({ type: 'join', roomId: id }));
+  await until(() => instance.rooms.get(id).members.size === 1);
+  assert.equal((await api(`/api/rooms/${id}`, { auth, method: 'PATCH', body: { name: '   ' } })).status, 400);
+  assert.equal((await api(`/api/rooms/${id}`, { auth, method: 'PATCH', body: { name: 'Renamed' } })).status, 200);
+  await until(() => ws.messages.some(m => m.type === 'state' && m.room.name === 'Renamed'));
+  assert.equal((await api(`/api/rooms/${id}`, { method: 'PATCH', body: { name: 'Admin edit' } })).status, 200);
+  const upload = await instance.uploads.create(instance.rooms.get(id), member, { name: 'pending.mp4', size: 8 });
+  assert.equal((await api(`/api/rooms/${id}`, { auth, method: 'DELETE' })).status, 200);
+  assert.equal(instance.uploads.uploads.has(upload.uploadId), false);
+  await until(() => ws.messages.some(m => m.type === 'rooms' && !m.rooms.some(r => r.id === id)));
+  ws.send(JSON.stringify({ type: 'join', roomId: 'lobby' }));
+  await until(() => instance.rooms.get('lobby').members.size === 1);
+  assert.equal((await api('/api/rooms/lobby', { method: 'DELETE' })).status, 200);
+  assert.equal((await api(`/api/rooms/${id}`, { auth, method: 'PATCH', body: { name: 'Gone' } })).status, 404);
+});
+
 test('authenticated HTTP and two real WebSocket clients share controls and isolate rooms', async t => {
   const { instance, api, connect, url } = await start(t, { maxTranscoders: 0 });
   assert.equal((await api('/api/me', { auth: '' })).status, 401);

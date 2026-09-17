@@ -195,8 +195,17 @@ export async function createApp(overrides = {}) {
   app.get('/api/rooms', (_req, res) => res.json({ rooms: rooms.list() }));
   app.post('/api/rooms', (req, res) => {
     limit(`rooms:${req.auth.user.id}`, 10);
-    const room = rooms.create(req.body.name);
-    res.status(201).json({ room: { id: room.id, name: room.name } });
+    const room = rooms.create(req.body.name, undefined, req.auth.user.id);
+    res.status(201).json({ room: rooms.snapshot(room) });
+  });
+  app.patch('/api/rooms/:id', (req, res) => {
+    res.json({ room: rooms.rename(req.params.id, req.body.name, req.auth.user) });
+  });
+  app.delete('/api/rooms/:id', async (req, res) => {
+    rooms.remove(req.params.id, req.auth.user);
+    await Promise.all([...uploads.uploads.values()].filter(upload => upload.roomId === req.params.id && !upload.creating)
+      .map(upload => uploads.discard(upload)));
+    res.json({ ok: true });
   });
   app.post('/api/rooms/:id/youtube', async (req, res) => {
     requireMedia();
@@ -315,6 +324,9 @@ export async function createApp(overrides = {}) {
     }
   }
   rooms.on('state', broadcastState);
+  rooms.on('deleted', room => {
+    for (const ws of wss.clients) if (ws.roomId === room.id) ws.roomId = null;
+  });
   rooms.on('rooms', broadcastRooms);
   rooms.on('overlay', (room, message) => {
     for (const ws of wss.clients) if (ws.roomId === room.id) send(ws, { type: 'overlay', message, expiresAt: Date.now() + 10000 });

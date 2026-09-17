@@ -7,6 +7,23 @@ import { Rooms, makeItem } from '../server/rooms.js';
 import { StateStore } from '../server/store.js';
 import { start, until } from './helpers.js';
 
+test('room ownership and edits persist, and deleting all rooms survives restart', async t => {
+  const { instance, dir } = await start(t, { maxTranscoders: 0 });
+  const owner = { id: 'room-owner', role: 'user' };
+  const room = instance.rooms.create('Original', undefined, owner.id);
+  instance.rooms.rename(room.id, 'Updated', owner);
+  const restored = new Rooms({ store: instance.store });
+  assert.equal(restored.get(room.id).ownerId, owner.id);
+  assert.equal(restored.get(room.id).name, 'Updated');
+  restored.remove(room.id, owner);
+  restored.remove('lobby', { role: 'admin' });
+  assert.throws(() => restored.add(room, [makeItem({ kind: 'youtube' })]), /not found/);
+  const reopened = new StateStore(dir);
+  await reopened.init();
+  try { assert.deepEqual(new Rooms({ store: reopened }).list(), []); }
+  finally { reopened.close(); }
+});
+
 test('room checkpoints recover order, playlists, five-item history and a frozen clock without live members or stale media', async t => {
   await mkdir('test-artifacts', { recursive: true });
   const dir = await mkdtemp(path.resolve('test-artifacts', 'rooms-db-'));
