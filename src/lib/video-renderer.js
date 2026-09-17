@@ -31,7 +31,7 @@ const vertexSource = `
 
 const fragmentSource = `
     ${shaderPrecision}
-    uniform sampler2D u_video;
+    uniform sampler2D u_texture;
     uniform float u_opacity;
     uniform float u_effect;
     varying vec2 v_uv;
@@ -46,7 +46,7 @@ const fragmentSource = `
             gl_FragColor = crtFlame(v_uv);
             return;
         }
-        vec4 color = texture2D(u_video, v_uv);
+        vec4 color = texture2D(u_texture, v_uv);
         gl_FragColor = vec4(color.rgb, color.a * u_opacity);
     }
 `;
@@ -80,7 +80,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
 
     let program;
     let buffer;
-    let texture;
+    let emptyTexture;
     let ghostTexture;
     let ballTexture;
     let projectionLocation;
@@ -96,7 +96,6 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let breathPathLocation;
     let maxSize = 4096;
     let maxTextureSize;
-    let frameId = null;
     let animationId = null;
     let lastBallTime = null;
     let lastFlameTime = null;
@@ -107,8 +106,6 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let failed = false;
     let lost = false;
     let destroyed = false;
-    let videoDirty = true;
-    let videoUploaded = false;
     let ghost = null;
     let ghostDirty = false;
     let ball = null;
@@ -116,10 +113,8 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let ballSprite = null;
     let overlayDirty = true;
     let hasViewport = false;
-    // Gecko can deliver fewer video-frame callbacks than presented frames. Keep
-    // playback on its native compositor; WebGL still draws the idle CRT effects.
-    const nativeVideo = /\bGecko\//.test(window.navigator?.userAgent || '');
-    const useVideoFrames = typeof video.requestVideoFrameCallback === 'function';
+    // Video stays on the browser's native compositor. Only effects are drawn
+    // here, so a delayed animation callback cannot hold back video playback.
     const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
     let reducedMotion = !!motionQuery?.matches;
 
@@ -130,9 +125,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     }
 
     function cancelFrame() {
-        if (frameId !== null) video.cancelVideoFrameCallback(frameId);
         if (animationId !== null) cancelAnimationFrame(animationId);
-        frameId = null;
         animationId = null;
         lastBallTime = null;
         lastFlameTime = null;
@@ -140,13 +133,11 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
 
     function disposeResources() {
         if (gl && !lost) {
-            for (const resource of [texture, ghostTexture, ballTexture]) if (resource) gl.deleteTexture(resource);
+            for (const resource of [emptyTexture, ghostTexture, ballTexture]) if (resource) gl.deleteTexture(resource);
             if (buffer) gl.deleteBuffer(buffer);
             if (program) gl.deleteProgram(program);
         }
-        texture = ghostTexture = ballTexture = buffer = program = null;
-        videoUploaded = false;
-        videoDirty = true;
+        emptyTexture = ghostTexture = ballTexture = buffer = program = null;
         ghostDirty = !!ghost;
     }
 
@@ -209,17 +200,17 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             toastingLocation = gl.getUniformLocation(program, 'u_toasting');
             stickLocation = gl.getUniformLocation(program, 'u_stick');
             breathPathLocation = gl.getUniformLocation(program, 'u_breathPath');
-            gl.uniform1i(gl.getUniformLocation(program, 'u_video'), 0);
+            gl.uniform1i(gl.getUniformLocation(program, 'u_texture'), 0);
             gl.activeTexture(gl.TEXTURE0);
-            texture = createTexture();
-            // Keep the sampler complete even before the first decoded video frame.
+            emptyTexture = createTexture();
+            // Procedural CRT effects still need a complete sampler.
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
             gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
             gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
             gl.disable(gl.DEPTH_TEST);
             gl.enable(gl.BLEND);
             gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            gl.clearColor(5 / 255, 5 / 255, 6 / 255, 1);
+            gl.clearColor(0, 0, 0, 0);
             maxSize = Math.min(4096, gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
             maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
         } catch {
@@ -326,25 +317,22 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             return;
         }
         if (ball) ballBottomInset = parseFloat(getComputedStyle(canvas.parentElement).getPropertyValue('--controls-height')) || 71;
-        if (gl && !failed && !lost && (crtActive || !nativeVideo)) {
+        if (gl && !failed && !lost) {
             try {
                 resizeCanvas(canvas, width, height, maxSize);
                 gl.viewport(0, 0, canvas.width, canvas.height);
-                if (crtActive) gl.clearColor(0, 0, 0, 0);
-                else gl.clearColor(5 / 255, 5 / 255, 6 / 255, 1);
+                gl.clearColor(0, 0, 0, 0);
                 gl.clear(gl.COLOR_BUFFER_BIT);
                 gl.useProgram(program);
                 gl.uniformMatrix4fv(projectionLocation, false, orthographicProjection(width, height));
                 gl.uniform1f(effectLocation, 0);
-                const rect = videoRect(width, height, video.videoWidth, video.videoHeight);
                 if (crtActive) {
-                    setActive(false);
                     const controlsHeight = parseFloat(getComputedStyle(canvas.parentElement).getPropertyValue('--controls-height')) || 71;
                     const flameHeight = Math.min(height, controlsHeight + 24);
                     gl.uniform1f(effectLocation, 1);
                     gl.uniform2f(flameSizeLocation, width, flameHeight);
                     gl.uniform1f(flameTimeLocation, flameTime);
-                    drawTexture(texture, [0, height - flameHeight, width, flameHeight]);
+                    drawTexture(emptyTexture, [0, height - flameHeight, width, flameHeight]);
                     const mallow = marshmallowPose(marshmallows.current(), width, height, controlsHeight);
                     if (mallow && !reducedMotion) {
                         // Include the fixed breath source as well as the moving fire and smoke.
@@ -358,38 +346,21 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
                         gl.uniform4f(stickLocation, mallow.side, mallow.shaft, mallow.blow, mallow.breathTime);
                         gl.uniform4f(breathPathLocation, mallow.breathOriginX, mallow.breathOriginY - sceneTop,
                             mallow.breathTargetX, mallow.breathTargetY - sceneTop);
-                        drawTexture(texture, [0, height - sceneHeight, width, sceneHeight]);
+                        drawTexture(emptyTexture, [0, height - sceneHeight, width, sceneHeight]);
                     }
                     gl.uniform1f(effectLocation, 0);
-                } else if (video.readyState < 2 || !rect) {
-                    videoUploaded = false;
-                    setActive(false);
-                } else {
-                    if (video.videoWidth > maxTextureSize || video.videoHeight > maxTextureSize) {
-                        throw new Error('Video exceeds the texture size limit.');
-                    }
-                    gl.useProgram(program);
-                    // Effect-only redraws reuse the last decoded video texture, including while paused.
-                    if (videoDirty || !videoUploaded) {
-                        gl.bindTexture(gl.TEXTURE_2D, texture);
-                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-                        videoDirty = false;
-                        videoUploaded = true;
-                    }
-                    gl.uniformMatrix4fv(projectionLocation, false, orthographicProjection(width, height));
-                    drawTexture(texture, rect);
-                    drawGhost(getGhostRect(width, height));
-                    if (ball) {
-                        if (!ballTexture) {
-                            ballTexture = createTexture();
-                            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, getBallSprite());
-                        }
-                        const visible = displayBeachBall(ball, width, height, ballBottomInset);
-                        drawTexture(ballTexture, [visible.x - visible.radius, visible.y - visible.radius, visible.radius * 2, visible.radius * 2], 0.96, visible.angle);
-                    }
-                    if (!active && gl.getError() !== gl.NO_ERROR) throw new Error('Video rendering failed.');
-                    setActive(true);
                 }
+                drawGhost(getGhostRect(width, height));
+                if (ball) {
+                    if (!ballTexture) {
+                        ballTexture = createTexture();
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, getBallSprite());
+                    }
+                    const visible = displayBeachBall(ball, width, height, ballBottomInset);
+                    drawTexture(ballTexture, [visible.x - visible.radius, visible.y - visible.radius, visible.radius * 2, visible.radius * 2], 0.96, visible.angle);
+                }
+                if (!active && gl.getError() !== gl.NO_ERROR) throw new Error('Effect rendering failed.');
+                setActive(true);
             } catch { /* A texture upload failure must not interrupt room playback. */
                 fail();
             }
@@ -403,12 +374,9 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     function schedule() {
         if (destroyed || document.hidden) return;
         const canRender = gl && !failed && !lost;
-        const renderVideo = canRender && !nativeVideo && !crtActive;
-        if (renderVideo && useVideoFrames && frameId === null) frameId = video.requestVideoFrameCallback(frame);
         const animateBall = ball && !reducedMotion && hasViewport;
         const animateFlames = canRender && crtActive && !reducedMotion && hasViewport;
-        const animateVideo = renderVideo && hasViewport && !useVideoFrames && !video.paused && !video.ended;
-        if (animateBall || animateVideo || animateFlames) {
+        if (animateBall || animateFlames) {
             if (animationId === null) animationId = requestAnimationFrame(animate);
         } else if (animationId !== null) {
             cancelAnimationFrame(animationId);
@@ -434,13 +402,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             ball = advanceBeachBall(ball, elapsed, reducedMotion);
             lastBallTime = time;
         }
-        if (!useVideoFrames && !video.paused && !video.ended) videoDirty = true;
         redraw();
-    }
-
-    function frame() {
-        frameId = null;
-        refresh();
     }
 
     function redraw() {
@@ -448,21 +410,14 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
         schedule();
     }
 
-    function refresh() {
-        videoDirty = true;
-        redraw();
-    }
-
     function reset() {
         cancelFrame();
-        videoUploaded = false;
-        setActive(false);
-        refresh();
+        redraw();
     }
 
     function visibilityChanged() {
         cancelFrame();
-        if (!document.hidden) refresh();
+        if (!document.hidden) redraw();
     }
 
     function motionChanged() {
@@ -483,11 +438,11 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     function contextRestored() {
         lost = false;
         initialize();
-        refresh();
+        redraw();
     }
 
-    const events = ['loadeddata', 'seeked', 'playing', 'pause', 'resize'];
-    for (const event of events) video.addEventListener(event, refresh);
+    const events = ['loadedmetadata', 'loadeddata', 'seeked', 'resize'];
+    for (const event of events) video.addEventListener(event, redraw);
     video.addEventListener('emptied', reset);
     canvas.addEventListener('webglcontextlost', contextLost);
     canvas.addEventListener('webglcontextrestored', contextRestored);
@@ -500,7 +455,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     if (overlayCanvas) observer.observe(overlayCanvas);
     if (gl) initialize();
     else onActive(false);
-    refresh();
+    redraw();
 
     return {
         setCrtActive(value) {
@@ -532,7 +487,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             destroyed = true;
             cancelFrame();
             observer.disconnect();
-            for (const event of events) video.removeEventListener(event, refresh);
+            for (const event of events) video.removeEventListener(event, redraw);
             video.removeEventListener('emptied', reset);
             canvas.removeEventListener('webglcontextlost', contextLost);
             canvas.removeEventListener('webglcontextrestored', contextRestored);

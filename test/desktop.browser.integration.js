@@ -32,6 +32,7 @@ async function availablePort() {
 for (const split of [false, true]) {
 for (const withAudio of [false, true]) {
 test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video only'} to a late viewer (${split ? 'Worker + metal' : 'local'}${firefoxReceiver && split && !withAudio ? ', Firefox receiver' : ''})`, {timeout: 90000}, async t => {
+    const codecScenario = split ? (withAudio ? 'retry' : 'unavailable') : (withAudio ? 'vp8' : 'h264');
     const backend = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', desktopIceServers: '[]',
         ...(process.env.DESKTOP_TEST_LISTEN_IP ? {desktopListenIp: process.env.DESKTOP_TEST_LISTEN_IP} : {})});
     const {instance} = backend;
@@ -74,13 +75,26 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     });
     watch(sender);
     sender.on('pageerror', error => errors.push(error.message));
-    await sender.addInitScript(withAudio => {
+    await sender.addInitScript(({withAudio, codecScenario}) => {
         window.captureAudio = withAudio;
         window.captureTracks = [];
         window.desktopPeers = [];
+        window.codecFailures = 0;
+        Object.defineProperty(navigator, 'mediaCapabilities', {value: {async encodingInfo({video}) {
+            if (codecScenario === 'unavailable') throw new TypeError('WebRTC capability detection unavailable');
+            return {supported: true, smooth: true,
+                powerEfficient: video.contentType.toLowerCase().startsWith(codecScenario === 'vp8' ? 'video/vp8' : 'video/h264')};
+        }}});
         const Peer = window.RTCPeerConnection;
         window.RTCPeerConnection = class extends Peer {
             constructor(config) { super(config); window.desktopPeers.push(this); }
+            async setRemoteDescription(description) {
+                if (codecScenario === 'retry' && description.type === 'answer' && /a=rtpmap:\d+ H264\/90000/i.test(description.sdp)) {
+                    window.codecFailures++;
+                    throw new DOMException('Simulated H264 negotiation failure', 'OperationError');
+                }
+                return super.setRemoteDescription(description);
+            }
         };
         // Substitute only the OS picker. Exercise real WebRTC capture encoding,
         // authenticated signaling (including Worker proxy), and browser decoding.
@@ -114,13 +128,18 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
             window.captureTracks.push(...stream.getTracks());
             return stream;
         };
-    }, withAudio);
+    }, {withAudio, codecScenario});
     await join(sender, url);
     await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
     await sender.getByRole('button', {name: 'Choose screen to share'}).click();
     await sender.getByRole('button', {name: 'Stop sharing', exact: true}).waitFor();
     await until(() => instance.rooms.get('lobby').current?.transport === 'mediasoup' && [...instance.desktop.sessions.values()][0]?.ready);
     const item = instance.rooms.get('lobby').current;
+    const publisher = [...instance.desktop.sessions.values()][0];
+    const expectedCodec = ['retry', 'vp8'].includes(codecScenario) ? 'video/VP8' : 'video/H264';
+    assert.equal(publisher.producers.get('video').rtpParameters.codecs[0].mimeType, expectedCodec);
+    assert.equal(await sender.evaluate(() => window.codecFailures), codecScenario === 'retry' ? 1 : 0);
+    assert.equal(!!publisher.publisher.videoRetried, codecScenario === 'retry');
     assert.equal(instance.media.jobs.size, 0);
     assert.equal(item.media, null);
     assert.equal(item.kind, 'desktop');
@@ -145,6 +164,15 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     assert.equal(await viewer.locator('video').evaluate(video => video.srcObject instanceof MediaStream && !video.getAttribute('src')), true);
     assert.equal(await sender.evaluate(() => window.desktopPeers.find(peer => peer.connectionState !== 'closed').getSenders()
         .find(sender => sender.track?.kind === 'video').getParameters().encodings[0].maxBitrate), 6_000_000);
+    const encoding = await sender.evaluate(async () => {
+        const peer = window.desktopPeers.find(peer => peer.connectionState !== 'closed');
+        const stats = await peer.getSenders().find(sender => sender.track?.kind === 'video').getStats();
+        const outbound = [...stats.values()].find(stat => stat.type === 'outbound-rtp' && stat.kind === 'video');
+        return {encoder: outbound?.encoderImplementation, powerEfficient: outbound?.powerEfficientEncoder,
+            framesEncoded: outbound?.framesEncoded};
+    });
+    assert.ok(encoding.framesEncoded > 0);
+    t.diagnostic(`Codec scenario ${codecScenario}: ${expectedCodec}, ${JSON.stringify(encoding)}`);
     if (tcpOnly) assert.equal([...instance.desktop.sessions.values()][0].publisher.transport.iceSelectedTuple.protocol, 'tcp');
     const pixel = await until(() => viewer.locator('video').evaluate(video => {
         if (video.readyState < 2) return false;

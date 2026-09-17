@@ -12,6 +12,7 @@ import { makeItem } from '../server/rooms.js';
 import { create4kFixture } from './media-4k-fixture.js';
 import { createSeekFixture } from './media-seek-fixture.js';
 import { marshmallowPose } from '../src/lib/crt-marshmallow.js';
+import { observeVideoRendering } from './player-rendering-helpers.js';
 
 for (const codec of ['vp9', 'h264']) {
   test(`Original remains aligned across quality changes, far seeks and backend restarts (${codec})`, {timeout: 60000}, async t => {
@@ -675,53 +676,36 @@ test('uploads survive a metal restart without reselecting files and defer fronte
   assert.deepEqual(errors, []);
 });
 
-async function assertCanvasFrame(page) {
+async function assertNativeVideo(page) {
   await until(async () => await page.locator('video').evaluate(video => !video.seeking && video.readyState >= 2));
-  await page.locator('.video-viewport[data-renderer="webgl"]').waitFor();
+  await page.locator('.video-viewport[data-renderer="native"][data-effects-renderer="webgl"]').waitFor();
   const result = await page.locator('.video-canvas').evaluate(canvas => {
     const video = document.querySelector('video');
     video.dispatchEvent(new Event('seeked'));
     const gl = canvas.getContext('webgl');
     const pixels = new Uint8Array(canvas.width * canvas.height * 4);
     gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-    const reference = document.createElement('canvas');
-    reference.width = canvas.width;
-    reference.height = canvas.height;
-    const context = reference.getContext('2d');
-    context.fillStyle = 'rgb(5, 5, 6)';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    const scale = Math.min(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
-    const width = video.videoWidth * scale;
-    const height = video.videoHeight * scale;
-    context.drawImage(video, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-    const expected = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    let difference = 0;
-    let lit = 0;
-    let samples = 0;
-    for (let y = 10; y < canvas.height; y += 23) {
-      for (let x = 10; x < canvas.width; x += 23) {
-        const actualIndex = ((canvas.height - y - 1) * canvas.width + x) * 4;
-        const expectedIndex = (y * canvas.width + x) * 4;
-        for (let channel = 0; channel < 3; channel++) {
-          difference += Math.abs(pixels[actualIndex + channel] - expected[expectedIndex + channel]);
-          if (pixels[actualIndex + channel] > 80) lit++;
-          samples++;
-        }
-      }
-    }
     const shell = document.querySelector('.player-shell').getBoundingClientRect();
     const bounds = canvas.getBoundingClientRect();
-    return { error: gl.getError(), difference: difference / samples, lit, samples,
+    const videoBounds = video.getBoundingClientRect();
+    return { error: gl.getError(), transparent: pixels.every(value => value === 0),
       contained: bounds.left >= shell.left && bounds.right <= shell.right,
+      aligned: ['x', 'y', 'width', 'height'].every(key => bounds[key] === videoBounds[key]),
       bounds: { width: bounds.width, shellWidth: shell.width },
       videoOpacity: getComputedStyle(video).opacity, canvasOpacity: getComputedStyle(canvas).opacity,
+      background: getComputedStyle(canvas).backgroundColor, fit: getComputedStyle(video).objectFit,
+      uploads: window.videoTextureUploads, requests: window.videoFrameRequests,
       width: canvas.width, expectedWidth: Math.round(canvas.clientWidth * Math.min(devicePixelRatio, 2)) };
   });
   assert.equal(result.error, 0, 'WebGL draws without GPU errors.');
-  assert.ok(result.lit > result.samples / 10, 'The canvas must contain decoded video, not a blank frame.');
-  assert.ok(result.difference < 12, `WebGL pixels must match the native frame, upright and letterboxed: ${JSON.stringify(result)}`);
-  assert.equal(result.videoOpacity, '0', 'Native video is only the decoder while WebGL is active.');
+  assert.equal(result.transparent, true, 'Without effects every canvas pixel is transparent.');
+  assert.equal(result.background, 'rgba(0, 0, 0, 0)', 'The CSS canvas background must also be transparent.');
+  assert.equal(result.videoOpacity, '1', 'The native video remains visible under WebGL.');
   assert.equal(result.canvasOpacity, '1');
+  assert.equal(result.fit, 'contain', 'Native video preserves aspect ratio and letterboxing.');
+  assert.equal(result.aligned, true, 'Effects cover the native video viewport exactly.');
+  assert.equal(result.uploads, 0, 'Playback never uploads video frames into WebGL.');
+  assert.equal(result.requests, 0, 'Playback never schedules video-frame callbacks.');
   assert.equal(result.width, result.expectedWidth, 'Canvas resolution follows layout and device pixel ratio.');
   assert.equal(result.contained, true, `The canvas must not be cropped by its player shell: ${JSON.stringify(result.bounds)}`);
 }
@@ -740,15 +724,32 @@ async function assertJoystickLayout(page) {
 
 async function canvasSamples(page) {
   return page.locator('.video-canvas').evaluate(canvas => {
-    document.querySelector('video').dispatchEvent(new Event('seeked'));
+    const video = document.querySelector('video');
+    video.dispatchEvent(new Event('seeked'));
     const gl = canvas.getContext('webgl');
     const pixels = new Uint8Array(canvas.width * canvas.height * 4);
     gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    const reference = document.createElement('canvas');
+    reference.width = canvas.width;
+    reference.height = canvas.height;
+    const context = reference.getContext('2d');
+    context.fillStyle = 'rgb(5, 5, 6)';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const scale = Math.min(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
+    const width = video.videoWidth * scale;
+    const height = video.videoHeight * scale;
+    context.drawImage(video, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+    const native = context.getImageData(0, 0, canvas.width, canvas.height).data;
     const samples = [];
     for (let y = 10; y < canvas.height; y += 31) {
       for (let x = 10; x < canvas.width; x += 31) {
-        const index = (y * canvas.width + x) * 4;
-        samples.push(...pixels.slice(index, index + 3));
+        const index = ((canvas.height - y - 1) * canvas.width + x) * 4;
+        const nativeIndex = (y * canvas.width + x) * 4;
+        // WebGL's drawing buffer contains premultiplied RGB. Compose it over
+        // the native frame just as the browser does, preserving the old visual checks.
+        for (let channel = 0; channel < 3; channel++) {
+          samples.push(Math.round(pixels[index + channel] + native[nativeIndex + channel] * (1 - pixels[index + 3] / 255)));
+        }
       }
     }
     return samples;
@@ -862,6 +863,7 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   const admin = await adminContext.newPage();
   const viewer = await viewerContext.newPage();
   for (const page of [admin, viewer]) {
+    await page.addInitScript(observeVideoRendering);
     page.setDefaultTimeout(10000);
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => {
@@ -917,12 +919,12 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   await until(async () => room.playback.paused && await admin.locator('video').evaluate(v => v.paused));
   await until(() => room.current.media?.complete, 20000);
   await until(async () => await viewer.locator('video').evaluate(video => video.paused && !video.seeking));
-  await assertCanvasFrame(admin);
-  await assertCanvasFrame(viewer);
+  await assertNativeVideo(admin);
+  await assertNativeVideo(viewer);
   await assertJoystickLayout(viewer);
   await viewer.getByRole('button', { name: 'Toggle fullscreen' }).click();
   await until(async () => await viewer.evaluate(() => !!document.fullscreenElement));
-  await assertCanvasFrame(viewer);
+  await assertNativeVideo(viewer);
   await viewer.getByRole('button', { name: 'Toggle fullscreen' }).click();
   await until(async () => await viewer.evaluate(() => !document.fullscreenElement));
   await viewer.locator('.video-canvas').evaluate(canvas => {
@@ -930,10 +932,10 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
     window.restoreTestContext = () => extension.restoreContext();
     extension.loseContext();
   });
-  await viewer.locator('.video-viewport[data-renderer="native"]').waitFor();
+  await viewer.locator('.video-viewport[data-effects-renderer="2d"]').waitFor();
   assert.equal(await viewer.locator('video').evaluate(video => getComputedStyle(video).opacity), '1');
   await viewer.evaluate(() => { window.restoreTestContext(); delete window.restoreTestContext; });
-  await assertCanvasFrame(viewer);
+  await assertNativeVideo(viewer);
   await viewer.getByRole('slider', { name: 'Seek shared video', exact: true }).evaluate(slider => {
     slider.value = '12';
     slider.dispatchEvent(new Event('input', { bubbles: true }));
@@ -941,7 +943,7 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   });
   await until(async () => Math.abs(room.playback.position - 12) < 0.1 &&
     await admin.locator('video').evaluate(v => Math.abs(v.currentTime - 12) < 0.4));
-  await assertCanvasFrame(admin);
+  await assertNativeVideo(admin);
   const joystick = viewer.getByRole('slider', { name: 'Relative seek joystick' });
   const seekCommands = [];
   viewer.on('websocket', socket => socket.on('framesent', ({ payload }) => {
@@ -1038,18 +1040,18 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
       return count;
     } finally { gl.texImage2D = upload; }
   });
-  assert.equal(uploadsDuringAnimation, 0, 'Ball-only animation reuses the paused video texture.');
+  assert.equal(uploadsDuringAnimation, 0, 'Ball animation never uploads the native video.');
   await viewer.locator('.video-canvas').evaluate(canvas => {
     const extension = canvas.getContext('webgl').getExtension('WEBGL_lose_context');
     window.restoreBallContext = () => extension.restoreContext();
     extension.loseContext();
   });
-  await viewer.locator('.video-viewport[data-renderer="native"]').waitFor();
+  await viewer.locator('.video-viewport[data-effects-renderer="2d"]').waitFor();
   assert.equal(await viewer.locator('.player-effects').evaluate(canvas =>
     canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data.some((value, index) =>
       index % 4 === 3 && value > 100)), true, 'An active effect survives context loss.');
   await viewer.evaluate(() => { window.restoreBallContext(); delete window.restoreBallContext; });
-  await viewer.locator('.video-viewport[data-renderer="webgl"]').waitFor();
+  await viewer.locator('.video-viewport[data-effects-renderer="webgl"]').waitFor();
   assert.equal(await viewer.locator('.player-effects').evaluate(canvas =>
     canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data.every(value => value === 0)), true,
     'Restoring WebGL clears the fallback so effects are not drawn twice.');
@@ -1158,7 +1160,7 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   await viewer.getByRole('button', { name: 'Close dialog', exact: true }).click();
   await viewer.setViewportSize({ width: 390, height: 844 });
   await assertJoystickLayout(viewer);
-  await assertCanvasFrame(viewer);
+  await assertNativeVideo(viewer);
   const touch = await viewerContext.newCDPSession(viewer);
   const touchBounds = await joystick.boundingBox();
   const touchPoint = { x: touchBounds.x + touchBounds.width / 2, y: touchBounds.y + touchBounds.height / 2 };
@@ -1214,7 +1216,7 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   await fallback.locator('.seek-preview-label').waitFor({ state: 'hidden' });
   assert.equal(await effectAlpha(), 0);
   await fallbackContext.close();
-  t.diagnostic('Verified WebGL pixels, paused seeks, fullscreen/HiDPI/mobile sizing, context recovery, native fallback, and the 380ms joystick spring.');
+  t.diagnostic('Verified native video, transparent WebGL effects and preview blending, paused seeks, fullscreen/HiDPI/mobile sizing, context recovery, 2D fallback, and the 380ms joystick spring.');
   await viewer.setViewportSize({ width: 1280, height: 900 });
   await viewer.getByRole('slider', { name: 'Seek shared video', exact: true }).evaluate(slider => {
     slider.value = '12';

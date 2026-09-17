@@ -1061,6 +1061,9 @@ ul, ol {
     height: 100%;
     object-fit: contain;
     opacity: 0;
+}
+
+.video-viewport > video {
     background: #050506;
 }
 
@@ -1068,11 +1071,8 @@ ul, ol {
     opacity: 1;
 }
 
-.video-viewport > video.webgl-source {
-    opacity: 0;
-}
-
 .video-canvas {
+    background: transparent;
     pointer-events: none;
 }
 
@@ -1081,7 +1081,6 @@ ul, ol {
 
 .video-canvas.crt-flames {
     z-index: 1;
-    background: transparent;
 }
 
 .player-effects {

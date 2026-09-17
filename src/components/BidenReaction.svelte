@@ -51,7 +51,6 @@
 <div class="biden-reaction" data-reaction="biden" data-reaction-id={reaction.id} aria-hidden="true">
     <div class="biden-walker" bind:this={walker}>
         <img class="biden-cutout" bind:this={cutout} src="/images/joe-biden-walking.png" alt="" draggable="false"/>
-        <span class="biden-caption">PARODY</span>
     </div>
 </div>
 

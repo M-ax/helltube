@@ -281,8 +281,13 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
     await until(async () => await ballB.getAttribute('aria-pressed') === 'true');
     const ballState = instance.reactions.rooms.get('lobby');
     assert.ok(ballState);
-    assert.equal(await b.locator('.player-effects').evaluate(canvas => {
-        const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    assert.equal(await b.locator('.video-canvas').evaluate(canvas => {
+        window.dispatchEvent(new Event('resize'));
+        const gl = canvas.getContext('webgl');
+        // Read above the idle flame band to check the ball itself.
+        const height = Math.floor(canvas.height * .75);
+        const pixels = new Uint8Array(canvas.width * height * 4);
+        gl.readPixels(0, canvas.height - height, canvas.width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
         return pixels.some((value, index) => index % 4 === 3 && value >= 240);
     }), true, 'The shared ball is visible and nearly opaque even without playing video.');
 

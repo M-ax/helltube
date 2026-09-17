@@ -1,8 +1,11 @@
+import {desktopVideoCodecs, desktopVideoEncoding} from './desktop-encoding.js';
+
 // mediasoup carries a single publishing connection to metal. All negotiation
 // stays scoped to this capture/subscription on the authenticated room socket.
 export function createDesktopPeer({client, connection, stream, Stream = globalThis.MediaStream,
     loadDevice = async () => (await import('mediasoup-client')).Device.factory(),
-    onStream = () => {}, onState = () => {}, requestTimeout = 15000}) {
+    onStream = () => {}, onState = () => {}, requestTimeout = 15000,
+    mediaCapabilities = globalThis.navigator?.mediaCapabilities}) {
     let closed = false;
     let device;
     let transport;
@@ -14,6 +17,43 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
     const wanted = new Map((connection.producers || []).map(value => [value.id, value]));
     const removed = new Set();
     const identity = {requestId: connection.requestId, itemId: connection.itemId, peerId: connection.peerId};
+    let signalingFailed = false;
+
+    function createTransport(transportOptions) {
+        const options = {...transportOptions, ...connection.rtcConfig};
+        const current = stream ? device.createSendTransport(options) : device.createRecvTransport(options);
+        transport = current;
+        const signal = (action, data, callback, errback) => request(action, data).then(callback, error => {
+            signalingFailed = true;
+            errback(error);
+        });
+        current.on('connect', ({dtlsParameters}, callback, errback) => signal('connect', {dtlsParameters}, callback, errback));
+        current.on('connectionstatechange', status => { if (!closed && transport === current) onState(status); });
+        if (stream) current.on('produce', ({kind, rtpParameters}, callback, errback) => signal('produce', {kind, rtpParameters}, callback, errback));
+    }
+
+    async function produceVideo(track) {
+        const codecs = await desktopVideoCodecs(device.sendRtpCapabilities?.codecs, track, {mediaCapabilities});
+        const choices = codecs.length ? codecs : [undefined];
+        for (let index = 0; index < choices.length; index++) {
+            active();
+            try {
+                return await transport.produce({track, stopTracks: false, codec: choices[index],
+                    encodings: [{...desktopVideoEncoding}], codecOptions: {videoGoogleStartBitrate: 2000}});
+            } catch (error) {
+                active();
+                if (signalingFailed || track.readyState === 'ended' || transport.closed || index === choices.length - 1) throw error;
+                // A failed SDP operation can leave the browser transport unusable.
+                // Retry on fresh transports at both ends, keeping the capture alive.
+                const previous = transport;
+                transport = null;
+                previous.close();
+                const options = await request('retry-video');
+                active();
+                createTransport(options);
+            }
+        }
+    }
 
     function active() { if (closed) throw new Error('Desktop connection closed.'); }
     function request(action, data = {}) {
@@ -90,22 +130,16 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
             active();
             await device.load({routerRtpCapabilities: connection.routerRtpCapabilities});
             active();
-            const options = {...connection.transportOptions, ...connection.rtcConfig};
-            transport = stream ? device.createSendTransport(options) : device.createRecvTransport(options);
-            transport.on('connect', ({dtlsParameters}, callback, errback) => {
-                request('connect', {dtlsParameters}).then(callback, errback);
-            });
-            transport.on('connectionstatechange', status => { if (!closed) onState(status); });
+            createTransport(connection.transportOptions);
             if (stream) {
-                transport.on('produce', ({kind, rtpParameters}, callback, errback) => {
-                    request('produce', {kind, rtpParameters}).then(callback, errback);
-                });
-                for (const track of stream.getTracks()) {
+                // Negotiate video before publishing audio, so codec retries cannot
+                // tear down a successfully published audio track.
+                const tracks = [...stream.getTracks()].sort((a, b) => Number(b.kind === 'video') - Number(a.kind === 'video'));
+                for (const track of tracks) {
                     if (track.readyState !== 'live') continue;
                     active();
-                    const producer = await transport.produce({track, stopTracks: false,
-                        ...(track.kind === 'video' ? {encodings: [{maxBitrate: 6_000_000, maxFramerate: 30}],
-                            codecOptions: {videoGoogleStartBitrate: 2000}} : {codecOptions: {opusStereo: true, opusMaxAverageBitrate: 128000}})});
+                    const producer = track.kind === 'video' ? await produceVideo(track) :
+                        await transport.produce({track, stopTracks: false, codecOptions: {opusStereo: true, opusMaxAverageBitrate: 128000}});
                     if (closed) { producer.close(); return; }
                     producers.set(track.kind, producer);
                     const endAudio = () => {

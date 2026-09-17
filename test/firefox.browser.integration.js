@@ -6,6 +6,7 @@ import path from 'node:path';
 import {firefox} from 'playwright';
 import {start, until} from './helpers.js';
 import {targetPosition} from '../src/lib/format.js';
+import {observeVideoRendering, hasWebglOverlay} from './player-rendering-helpers.js';
 
 test('Firefox plays native HLS video with CRT, seek previews and reactions', {timeout: 60000}, async t => {
   const {instance, url, dir} = await start(t);
@@ -15,20 +16,7 @@ test('Firefox plays native HLS video with CRT, seek previews and reactions', {ti
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.addInitScript(() => {
-    window.videoTextureUploads = 0;
-    window.videoFrameRequests = 0;
-    const upload = WebGLRenderingContext.prototype.texImage2D;
-    WebGLRenderingContext.prototype.texImage2D = function (...args) {
-      if (args.at(-1) instanceof HTMLVideoElement) window.videoTextureUploads++;
-      return upload.apply(this, args);
-    };
-    const request = HTMLVideoElement.prototype.requestVideoFrameCallback;
-    HTMLVideoElement.prototype.requestVideoFrameCallback = function (...args) {
-      if (this.matches('.video-viewport > video')) window.videoFrameRequests++;
-      return request.apply(this, args);
-    };
-  });
+  await page.addInitScript(observeVideoRendering);
   await page.goto(url);
   await page.getByLabel('Username', {exact: true}).fill('admin');
   await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
@@ -62,8 +50,11 @@ test('Firefox plays native HLS video with CRT, seek previews and reactions', {ti
   }, 25000);
   const viewport = page.locator('.video-viewport');
   assert.equal(await viewport.getAttribute('data-renderer'), 'native');
+  assert.equal(await viewport.getAttribute('data-effects-renderer'), 'webgl');
   assert.equal(await video.evaluate(v => getComputedStyle(v).opacity), '1');
-  assert.equal(await canvas.evaluate(c => getComputedStyle(c).opacity), '0');
+  assert.equal(await canvas.evaluate(c => getComputedStyle(c).opacity), '1');
+  assert.equal(await canvas.evaluate(c => getComputedStyle(c).backgroundColor), 'rgba(0, 0, 0, 0)');
+  assert.equal(await canvas.evaluate(hasWebglOverlay), false, 'The WebGL overlay is transparent without effects.');
   const progress = await video.evaluate(async video => {
     const before = video.getVideoPlaybackQuality();
     const position = video.currentTime;
@@ -98,9 +89,7 @@ test('Firefox plays native HLS video with CRT, seek previews and reactions', {ti
   await until(async () => await video.evaluate(v => !v.seeking && Math.abs(v.currentTime - 12) < .1 &&
     v.buffered.length && v.buffered.end(v.buffered.length - 1) > 15));
   const revision = room.playback.revision;
-  const hasOverlay = () => page.locator('.player-effects').evaluate(canvas =>
-    canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
-      .some((value, i) => i % 4 === 3 && value > 100));
+  const hasOverlay = () => canvas.evaluate(hasWebglOverlay);
   const joystick = page.getByRole('slider', {name: 'Relative seek joystick', exact: true});
   await joystick.focus();
   await page.keyboard.down('ArrowRight');
@@ -125,7 +114,11 @@ test('Firefox plays native HLS video with CRT, seek previews and reactions', {ti
     });
   });
   assert.equal(await viewport.getAttribute('data-renderer'), 'native');
+  assert.equal(await viewport.getAttribute('data-effects-renderer'), 'webgl');
   assert.equal(await hasOverlay(), true, 'Context restoration keeps native-video effects visible.');
+  assert.equal(await page.locator('.player-effects').evaluate(canvas =>
+    canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data.every(value => value === 0)), true,
+    'Context restoration clears the fallback overlay.');
   await page.setViewportSize({width: 390, height: 844});
   await until(hasOverlay);
   assert.equal(await video.evaluate(v => getComputedStyle(v).opacity), '1');

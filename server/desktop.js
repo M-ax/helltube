@@ -84,10 +84,12 @@ export class DesktopShares {
     try { this.active(session, peer); } catch (error) { transport.close(); throw error; }
     peer.transport = transport;
     transport.on('dtlsstatechange', state => {
+      if (peer.transport !== transport) return;
       if (state !== 'failed' && state !== 'closed') return;
       this.failPeer(session, peer, 'The connection to the metal desktop relay was lost.');
     });
     transport.on('icestatechange', state => {
+      if (peer.transport !== transport) return;
       clearTimeout(peer.disconnectTimer);
       if (state === 'disconnected') peer.disconnectTimer = setTimeout(() =>
         this.failPeer(session, peer, 'The connection to the metal desktop relay timed out.'), 15000);
@@ -157,6 +159,18 @@ export class DesktopShares {
         return {};
       case 'restart-ice':
         return {iceParameters: await peer.transport.restartIce()};
+      case 'retry-video': {
+        if (!publishing || session.ready || session.producers.size || peer.videoRetried) {
+          throw httpError(409, 'Video codec retry is only available once before publishing.');
+        }
+        peer.videoRetried = true;
+        const previous = peer.transport;
+        peer.transport = null;
+        clearTimeout(peer.disconnectTimer);
+        previous.close();
+        await this.createTransport(session, peer);
+        return transportOptions(peer.transport);
+      }
       case 'produce': {
         if (!publishing || !['video', 'audio'].includes(message.kind) || session.producers.has(message.kind)) {
           throw httpError(403, 'Only the sharer can publish one video and one audio track.');

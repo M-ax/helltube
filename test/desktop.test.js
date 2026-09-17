@@ -63,6 +63,43 @@ test('metal sharing interrupts and resumes video, never enters history, and disa
     assert.equal(session.publisher.transport.closed, true);
 });
 
+test('video codec fallback replaces only an unready publisher transport once', async t => {
+    const h = fixture(t);
+    await h.desktop.start(h.room, h.ws, h.user, request);
+    const connection = h.messages.find(message => message.type === 'desktop:started');
+    const session = h.desktop.sessions.get(h.ws.id);
+    const previous = session.publisher.transport;
+    const viewer = {id: 'viewer'};
+    await h.desktop.watch(h.room, viewer, {requestId: 'watch', itemId: session.item.id});
+    const watching = h.messages.find(message => message.type === 'desktop:watching');
+    await assert.rejects(h.rpc(viewer, watching, 'retry-video'), /only available/);
+    const replacement = await h.rpc(h.ws, connection, 'retry-video');
+    assert.equal(previous.closed, true);
+    assert.notEqual(replacement.id, previous.id);
+    assert.equal(replacement.id, session.publisher.transport.id);
+    previous.emit('dtlsstatechange', 'failed');
+    previous.emit('icestatechange', 'disconnected');
+    assert.equal(session.publisher.disconnectTimer, undefined);
+    assert.equal(h.desktop.sessions.size, 1, 'Stale transport events cannot stop the share');
+    assert.equal(session.viewers.size, 1);
+    assert.equal((await session.router.dump()).transportIds.length, 2);
+    await assert.rejects(h.rpc(h.ws, connection, 'retry-video'), /only available/);
+    await h.rpc(h.ws, connection, 'produce', {kind: 'video', rtpParameters: rtp(session)});
+    await h.rpc(h.ws, connection, 'ready');
+    assert.equal(session.ready, true);
+});
+
+test('codec retries cannot tear down published tracks or a ready share', async t => {
+    const h = fixture(t);
+    const {session, connection} = await publish(h);
+    const transport = session.publisher.transport;
+    await assert.rejects(h.rpc(h.ws, connection, 'retry-video'), /only available/);
+    session.ready = false;
+    await assert.rejects(h.rpc(h.ws, connection, 'retry-video'), /only available/);
+    assert.equal(transport.closed, false);
+    assert.equal(session.producers.size, 1);
+});
+
 test('only one share can start per room and legacy direct sharing is rejected', async t => {
     const h = fixture(t);
     await assert.rejects(h.desktop.start(h.room, h.ws, h.user, {...request, transport: 'webrtc'}), /Reload/);

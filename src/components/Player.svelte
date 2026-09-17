@@ -60,7 +60,7 @@
     const seenReactions = new Set();
     const reactionTimers = new Set();
     const reactionEmoji = {heart: '❤️', laugh: '😂', clap: '👏'};
-    let webglActive = false;
+    let webglEffectsActive = false;
     let playerShell;
     let hls;
     let sourceKey = '';
@@ -686,7 +686,7 @@
         document.addEventListener('keydown', unlockAudio);
         document.addEventListener('keydown', cancelReaction);
         if (navigator.userActivation?.hasBeenActive) unlockAudio();
-        renderer = createVideoRenderer(canvas, video, active => webglActive = active, effectsCanvas);
+        renderer = createVideoRenderer(canvas, video, active => webglEffectsActive = active, effectsCanvas);
         const timer = setInterval(sync, 250);
         const healthTimer = setInterval(reportBufferHealth, 1000);
         document.addEventListener('visibilitychange', sync);
@@ -713,19 +713,18 @@
     <div class="video-viewport" class:finger-armed={fingerArmed}
          use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled, connected,
              roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
-         data-renderer={webglActive ? 'webgl' : 'native'}
+         data-renderer="native" data-effects-renderer={webglEffectsActive ? 'webgl' : '2d'}
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + 28}px`}>
         <!-- svelte-ignore a11y_media_has_caption -->
         <video bind:this={video} playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media || live}
-               class:webgl-source={webglActive}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
                on:canplay={sync} on:loadeddata={() => hasFrame = true} on:waiting={() => localBuffering = true}
                on:playing={() => { playing = true; localBuffering = false; }}
                on:pause={() => playing = false} on:ended={() => playing = false}
                on:error={nativePlaybackError}></video>
         <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
-                class:video-visible={crtVisible || ((!!media || live) && webglActive)} aria-hidden="true"></canvas>
+                class:video-visible={webglEffectsActive && (crtVisible || !!media || live)} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
         {#if reactionsEnabled && connected && reactions.roomId === room?.id && (fingerArmed || reactions.fingers?.length)}
             <PointingFingers fingers={reactions.fingers || []} local={localFinger} clientId={reactions.clientId}

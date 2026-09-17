@@ -161,7 +161,7 @@ test('failed or cancelled asynchronous publishing never leaves capture running',
     assert.equal(h.peers[0].closed, true);
 });
 
-function relayHarness(t, {stream, load, respond = true} = {}) {
+function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilities = null, failProduce} = {}) {
     const commands = [], produced = [], consumed = [], events = [];
     const connection = {requestId: 'capture', peerId: 'peer', itemId: 'desktop', transportOptions: {id: 'transport'},
         rtcConfig: {iceServers: [], iceTransportPolicy: 'all'}, routerRtpCapabilities: {}, producers: []};
@@ -175,31 +175,102 @@ function relayHarness(t, {stream, load, respond = true} = {}) {
         });
         return true;
     }};
-    const transport = Object.assign(new EventEmitter(), {
-        closed: false,
-        close() { this.closed = true; },
-        async produce(options) {
-            produced.push(options);
-            if (produced.length === 1) await new Promise((resolve, reject) => this.emit('connect', {dtlsParameters: {}}, resolve, reject));
-            const data = await new Promise((resolve, reject) => this.emit('produce', {kind: options.track.kind, rtpParameters: {}}, resolve, reject));
-            return Object.assign(new EventEmitter(), {id: data.id, close() {}});
-        },
-        async consume(options) {
-            const track = {kind: options.kind, stopped: false, stop() { this.stopped = true; }};
-            const consumer = {...options, track, rtpReceiver: {jitterBufferTarget: 100},
-                close() { this.closed = true; track.stop(); }};
-            consumed.push(consumer);
-            events.push('installed');
-            return consumer;
-        },
-    });
-    const device = {async load() {}, recvRtpCapabilities: {}, createSendTransport() { return transport; }, createRecvTransport() { return transport; }};
+    const transports = [];
+    const makeTransport = () => {
+        const transport = Object.assign(new EventEmitter(), {
+            closed: false,
+            close() { this.closed = true; },
+            async produce(options) {
+                produced.push(options);
+                if (!this.connected) {
+                    await new Promise((resolve, reject) => this.emit('connect', {dtlsParameters: {}}, resolve, reject));
+                    this.connected = true;
+                }
+                await failProduce?.(options);
+                const data = await new Promise((resolve, reject) => this.emit('produce', {kind: options.track.kind, rtpParameters: {}}, resolve, reject));
+                return Object.assign(new EventEmitter(), {id: data.id, close() {}});
+            },
+            async consume(options) {
+                const track = {kind: options.kind, stopped: false, stop() { this.stopped = true; }};
+                const consumer = {...options, track, rtpReceiver: {jitterBufferTarget: 100},
+                    close() { this.closed = true; track.stop(); }};
+                consumed.push(consumer);
+                events.push('installed');
+                return consumer;
+            },
+        });
+        transports.push(transport);
+        return transport;
+    };
+    const device = {async load() {}, recvRtpCapabilities: {}, sendRtpCapabilities: {codecs},
+        createSendTransport: makeTransport, createRecvTransport: makeTransport};
     let received;
     const peer = createDesktopPeer({client, connection, stream, Stream: FakeStream,
-        loadDevice: load || (async () => device), onStream: stream => { received = stream; }});
+        loadDevice: load || (async () => device), mediaCapabilities, onStream: stream => { received = stream; }});
     t.after(() => peer.close());
-    return {peer, client, connection, commands, produced, consumed, transport, events, received: () => received};
+    return {peer, client, connection, commands, produced, consumed, transports,
+        get transport() { return transports.at(-1); }, events, received: () => received};
 }
+
+const videoCodecs = [{mimeType: 'video/VP8'}, {mimeType: 'video/H264'}];
+
+test('a rejected preferred codec retries with fresh transport and publishes video before audio', async t => {
+    const tracks = ['audio', 'video'].map(kind => ({kind, readyState: 'live'}));
+    const h = relayHarness(t, {stream: {getTracks: () => tracks}, codecs: videoCodecs,
+        failProduce(options) { if (options.codec?.mimeType === 'video/H264') throw new Error('Encoder unavailable'); }});
+    await h.peer.start();
+    assert.deepEqual(h.produced.map(options => options.codec?.mimeType), ['video/H264', 'video/VP8', undefined]);
+    assert.deepEqual(h.commands.map(message => message.action), ['connect', 'retry-video', 'connect', 'produce', 'produce', 'ready']);
+    assert.equal(h.transports.length, 2);
+    assert.equal(h.transports[0].closed, true);
+    assert.equal(h.transports[1].closed, false);
+    assert.ok(h.produced.every(options => options.stopTracks === false));
+    assert.ok(tracks.every(track => track.readyState === 'live'));
+});
+
+test('codec retries stop after all negotiated codecs fail', async t => {
+    const h = relayHarness(t, {stream: {getTracks: () => [{kind: 'video', readyState: 'live'}]}, codecs: videoCodecs,
+        failProduce() { throw new Error('Encoder unavailable'); }});
+    await assert.rejects(h.peer.start(), /Encoder unavailable/);
+    assert.equal(h.produced.length, 2);
+    assert.equal(h.commands.filter(message => message.action === 'retry-video').length, 1);
+    assert.equal(h.commands.some(message => message.action === 'ready'), false);
+});
+
+test('ending capture during a failed codec attempt prevents a retry', async t => {
+    const track = {kind: 'video', readyState: 'live'};
+    const h = relayHarness(t, {stream: {getTracks: () => [track]}, codecs: videoCodecs,
+        failProduce() { track.readyState = 'ended'; throw new Error('Capture ended'); }});
+    await assert.rejects(h.peer.start(), /Capture ended/);
+    assert.equal(h.produced.length, 1);
+    assert.equal(h.transports.length, 1);
+});
+
+test('closing during capability detection prevents publication', async t => {
+    const pending = Promise.withResolvers();
+    const h = relayHarness(t, {stream: {getTracks: () => [{kind: 'video', readyState: 'live'}]}, codecs: videoCodecs,
+        mediaCapabilities: {encodingInfo: () => pending.promise}});
+    const starting = h.peer.start();
+    await flush();
+    h.peer.close();
+    pending.resolve({supported: true, powerEfficient: true});
+    await assert.rejects(starting, /closed/);
+    assert.equal(h.produced.length, 0);
+    assert.equal(h.transport.closed, true);
+});
+
+test('signaling errors do not retry codecs or hide the server error', async t => {
+    const h = relayHarness(t, {stream: {getTracks: () => [{kind: 'video', readyState: 'live'}]},
+        codecs: videoCodecs, respond: false});
+    const starting = h.peer.start();
+    await flush();
+    const request = h.commands[0];
+    h.client.desktopMessages.set({type: 'desktop:error', requestId: request.requestId, rpcId: request.rpcId,
+        message: 'Desktop connection is not authorized.'});
+    await assert.rejects(starting, /not authorized/);
+    assert.deepEqual(h.commands.map(message => message.action), ['connect']);
+    assert.equal(h.transports.length, 1);
+});
 
 test('transport publishes one encoding per track with a fixed upload ceiling and never takes ownership of capture', async t => {
     const tracks = ['video', 'audio'].map(kind => ({kind, readyState: 'live'}));
