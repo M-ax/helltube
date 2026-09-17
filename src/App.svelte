@@ -14,6 +14,7 @@
     import {createRealtime} from './lib/realtime.js';
     import {createUploadManager} from './lib/uploads.js';
     import {watchDeployment} from './lib/deployment-updates.js';
+    import {createSessionStartup} from './lib/session-startup.js';
     import {createDesktopShare} from './lib/desktop-share.js';
 
     const deployedCommit = __DEPLOYED_COMMIT__;
@@ -24,6 +25,8 @@
     let capabilities = {};
     let checking = true;
     let startupError = '';
+    let startupRetrying = false;
+    let sessionStartup;
     let sessionMessage = '';
     let modal = null;
     let manager;
@@ -165,16 +168,8 @@
         void refreshRooms();
     }
 
-    async function checkSession() {
-        checking = true;
-        startupError = '';
-        try {
-            authenticated(await api('/api/me'));
-        } catch (cause) {
-            if (cause.status !== 401) startupError = cause.message;
-        } finally {
-            checking = false;
-        }
+    function checkSession() {
+        void sessionStartup?.check();
     }
 
     function sessionEnded() {
@@ -277,6 +272,14 @@
     }
 
     onMount(() => {
+        sessionStartup = createSessionStartup({
+            onAuthenticated: authenticated,
+            onState: state => {
+                checking = state.checking;
+                startupRetrying = state.retrying;
+                startupError = state.error;
+            },
+        });
         const stopWatching = watchDeployment({
             buildId: import.meta.env.PROD ? __BUILD_ID__ : null, canReload: () => !manager?.hasPendingFiles() && !desktop.active(),
             onBackendCommit: commit => backendCommit = commit,
@@ -285,6 +288,7 @@
         window.addEventListener('helltube:session-ended', sessionEnded);
         return () => {
             stopWatching();
+            sessionStartup.dispose();
             window.removeEventListener('helltube:session-ended', sessionEnded);
         };
     });
@@ -307,7 +311,12 @@
 {#if checking}
     <main class="boot-screen"><span class="brand-mark"><Icon name="flame" size={28}/></span>
         <h1>helltube<span class="accent">.</span></h1>
-        <p><span class="spinner"></span>Warming up the projector…</p></main>
+        <p role="status"><span class="spinner"></span>{startupRetrying ? 'Reconnecting automatically…' : 'Warming up the projector…'}</p>
+        {#if startupRetrying}
+            <p>The server is temporarily unavailable. Your room will return when it reconnects.</p>
+            <button class="button primary" on:click={checkSession}><Icon name="refresh" size={18}/>Try again now</button>
+        {/if}
+    </main>
 {:else if startupError}
     <main class="boot-screen"><span class="brand-mark"><Icon name="offline" size={26}/></span>
         <h1>Can’t reach the room.</h1>

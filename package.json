@@ -14,7 +14,7 @@
     "start": "node server/main.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:media": "node --test test/media.integration.js",
-    "test:browser": "npm run build && node --test --test-concurrency=1 test/browser.integration.js test/reactions.browser.integration.js test/desktop.browser.integration.js",
+    "test:browser": "npm run build && node --test --test-concurrency=1 test/browser.integration.js test/reactions.browser.integration.js test/desktop.browser.integration.js test/deployment.browser.integration.js",
     "test:desktop": "npm run build && node --test test/desktop.browser.integration.js",
     "test:firefox": "npm run build && node --test test/firefox.browser.integration.js",
     "test:worker": "npm run build && node --test test/worker.integration.js",

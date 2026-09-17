@@ -52,6 +52,7 @@ function fixture(t, fetchVersion, options = {}) {
     documentTarget.visibilityState = 'visible';
     let reloads = 0;
     const stop = watchDeployment({ buildId: current, fetchVersion, windowTarget, documentTarget,
+        fetchBackend: async () => Response.json({ commit: null }),
         reload: () => reloads++, ...options });
     t.after(stop);
     return { windowTarget, documentTarget, stop, reloads: () => reloads };
@@ -149,6 +150,58 @@ test('upload protection is checked after a pending version request finishes', as
     const state = fixture(t, () => response.promise, { canReload: () => !pendingFiles });
     pendingFiles = true;
     response.resolve(Response.json({ buildId: newer }));
+    await flush();
+    assert.equal(state.reloads(), 0);
+});
+
+test('new frontend builds wait for metal to finish updating before reloading', async t => {
+    const commit = 'b'.repeat(40);
+    const responses = [
+        () => Response.json({ commit: 'a'.repeat(40) }),
+        () => new Response('Bad Gateway', { status: 502 }),
+        () => { throw new TypeError('Failed to fetch'); },
+        () => new Response('<html>Unavailable</html>', { headers: { 'Content-Type': 'text/html' } }),
+        () => Response.json({ commit }),
+    ];
+    const state = fixture(t, async () => Response.json({ buildId: newer, commit }), {
+        fetchBackend: async () => responses.shift()(),
+    });
+    await flush();
+    assert.equal(state.reloads(), 0, 'The old metal process is still running while the new release builds.');
+    for (let i = 0; i < 3; i++) {
+        state.windowTarget.dispatchEvent(new Event('online'));
+        await flush();
+        assert.equal(state.reloads(), 0, 'A backend outage must not discard the running frontend.');
+    }
+    state.windowTarget.dispatchEvent(new Event('online'));
+    await flush();
+    assert.equal(state.reloads(), 1);
+});
+
+test('reload waits for the current backend check and rechecks upload protection after it resolves', async t => {
+    const backend = Promise.withResolvers();
+    let pendingFiles = false;
+    const state = fixture(t, async () => Response.json({ buildId: newer }), {
+        fetchBackend: () => backend.promise.then(response => response.clone()), canReload: () => !pendingFiles,
+    });
+    await flush();
+    assert.equal(state.reloads(), 0);
+    pendingFiles = true;
+    backend.resolve(Response.json({ commit: null }));
+    await flush();
+    assert.equal(state.reloads(), 0);
+    pendingFiles = false;
+    state.windowTarget.dispatchEvent(new Event('online'));
+    await flush();
+    assert.equal(state.reloads(), 1);
+});
+
+test('disposal prevents a reload while waiting for metal', async t => {
+    const backend = Promise.withResolvers();
+    const state = fixture(t, async () => Response.json({ buildId: newer }), { fetchBackend: () => backend.promise });
+    await flush();
+    state.stop();
+    backend.resolve(Response.json({ commit: null }));
     await flush();
     assert.equal(state.reloads(), 0);
 });

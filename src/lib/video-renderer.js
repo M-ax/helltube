@@ -3,7 +3,18 @@ import {advanceBeachBall, displayBeachBall} from '../../shared/beach-ball.js';
 import {crtFlameShader} from './crt-flames.js';
 import {createMarshmallowVisits, marshmallowPose, marshmallowShader} from './crt-marshmallow.js';
 
+// Pixel-space distances and the flame hash need more precision than 16-bit
+// mediump provides on some GPU backends. Match varying precision in both stages.
+const shaderPrecision = `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
+    precision mediump float;
+    #endif
+`;
+
 const vertexSource = `
+    ${shaderPrecision}
     attribute vec2 a_position;
     uniform mat4 u_projection;
     uniform vec4 u_rect;
@@ -19,7 +30,7 @@ const vertexSource = `
 `;
 
 const fragmentSource = `
-    precision mediump float;
+    ${shaderPrecision}
     uniform sampler2D u_video;
     uniform float u_opacity;
     uniform float u_effect;

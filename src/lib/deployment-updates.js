@@ -14,12 +14,15 @@ export function watchDeployment({ buildId, fetchVersion = (...args) => fetch(...
         request = controller;
         const timeout = setTimeout(() => controller.abort(), 10000);
         const options = { cache: 'no-store', credentials: 'same-origin', signal: controller.signal };
-        const backend = onBackendCommit ? (async () => {
+        const backend = buildId || onBackendCommit ? (async () => {
             try {
                 const response = await fetchBackend('/api/version', options);
                 if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return;
                 const version = await response.json();
-                if (!stopped && !controller.signal.aborted) onBackendCommit(normalizeCommit(version?.commit));
+                if (!version || !Object.hasOwn(version, 'commit')) return;
+                const commit = normalizeCommit(version.commit);
+                if (!stopped && !controller.signal.aborted) onBackendCommit?.(commit);
+                return { commit };
             } catch { /* Keep the last known backend commit through deployment outages. */ }
         })() : Promise.resolve();
         try {
@@ -29,7 +32,12 @@ export function watchDeployment({ buildId, fetchVersion = (...args) => fetch(...
             const version = await response.json();
             if (stopped || controller.signal.aborted || typeof version?.buildId !== 'string' ||
                 !/^[a-f0-9-]{36}$/.test(version.buildId) || version.buildId === buildId) return;
-            if (!canReload()) return;
+            // The Worker publishes before metal builds and restarts. Preserve the
+            // running page until this check sees metal ready for the new frontend.
+            const running = await backend;
+            const commit = normalizeCommit(version.commit);
+            if (stopped || controller.signal.aborted || !running ||
+                (commit && running.commit && commit !== running.commit) || !canReload()) return;
             reloading = true;
             reload();
         } catch { /* Retry after network errors and deployment interruptions. */ }

@@ -11,6 +11,7 @@ import { targetPosition } from '../src/lib/format.js';
 import { makeItem } from '../server/rooms.js';
 import { create4kFixture } from './media-4k-fixture.js';
 import { createSeekFixture } from './media-seek-fixture.js';
+import { marshmallowPose } from '../src/lib/crt-marshmallow.js';
 
 for (const codec of ['vp9', 'h264']) {
   test(`Original remains aligned across quality changes, far seeks and backend restarts (${codec})`, {timeout: 60000}, async t => {
@@ -294,6 +295,72 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   assert.equal(initialFlames.error, 0);
   assert.ok(initialFlames.top >= initialFlames.seek - 42, 'Flames stay in a shallow band above the seek bar.');
   await until(async () => (await flameFrame()).hash !== initialFlames.hash);
+  // Exercise the actual linked shader at desktop/4K distances. Merely checking
+  // for orange pixels misses collapsed flame noise and a missing long stick.
+  for (const width of [1560, 3840]) {
+    const height = 256;
+    const poses = [1, -1].map(side => marshmallowPose({
+      side, burns: false, reach: 0.26, time: 3, duration: 14,
+    }, width, height, 71));
+    const precision = await page.locator('.video-canvas').evaluate((canvas, {width, height, poses}) => {
+      window.dispatchEvent(new Event('resize'));
+      const gl = canvas.getContext('webgl');
+      const program = gl.getParameter(gl.CURRENT_PROGRAM);
+      const uniform = name => gl.getUniformLocation(program, name);
+      gl.uniformMatrix4fv(uniform('u_projection'), false, new Float32Array([
+        2 / width, 0, 0, 0, 0, -2 / height, 0, 0, 0, 0, -1, 0, -1, 1, 0, 1,
+      ]));
+      gl.uniform4f(uniform('u_rect'), 0, 0, width, height);
+      gl.uniform1f(uniform('u_rotation'), 0);
+      gl.uniform1f(uniform('u_flameTime'), 9.4);
+      gl.uniform1f(uniform('u_effect'), 1);
+      gl.uniform2f(uniform('u_flameSize'), width, 95);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      const row = new Uint8Array(canvas.width * 4);
+      gl.readPixels(0, Math.floor(canvas.height / 2), canvas.width, 1, gl.RGBA, gl.UNSIGNED_BYTE, row);
+      let flames = 0;
+      for (let i = 3; i < row.length; i += 4) if (row[i] > 30) flames++;
+
+      gl.uniform1f(uniform('u_effect'), 2);
+      gl.uniform2f(uniform('u_flameSize'), width, height);
+      gl.uniform4f(uniform('u_toasting'), 0, 0, 0, 0);
+      const sticks = poses.map(mallow => {
+        gl.uniform4f(uniform('u_marshmallow'), mallow.x, mallow.y, mallow.size, mallow.angle);
+        gl.uniform4f(uniform('u_stick'), mallow.side, mallow.shaft, 0, 0);
+        gl.uniform4f(uniform('u_breathPath'), mallow.breathOriginX, mallow.breathOriginY,
+          mallow.breathTargetX, mallow.breathTargetY);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+        gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        const covered = (x, y) => {
+          const px = Math.floor(x / width * canvas.width);
+          const py = Math.floor((1 - y / height) * canvas.height);
+          // Allow for the deliberately pixelated outline and raster rounding.
+          const radius = Math.ceil(3 * canvas.height / height);
+          for (let dy = -radius; dy <= radius; dy++) {
+            if (pixels[((py + dy) * canvas.width + px) * 4 + 3] > 200) return true;
+          }
+          return false;
+        };
+        const shaft = [0.2, 0.4, 0.6, 0.8].map(fraction => covered(
+          mallow.x - mallow.side * mallow.shaft * Math.cos(mallow.angle) * fraction,
+          mallow.y - mallow.side * mallow.shaft * Math.sin(mallow.angle) * fraction));
+        return {body: covered(mallow.x, mallow.y), shaft};
+      });
+      const error = gl.getError();
+      // Restore the renderer's own viewport and uniforms before its next frame.
+      window.dispatchEvent(new Event('resize'));
+      return {flameCoverage: flames / canvas.width, sticks, error};
+    }, {width, height, poses});
+    assert.equal(precision.error, 0);
+    assert.ok(precision.flameCoverage > 0.55, `Flame noise retains detail at ${width}px: ${JSON.stringify(precision)}`);
+    for (const stick of precision.sticks) {
+      assert.ok(stick.body && stick.shaft.every(Boolean),
+        `The marshmallow stays attached to a continuous stick at ${width}px: ${JSON.stringify(stick)}`);
+    }
+  }
   await page.emulateMedia({reducedMotion: 'reduce'});
   const stillFlames = await flameFrame();
   await new Promise(resolve => setTimeout(resolve, 150));
