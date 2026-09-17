@@ -80,6 +80,23 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   await page.getByRole('button', {name: 'Enter Helltube'}).click();
   await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
   await page.getByRole('heading', {name: 'NO SIGNAL'}).waitFor();
+  const viewport = page.locator('.video-viewport');
+  const assertWidescreen = async () => {
+    const bounds = await viewport.boundingBox();
+    assert.ok(Math.abs(bounds.height - bounds.width * 9 / 16) < 1, `Player should stay 16:9: ${JSON.stringify(bounds)}`);
+  };
+  await assertWidescreen();
+  await page.setViewportSize({width: 375, height: 850});
+  await assertWidescreen();
+  const addButton = page.getByRole('button', {name: 'Add something good'});
+  assert.equal(await addButton.evaluate(button => {
+    const bounds = button.getBoundingClientRect();
+    const controls = document.querySelector('.player-controls').getBoundingClientRect();
+    const screen = document.querySelector('.crt-screen').getBoundingClientRect();
+    return bounds.top >= screen.top && bounds.bottom <= controls.top;
+  }), true, 'The compact idle action stays above the controls.');
+  await page.screenshot({path: 'test-artifacts/crt-idle-mobile.png'});
+  await page.setViewportSize({width: 1440, height: 1000});
   await page.getByRole('button', {name: 'Add something good'}).click();
   assert.equal(await page.locator('#youtube-url').evaluate(input => input === document.activeElement), true);
   await page.locator('#youtube-url').fill('https://youtu.be/jNQXAC9IVRw');
@@ -99,6 +116,7 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   await page.setViewportSize({width: 375, height: 850});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.equal(await page.locator('.crt-screen').evaluate(screen => screen.scrollWidth <= screen.clientWidth), true);
+  await assertWidescreen();
   await page.emulateMedia({reducedMotion: 'reduce'});
   assert.equal(await page.locator('.crt-sweep').evaluate(sweep => getComputedStyle(sweep).display), 'none');
   room.current.status = 'error';
@@ -107,6 +125,25 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   await page.getByRole('heading', {name: 'SIGNAL FAILED'}).waitFor();
   await page.locator('.crt-error').filter({hasText: 'Fixture conversion failed'}).waitFor();
   assert.equal(await page.locator('.crt-running').count(), 0);
+  await page.emulateMedia({reducedMotion: 'no-preference'});
+  await page.evaluate(() => {
+    const screen = document.querySelector('.crt-screen');
+    const viewport = document.querySelector('.video-viewport');
+    window.crtExit = {frames: [], started: false, ended: false, height: viewport.clientHeight};
+    screen.addEventListener('outrostart', () => {
+      window.crtExit.started = true;
+      function sample() {
+        if (!screen.isConnected) return;
+        const style = getComputedStyle(screen);
+        const transform = new DOMMatrixReadOnly(style.transform);
+        window.crtExit.frames.push({opacity: Number(style.opacity), x: transform.a, y: transform.d,
+          height: viewport.clientHeight, frameReady: document.querySelector('video').readyState >= 2});
+        requestAnimationFrame(sample);
+      }
+      requestAnimationFrame(sample);
+    });
+    screen.addEventListener('outroend', () => window.crtExit.ended = true);
+  });
   room.current.status = 'queued';
   room.current.error = null;
   room.current.uploadProgress = null;
@@ -117,8 +154,34 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   await until(() => room.current.media?.complete, 15000);
   assert.ok(room.current.preparation.seconds > 0, 'Real FFmpeg stdout produces progress.');
   await page.locator('.crt-screen').waitFor({state: 'detached'});
+  const exit = await page.evaluate(() => window.crtExit);
+  assert.equal(exit.started && exit.ended, true, 'The CRT runs its exit before it is removed.');
+  assert.ok(exit.frames.some(frame => frame.opacity > 0 && frame.opacity < .9), 'The overlay becomes transparent over the video.');
+  assert.ok(exit.frames.some(frame => frame.y < .1 && frame.x > .8), 'The screen collapses to a horizontal line first.');
+  assert.ok(exit.frames.some(frame => frame.x < .7), 'The line rapidly contracts before disappearing.');
+  assert.ok(exit.frames.every(frame => frame.frameReady && frame.height === exit.height), 'Decoded video is underneath throughout, without resizing.');
+  await assertWidescreen();
   assert.ok(await page.locator('video').first().evaluate(video => video.readyState >= 2));
   assert.equal(room.playback.paused, true, 'A paused video still shows its decoded frame.');
+  await page.emulateMedia({reducedMotion: 'reduce'});
+  await page.addInitScript(() => {
+    window.reducedCrtExit = {started: false, ended: false, frames: 0};
+    let frame;
+    document.addEventListener('outrostart', event => {
+      if (!event.target.matches('.crt-screen')) return;
+      window.reducedCrtExit.started = true;
+      frame = requestAnimationFrame(() => window.reducedCrtExit.frames++);
+    }, true);
+    document.addEventListener('outroend', event => {
+      if (!event.target.matches('.crt-screen')) return;
+      cancelAnimationFrame(frame);
+      window.reducedCrtExit.ended = true;
+    }, true);
+  });
+  await page.reload();
+  await until(() => page.evaluate(() => window.reducedCrtExit?.ended));
+  assert.deepEqual(await page.evaluate(() => window.reducedCrtExit), {started: true, ended: true, frames: 0},
+    'Reduced motion reveals video immediately without a collapse or flash.');
   assert.deepEqual(errors, []);
 });
 

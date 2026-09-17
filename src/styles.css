@@ -1041,7 +1041,8 @@ ul, ol {
     width: 100%;
     min-width: 0;
     aspect-ratio: 16 / 9;
-    min-height: 330px;
+    min-height: 0;
+    container-type: inline-size;
     background: radial-gradient(ellipse at 48% 55%, #3b241c45 0, #19141640 35%, transparent 68%), #0c0b0d;
     overflow: hidden;
     display: flex;
@@ -1049,11 +1050,7 @@ ul, ol {
     justify-content: center;
 }
 
-.video-viewport:has(.video-visible) {
-    min-height: 240px;
-}
-
-.video-viewport:has(.crt-screen, .screen-message) {
+.video-viewport:has(.screen-message) {
     aspect-ratio: auto;
 }
 
@@ -3931,14 +3928,6 @@ progress::-moz-progress-bar {
 
     .setup-banner .button {
         margin-left: 27px;
-    }
-
-    .video-viewport {
-        min-height: 320px;
-    }
-
-    .video-viewport:has(.video-visible) {
-        min-height: 260px;
     }
 
     .screen-topline {

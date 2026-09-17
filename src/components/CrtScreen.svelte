@@ -14,9 +14,26 @@
     $: status = !connected ? 'Reconnecting to the room.' : failed ? (item?.error || pending?.error)
         : rows.find(row => row.state === 'busy')?.label || 'Awaiting video input.';
     const labels = {ok: 'OK', busy: 'RUN', wait: 'WAIT', halt: 'HALT', fail: 'FAIL'};
+
+    function shutoff() {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return {duration: 0};
+        return {
+            duration: 220,
+            css: (_t, elapsed) => {
+                // Collapse to a phosphor line, then pinch it away over the decoded frame.
+                const collapse = Math.min(1, elapsed / .55);
+                const pinch = Math.max(0, (elapsed - .55) / .45);
+                const height = 1 - .992 * (1 - (1 - collapse) ** 2);
+                return `transform: scale(${1 - pinch ** 2}, ${height}); opacity: ${1 - elapsed};
+                    filter: brightness(${1 + elapsed * 2}); --crt-flash: ${Math.max(0, Math.min(1, (elapsed - .4) * 5))};
+                    pointer-events: none;`;
+            },
+        };
+    }
 </script>
 
-<div class="crt-screen" class:crt-active={active} data-stage={item?.preparation?.stage || pending?.stage || 'idle'}>
+<div class="crt-screen" class:crt-active={active} data-stage={item?.preparation?.stage || pending?.stage || 'idle'}
+     out:shutoff|global>
     <div class="crt-glass" aria-hidden="true"></div>
     <div class="crt-sweep" aria-hidden="true"></div>
     <div class="crt-content">
@@ -69,15 +86,16 @@
 <style>
     .crt-screen {
         --phosphor: var(--accent);
-        position: relative;
+        position: absolute;
+        inset: 0;
         isolation: isolate;
         width: 100%;
-        min-height: 420px;
-        align-self: stretch;
+        min-height: 0;
         display: flex;
         align-items: center;
         padding: 64px clamp(20px, 5.5%, 60px) calc(var(--controls-height) + 24px);
         overflow: hidden;
+        transform-origin: center;
         color: var(--phosphor);
         background: radial-gradient(ellipse at 50% 42%, color-mix(in srgb, var(--phosphor) 9%, #080706), #080706 75%);
         font: 15px/1.4 'Share Tech Mono', var(--mono);
@@ -94,6 +112,15 @@
         border-radius: 20px / 12px;
         box-shadow: inset 0 0 28px #0009;
     }
+    .crt-screen::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        z-index: 4;
+        pointer-events: none;
+        opacity: var(--crt-flash, 0);
+        background: linear-gradient(90deg, transparent, var(--phosphor) 25%, #fff3de 50%, var(--phosphor) 75%, transparent);
+    }
     .crt-sweep {
         position: absolute;
         z-index: 3;
@@ -106,7 +133,7 @@
         border-bottom: 1px solid color-mix(in srgb, var(--phosphor) 40%, transparent);
         animation: crt-sweep 7s linear infinite;
     }
-    .crt-content { position: relative; z-index: 1; width: 100%; min-width: 0; }
+    .crt-content { position: relative; z-index: 1; width: 100%; min-width: 0; max-height: 100%; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
     .crt-kicker { font-size: 10px; letter-spacing: .19em; opacity: .75; }
     h2 { margin: 5px 0 3px; font: inherit; font-size: clamp(30px, 3.6vw, 46px); line-height: 1.1; letter-spacing: .07em; }
     .crt-active h2 { font-size: clamp(25px, 3vw, 36px); }
@@ -132,17 +159,24 @@
     .crt-prompt button:hover:not(:disabled) { color: #080706; background: var(--phosphor); }
     .crt-prompt button > span { margin-left: 12px; }
     .crt-note { margin: 10px 0 0; font-size: 10px; color: var(--accent-light); opacity: .8; }
-    :global(.player-shell:fullscreen) .crt-screen { min-height: 0; height: 100%; overflow-y: auto; align-items: safe center; }
     @keyframes crt-sweep { to { transform: translateY(500%); } }
     @keyframes crt-cursor { 50% { opacity: 0; } }
     @keyframes crt-working { to { transform: translateX(24ch); } }
-    @media (max-width: 600px) {
-        .crt-screen { min-height: 390px; font-size: 13px; padding-left: 20px; padding-right: 20px; }
+    @container (max-width: 600px) {
+        .crt-screen { font-size: 13px; padding: 44px 16px calc(var(--controls-height) + 10px); }
         .crt-row { gap: 8px; }
         .crt-log { gap: 6px; margin-top: 16px; }
         .crt-progress { gap: 0 7px; font-size: 10px; }
         .crt-detail { flex-basis: 100%; }
         .crt-kicker { font-size: 9px; }
+        .crt-screen:not(.crt-active) .crt-content { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .crt-screen:not(.crt-active) .crt-kicker,
+        .crt-screen:not(.crt-active) .crt-source,
+        .crt-screen:not(.crt-active) .crt-log,
+        .crt-screen:not(.crt-active) .crt-prompt > span { display: none; }
+        .crt-screen:not(.crt-active) h2 { margin: 0; font-size: clamp(18px, 5cqw, 28px); white-space: nowrap; }
+        .crt-screen:not(.crt-active) .crt-prompt { margin: 0; flex-shrink: 0; font-size: 10px; }
+        .crt-screen:not(.crt-active) .crt-prompt button > span { margin-left: 4px; }
     }
     @media (prefers-reduced-motion: reduce) {
         .crt-sweep { animation: none; display: none; }
