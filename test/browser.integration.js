@@ -14,6 +14,11 @@ import { createSeekFixture } from './media-seek-fixture.js';
 import { marshmallowPose } from '../src/lib/crt-marshmallow.js';
 import { observeVideoRendering } from './player-rendering-helpers.js';
 
+async function chooseQuality(page, value) {
+  await page.getByRole('combobox', {name: 'Video quality on this device'}).click();
+  await page.locator(`.quality-option[value="${value}"]`).click();
+}
+
 for (const codec of ['vp9', 'h264']) {
   test(`Original remains aligned across quality changes, far seeks and backend restarts (${codec})`, {timeout: 60000}, async t => {
     const context = await start(t);
@@ -39,7 +44,7 @@ for (const codec of ['vp9', 'h264']) {
     const select = page.locator('.quality-select');
     const aligned = async (qualityId, target, color) => {
       const quality = room.current.media?.qualities.find(quality => quality.id === qualityId);
-      if (!quality || await select.inputValue().catch(() => '') !== qualityId) return false;
+      if (!quality || await select.getAttribute('value').catch(() => '') !== qualityId) return false;
       return page.locator('video').evaluate((video, expected) => {
         if (video.readyState < 2 || video.videoWidth !== expected.width ||
           Math.abs(video.currentTime + expected.baseTime - expected.target) > 0.15) return false;
@@ -55,9 +60,9 @@ for (const codec of ['vp9', 'h264']) {
     const firstJob = instance.media.jobs.get(item.id);
     assert.ok(firstJob.original.baseTime > 54);
     const revision = room.playback.revision;
-    await select.selectOption('standard');
+    await chooseQuality(page, 'standard');
     await until(() => aligned('standard', 63.3, 0));
-    await select.selectOption('original');
+    await chooseQuality(page, 'original');
     await until(() => aligned('original', 63.3, 0));
     assert.equal(room.playback.revision, revision);
     instance.rooms.control(room, {action: 'seek', position: 15.3, revision: room.playback.revision});
@@ -75,7 +80,7 @@ for (const codec of ['vp9', 'h264']) {
       await restarted.listen();
       await until(() => aligned('original', 65.3, 1), 15000);
       assert.ok(restarted.media.jobs.get(item.id).original.baseTime > 55);
-      await select.selectOption('standard');
+      await chooseQuality(page, 'standard');
       await until(() => aligned('standard', 65.3, 1));
       assert.deepEqual(errors, []);
     } finally { await restarted.close(); }
@@ -118,7 +123,7 @@ test('4K VP9 survives startup buffering and sustained stalls fall back only for 
   const width = page => page.locator('video').evaluate(video => video.readyState >= 2 ? video.videoWidth : 0);
   await until(async () => (await Promise.all(pages.map(width))).every(width => width === 3840), 15000)
     .catch(async error => {t.diagnostic(await pages[0].locator('body').innerText()); throw error;});
-  for (const page of pages) assert.equal(await page.getByRole('combobox', {name: 'Video quality on this device'}).inputValue(), 'original');
+  for (const page of pages) assert.equal(await page.getByRole('combobox', {name: 'Video quality on this device'}).getAttribute('value'), 'original');
   instance.rooms.control(room, {action: 'play', revision: room.playback.revision});
   const revision = room.playback.revision;
   await until(async () => {
@@ -129,20 +134,20 @@ test('4K VP9 survives startup buffering and sustained stalls fall back only for 
     return targetPosition(room) >= 9;
   }, 15000);
   const select = pages[0].getByRole('combobox', {name: 'Video quality on this device'});
-  assert.equal(await select.inputValue(), 'original', 'Startup buffering must not latch a Standard fallback.');
+  assert.equal(await select.getAttribute('value'), 'original', 'Startup buffering must not latch a Standard fallback.');
   await until(async () => await width(pages[0]) === 1280, 20000);
   assert.ok(delayed > 0, 'Original fragment delivery was starved.');
   assert.equal(room.playback.revision, revision);
   assert.equal(await width(pages[1]), 3840);
-  assert.equal(await select.inputValue(), 'standard');
+  assert.equal(await select.getAttribute('value'), 'standard');
   assert.match(await pages[0].locator('.delivery-notice').textContent(), /Buffer|Playback stalled/);
   assert.equal(room.playback.paused, false);
   gate.resolve();
   instance.rooms.control(room, {action: 'seek', position: 9, revision: room.playback.revision});
   await until(async () => pages[0].locator('video').evaluate(video => video.currentTime >= 9 && video.readyState >= 3));
-  assert.equal(await select.inputValue(), 'standard', 'Recovery and seeking do not automatically return to Original.');
+  assert.equal(await select.getAttribute('value'), 'standard', 'Recovery and seeking do not automatically return to Original.');
   await pages[0].locator('.player-shell').focus();
-  await select.selectOption('original');
+  await chooseQuality(pages[0], 'original');
   await until(async () => await width(pages[0]) === 3840);
   assert.equal(await pages[0].locator('.delivery-notice').count(), 0);
   assert.deepEqual(errors, []);
@@ -184,20 +189,40 @@ test('quality selection switches encrypted renditions locally and keeps the shar
     video.readyState >= 2 && video.videoWidth === expected.width &&
     Math.abs(video.currentTime + expected.baseTime - expected.target) < 0.3, {width, baseTime, target});
   await until(async () => (await Promise.all(pages.map(page => aligned(page, 1440, 0)))).every(Boolean));
-  assert.equal(await quality.inputValue(), 'original');
-  await quality.selectOption('standard');
+  assert.equal(await quality.getAttribute('value'), 'original');
+  await quality.press('ArrowDown');
+  await quality.press('End');
+  await quality.press('Escape');
+  assert.equal(await quality.getAttribute('aria-expanded'), 'false');
+  assert.equal(await quality.getAttribute('value'), 'original', 'Escape cancels without changing quality.');
+  await quality.press('ArrowDown');
+  await quality.press('End');
+  await quality.press('Enter');
+  assert.equal(await quality.getAttribute('aria-expanded'), 'false');
   await until(() => aligned(pages[0], 1280, 3));
-  assert.equal(await pages[1].getByRole('combobox', {name: 'Video quality on this device'}).inputValue(), 'original');
+  assert.equal(await pages[1].getByRole('combobox', {name: 'Video quality on this device'}).getAttribute('value'), 'original');
   assert.equal(await aligned(pages[1], 1440, 0), true);
   assert.equal(room.playback.revision, revision, 'Quality changes never send shared playback commands.');
+  await quality.click();
+  const menu = pages[0].getByRole('listbox', {name: 'Video quality', exact: true});
+  assert.equal(await menu.getByRole('option', {selected: true}).getAttribute('value'), 'standard');
+  assert.equal(await menu.evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(25, 25, 29)');
   await pages[0].screenshot({path: 'test-artifacts/quality-desktop.png'});
+  await pages[0].locator('.now-playing h2').click();
+  assert.equal(await quality.getAttribute('aria-expanded'), 'false', 'Clicking outside closes the menu.');
   await pages[0].setViewportSize({width: 375, height: 850});
-  await quality.selectOption('original');
+  await chooseQuality(pages[0], 'original');
   await until(() => aligned(pages[0], 1440, 0));
   assert.ok(await quality.evaluate(element => {
     const rect = element.getBoundingClientRect();
     return rect.width > 0 && rect.left >= 0 && rect.right <= window.innerWidth;
   }));
+  await quality.click();
+  assert.ok(await menu.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    const viewport = element.closest('.video-viewport').getBoundingClientRect();
+    return rect.left >= viewport.left && rect.right <= viewport.right && rect.top >= viewport.top;
+  }), 'The open menu fits inside the mobile player.');
   await pages[0].screenshot({path: 'test-artifacts/quality-mobile.png'});
   assert.deepEqual(errors, []);
 });
@@ -1549,8 +1574,21 @@ test('overlay controls autohide accessibly and account volume survives reloads a
   assert.ok(layout.filters.every(layer => layer.mask.includes('linear-gradient')));
   await page.screenshot({ path: path.resolve('test-artifacts', 'controls-visible.png') });
   const beforeIdle = room.playback.revision;
+  const quality = page.getByRole('combobox', {name: 'Video quality on this device'});
+  await quality.click();
+  await page.getByRole('listbox', {name: 'Video quality', exact: true}).waitFor();
+  await shell.evaluate(node => {
+    const observer = new MutationObserver(() => {
+      if (node.dataset.controlsVisible !== 'false') return;
+      window.qualityClosedAtHide = !node.querySelector('.quality-menu')
+        && node.querySelector('.quality-select').getAttribute('aria-expanded') === 'false';
+      observer.disconnect();
+    });
+    observer.observe(node, {attributes: true, attributeFilter: ['data-controls-visible']});
+  });
   await page.mouse.move(0, 0);
   await until(async () => await shell.getAttribute('data-controls-visible') === 'false', 6000);
+  assert.equal(await page.evaluate(() => window.qualityClosedAtHide), true, 'The dropdown closes as autohide starts, before the control transition finishes.');
   await page.waitForTimeout(400);
   const hidden = await viewport.evaluate(node => {
     const track = node.querySelector('.seek-track');
@@ -1569,6 +1607,7 @@ test('overlay controls autohide accessibly and account volume survives reloads a
   await viewport.dispatchEvent('pointerdown', { pointerId: 42, pointerType: 'touch', bubbles: true });
   await viewport.dispatchEvent('pointerup', { pointerId: 42, pointerType: 'touch', bubbles: true });
   assert.equal(await shell.getAttribute('data-controls-visible'), 'true');
+  assert.equal(await quality.getAttribute('aria-expanded'), 'false', 'Revealing controls does not reopen the dropdown.');
   assert.equal(room.playback.revision, beforeIdle, 'The first hidden touch reveals without changing playback.');
 
   await page.keyboard.press('Tab');

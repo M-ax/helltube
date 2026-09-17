@@ -4,6 +4,7 @@
     import Icon from './Icon.svelte';
     import CrtScreen from './CrtScreen.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
+    import QualitySelect from './QualitySelect.svelte';
     import DesktopStats from './DesktopStats.svelte';
     import Reactions from './Reactions.svelte';
     import PointingFingers from './PointingFingers.svelte';
@@ -162,10 +163,10 @@
         onPreferencesChange?.({muted}, {key: preferenceKey, commit: true});
     }
 
-    function changeQuality(event) {
+    function changeQuality(id) {
         qualityFallbackItemId = null;
         qualityNotice = '';
-        qualityPreference = event.currentTarget.value;
+        qualityPreference = id;
         revealControls();
     }
 
@@ -864,12 +865,10 @@
                 </div>
                 <div class="local-controls"><span class="shared-label"><Icon name="users" size={13}/>Shared controls</span>
                     {#if media}
-                        <select class="quality-select" aria-label="Video quality on this device" title="Quality is just for you"
-                                value={media.id || 'standard'} on:change={changeQuality}>
-                            {#each qualities as quality (quality.id)}
-                                <option value={quality.id} disabled={!qualityReady(quality, position)}>{quality.label}</option>
-                            {/each}
-                        </select>
+                        {#key `${room?.id}|${item?.id}`}
+                            <QualitySelect {qualities} value={media.id || 'standard'} {position} {controlsVisible}
+                                           onChange={changeQuality}/>
+                        {/key}
                     {/if}
                     <button class="icon-button" aria-label={captureMuted ? 'Playback muted while sharing' : muted ? 'Unmute on this device' : 'Mute on this device'}
                             disabled={captureMuted} title="Volume is just for you" on:click={toggleMute}>
