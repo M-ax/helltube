@@ -83,7 +83,9 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
         Object.defineProperty(navigator, 'mediaCapabilities', {value: {async encodingInfo({video}) {
             if (codecScenario === 'unavailable') throw new TypeError('WebRTC capability detection unavailable');
             return {supported: true, smooth: true,
-                powerEfficient: video.contentType.toLowerCase().startsWith(codecScenario === 'vp8' ? 'video/vp8' : 'video/h264')};
+                powerEfficient: codecScenario === 'vp8' ? video.contentType === 'video/VP8' :
+                    codecScenario === 'retry' ? video.contentType.startsWith('video/H264') :
+                        video.contentType.includes('profile-level-id=42001f')};
         }}});
         const Peer = window.RTCPeerConnection;
         window.RTCPeerConnection = class extends Peer {
@@ -150,8 +152,9 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     const publisher = [...instance.desktop.sessions.values()][0];
     const expectedCodec = ['retry', 'vp8'].includes(codecScenario) ? 'video/VP8' : 'video/H264';
     assert.equal(publisher.producers.get('video').rtpParameters.codecs[0].mimeType, expectedCodec);
-    assert.equal(await sender.evaluate(() => window.codecFailures), codecScenario === 'retry' ? 1 : 0);
-    assert.equal(!!publisher.publisher.videoRetried, codecScenario === 'retry');
+    if (expectedCodec === 'video/H264') assert.equal(publisher.producers.get('video').rtpParameters.codecs[0].parameters['profile-level-id'], '42001f');
+    assert.equal(await sender.evaluate(() => window.codecFailures), codecScenario === 'retry' ? 2 : 0);
+    assert.equal(publisher.publisher.videoRetries || 0, codecScenario === 'retry' ? 2 : 0);
     assert.equal(instance.media.jobs.size, 0);
     assert.equal(item.media, null);
     assert.equal(item.kind, 'desktop');

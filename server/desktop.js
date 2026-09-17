@@ -160,10 +160,11 @@ export class DesktopShares {
       case 'restart-ice':
         return {iceParameters: await peer.transport.restartIce()};
       case 'retry-video': {
-        if (!publishing || session.ready || session.producers.size || peer.videoRetried) {
-          throw httpError(409, 'Video codec retry is only available once before publishing.');
+        const maxRetries = session.router.rtpCapabilities.codecs.filter(codec => /^video\/(h264|vp8)$/i.test(codec.mimeType)).length - 1;
+        if (!publishing || session.ready || session.producers.size || (peer.videoRetries || 0) >= maxRetries) {
+          throw httpError(409, 'Video codec retry is only available before publishing and within the codec limit.');
         }
-        peer.videoRetried = true;
+        peer.videoRetries = (peer.videoRetries || 0) + 1;
         const previous = peer.transport;
         peer.transport = null;
         clearTimeout(peer.disconnectTimer);

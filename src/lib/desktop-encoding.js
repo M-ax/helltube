@@ -2,7 +2,7 @@ export const desktopVideoEncoding = {maxBitrate: 6_000_000, maxFramerate: 60};
 
 // WebRTC has no API to force a GPU encoder. Prefer the browser's power-efficiency
 // signal for the negotiated profile; the browser still owns hardware/software
-// fallback. Keep both codecs even when a capability probe reports unsupported.
+// fallback. Keep all codec profiles even when a capability probe reports unsupported.
 export async function desktopVideoCodecs(codecs, track, {
     mediaCapabilities = globalThis.navigator?.mediaCapabilities, timeout = 750,
 } = {}) {

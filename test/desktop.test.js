@@ -63,11 +63,13 @@ test('metal sharing interrupts and resumes video, never enters history, and disa
     assert.equal(session.publisher.transport.closed, true);
 });
 
-test('video codec fallback replaces only an unready publisher transport once', async t => {
+test('video codec fallback allows each advertised profile while bounding unready transport replacements', async t => {
     const h = fixture(t);
     await h.desktop.start(h.room, h.ws, h.user, request);
     const connection = h.messages.find(message => message.type === 'desktop:started');
     const session = h.desktop.sessions.get(h.ws.id);
+    assert.deepEqual(session.router.rtpCapabilities.codecs.filter(codec => codec.mimeType === 'video/H264')
+        .map(codec => codec.parameters['profile-level-id']), ['42001f', '42e01f']);
     const previous = session.publisher.transport;
     const viewer = {id: 'viewer'};
     await h.desktop.watch(h.room, viewer, {requestId: 'watch', itemId: session.item.id});
@@ -82,6 +84,12 @@ test('video codec fallback replaces only an unready publisher transport once', a
     assert.equal(session.publisher.disconnectTimer, undefined);
     assert.equal(h.desktop.sessions.size, 1, 'Stale transport events cannot stop the share');
     assert.equal(session.viewers.size, 1);
+    assert.equal((await session.router.dump()).transportIds.length, 2);
+    const secondTransport = session.publisher.transport;
+    const fallback = await h.rpc(h.ws, connection, 'retry-video');
+    assert.equal(secondTransport.closed, true);
+    assert.notEqual(fallback.id, replacement.id);
+    assert.equal(session.publisher.videoRetries, 2);
     assert.equal((await session.router.dump()).transportIds.length, 2);
     await assert.rejects(h.rpc(h.ws, connection, 'retry-video'), /only available/);
     await h.rpc(h.ws, connection, 'produce', {kind: 'video', rtpParameters: rtp(session)});

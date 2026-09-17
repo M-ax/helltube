@@ -296,6 +296,21 @@ test('codec retries stop after all negotiated codecs fail', async t => {
     assert.equal(h.commands.some(message => message.action === 'ready'), false);
 });
 
+test('both H264 profiles can fail before VP8 succeeds without losing capture or audio', async t => {
+    const tracks = ['video', 'audio'].map(kind => ({kind, readyState: 'live'}));
+    const codecs = [videoCodecs[0], ...['42001f', '42e01f'].map(profile =>
+        ({mimeType: 'video/H264', parameters: {'profile-level-id': profile}}))];
+    const h = relayHarness(t, {stream: {getTracks: () => tracks}, codecs,
+        failProduce(options) { if (options.codec?.mimeType === 'video/H264') throw new Error('H264 unavailable'); }});
+    await h.peer.start();
+    assert.deepEqual(h.produced.map(options => options.codec?.parameters?.['profile-level-id'] || options.track.kind),
+        ['42001f', '42e01f', 'video', 'audio']);
+    assert.equal(h.commands.filter(message => message.action === 'retry-video').length, 2);
+    assert.deepEqual(h.transports.map(transport => transport.closed), [true, true, false]);
+    assert.equal(h.commands.at(-1).action, 'ready');
+    assert.ok(h.produced.every(options => options.stopTracks === false));
+});
+
 test('ending capture during a failed codec attempt prevents a retry', async t => {
     const track = {kind: 'video', readyState: 'live'};
     const h = relayHarness(t, {stream: {getTracks: () => [track]}, codecs: videoCodecs,

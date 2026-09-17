@@ -4,8 +4,20 @@ import {desktopVideoCodecs} from '../src/lib/desktop-encoding.js';
 
 const vp8 = {mimeType: 'video/VP8', parameters: {}};
 const h264 = {mimeType: 'video/H264', parameters: {'packetization-mode': 1, 'profile-level-id': '42e01f'}};
+const baseline = {mimeType: 'video/H264', parameters: {'packetization-mode': 1, 'profile-level-id': '42001f'}};
 const codecs = [vp8, h264];
 const track = {getSettings: () => ({width: 1280, height: 720, frameRate: 60})};
+
+test('selects GPU Baseline H264 when Constrained Baseline and VP8 are software encoders', async () => {
+    const result = await desktopVideoCodecs([vp8, baseline, h264], track, {mediaCapabilities: {async encodingInfo({video}) {
+        return {supported: true, powerEfficient: video.contentType.includes('profile-level-id=42001f')};
+    }}});
+    assert.deepEqual(result, [baseline, vp8, h264]);
+});
+
+test('without capability detection tries both H264 profiles before VP8', async () => {
+    assert.deepEqual(await desktopVideoCodecs([vp8, baseline, h264], track, {mediaCapabilities: null}), [baseline, h264, vp8]);
+});
 
 test('prefers the power-efficient negotiated profile and probes actual capture settings', async () => {
     const queries = [];
