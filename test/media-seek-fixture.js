@@ -3,7 +3,7 @@ import {promisify} from 'node:util';
 import path from 'node:path';
 import {hlsCopyQuality} from '../server/hls-copy.js';
 
-export async function createSeekFixture(t, {instance, dir, url}, codec = 'vp9') {
+export async function createSeekFixture(t, {instance, dir, url}, codec = 'vp9', {hls = false} = {}) {
   const exec = promisify(execFile);
   const h264 = codec === 'h264';
   const video = path.join(dir, `seek-${codec}.${h264 ? 'mp4' : 'webm'}`);
@@ -22,6 +22,12 @@ export async function createSeekFixture(t, {instance, dir, url}, codec = 'vp9') 
       {protocol: 'https', vcodec: codec, acodec: 'none', height: 810},
       {protocol: 'https', vcodec: 'none', acodec: h264 ? 'aac' : 'opus'},
     ], {allowFiles: true})};
+  if (hls) {
+    await exec(instance.media.config.ffmpeg, ['-v', 'error', '-i', video, '-i', audio, '-map', '0:v', '-map', '1:a',
+      '-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'vod', path.join(dir, 'upstream.m3u8')]);
+    resolved.inputs = [{url: `${url}/seek-${codec}/upstream.m3u8`, headers: {}}];
+    resolved.copyQuality = hlsCopyQuality([{protocol: 'm3u8', vcodec: codec, acodec: 'aac', height: 810}]);
+  }
   t.mock.method(instance.youtube, 'resolve', async () => resolved);
   return {video, audio, resolved};
 }

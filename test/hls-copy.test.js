@@ -8,7 +8,7 @@ import {availableQualities, qualityReady, selectQuality} from '../src/lib/media-
 const format = {protocol: 'm3u8_native', vcodec: 'avc1.64002a', acodec: 'mp4a.40.2', height: 1080};
 
 test('known H.264, VP9 and AV1 media can be copied with muxed or separate audio', () => {
-  assert.deepEqual(hlsCopyQuality([format]), {label: 'Original (1080p)'});
+  assert.deepEqual(hlsCopyQuality([format]), {label: 'Original (1080p)', aacAudio: true});
   assert.ok(hlsCopyQuality([{...format, protocol: 'm3u8', vcodec: 'h264', acodec: 'none'}]));
   for (const change of [{protocol: 'https'}, {vcodec: 'vp8'}, {vcodec: 'avc1.6e001f'},
     {acodec: 'vorbis'}, {vcodec: null}, {acodec: undefined}, {has_drm: true}, {pix_fmt: 'yuv420p10le'}]) {
@@ -33,7 +33,7 @@ test('both extractors expose copy suitability after validating the source host',
   for (const [provider, url] of [[youtube, 'https://video.googlevideo.com/source.m3u8'], [twitch, 'https://vod.ttvnw.net/source.m3u8']]) {
     const data = {...format, url, duration: 60};
     t.mock.method(provider, 'extract', async () => data);
-    assert.deepEqual((await provider.resolve('https://youtube.com/watch?v=jNQXAC9IVRw')).copyQuality, {label: 'Original (1080p)'});
+    assert.deepEqual((await provider.resolve('https://youtube.com/watch?v=jNQXAC9IVRw')).copyQuality, {label: 'Original (1080p)', aacAudio: true});
     data.vcodec = 'vp8';
     assert.equal((await provider.resolve('https://youtube.com/watch?v=jNQXAC9IVRw')).copyQuality, null);
   }

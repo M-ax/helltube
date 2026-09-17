@@ -13,5 +13,6 @@ export function hlsCopyQuality(formats, {allowFiles = false} = {}) {
   if (!/^(?:aac|mp4a\.40\.2|opus|none)$/i.test(audio.acodec || '')) return null;
   const height = Number(format.height);
   return {label: Number.isSafeInteger(height) && height > 0 ? `Original (${height}p)` : 'Original',
+    ...(/^(?:aac|mp4a\.40\.2)$/i.test(audio.acodec) ? {aacAudio: true} : {}),
     ...(modern || /^opus$/i.test(audio.acodec) ? {container: 'fmp4'} : {})};
 }

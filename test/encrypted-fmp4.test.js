@@ -61,7 +61,7 @@ test('growing fMP4 publication is atomic, encrypts initialization, preserves key
 
 async function growingFixture(t) {
   const {job, publisher} = await fixture(t);
-  const first = '#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nsegment-000000.m4s\n';
+  const first = '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nsegment-000000.m4s\n';
   for (const file of ['init.mp4', 'segment-000000.m4s']) await writeFile(path.join(job.clearDir, file), randomBytes(128));
   await writeFile(path.join(job.clearDir, 'index.m3u8'), first);
   await publisher.publish();
@@ -77,6 +77,16 @@ function mockRename(t, handler) {
   syncBuiltinESMExports();
   t.after(() => {mock.mock.restore(); syncBuiltinESMExports();});
 }
+
+test('earlier copied audio extends the first segment and its advertised target duration once', async t => {
+  const {job, publisher} = await growingFixture(t);
+  job.leadingDuration = 1.25;
+  await publisher.publish();
+  await publisher.publish();
+  const contents = await readFile(path.join(job.dir, 'index.m3u8'), 'utf8');
+  assert.match(contents, /#EXT-X-TARGETDURATION:4\n/);
+  assert.deepEqual([...contents.matchAll(/#EXTINF:([\d.]+)/g)].map(match => Number(match[1])), [3.25, 2]);
+});
 
 test('temporary playlist locks retain the old playable manifest and recover publication', async t => {
   const {job, publisher, previous} = await growingFixture(t);

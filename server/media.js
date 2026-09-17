@@ -240,7 +240,8 @@ export class Media {
         await this.convert(original, ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y',
           ...(original.copyTimestamps ? ['-copyts', '-start_at_zero'] : []),
           ...inputArgs(copyStart), '-map', '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
-          '-c', 'copy', ...outputArgs(original, keyInfo)], network);
+          '-c', 'copy', ...(original.clearDir && copyQuality.aacAudio ? ['-bsf:a', 'aac_adtstoasc'] : []),
+          ...outputArgs(original, keyInfo)], network);
         await original.publisher?.publish();
       })().catch(error => { original.failed ||= error; }).finally(() => { original.done = true; });
     }

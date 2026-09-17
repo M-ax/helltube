@@ -54,6 +54,7 @@ export class EncryptedFmp4 {
       this.job.timelineReady = true;
     }
     const lines = [];
+    const initialDuration = Number(/^#EXTINF:([\d.]+)/m.exec(contents)?.[1]) + (this.job.leadingDuration || 0);
     let firstDuration = true;
     for (const line of contents.split(/\r?\n/)) {
       if (this.job.cancelled) return;
@@ -65,7 +66,9 @@ export class EncryptedFmp4 {
         if (!match) throw new Error('Unexpected media fragment.');
         lines.push(await this.encrypt(line, BigInt(match[1]) + 1n));
       }
-      if (firstDuration && line.startsWith('#EXTINF:')) {
+      if (this.job.leadingDuration && line.startsWith('#EXT-X-TARGETDURATION:')) {
+        lines.push(`#EXT-X-TARGETDURATION:${Math.max(Number(line.slice(22)), Math.ceil(initialDuration))}`);
+      } else if (firstDuration && line.startsWith('#EXTINF:')) {
         firstDuration = false;
         lines.push(line.replace(/^#EXTINF:([\d.]+)/, (_, duration) =>
           `#EXTINF:${(Number(duration) + (this.job.leadingDuration || 0)).toFixed(6)}`));
