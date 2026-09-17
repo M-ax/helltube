@@ -3,7 +3,8 @@
     import Icon from './Icon.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
     import {api} from '../lib/api.js';
-    import {isYoutubeUrl, time} from '../lib/format.js';
+    import {time} from '../lib/format.js';
+    import {sourceKind, twitchURL} from '../../shared/media-source.js';
     import {videoFileAccept} from '../lib/uploads.js';
     import {parseStartTime, youtubeTimeArgument} from '../../shared/youtube-time.js';
 
@@ -29,14 +30,16 @@
     $: queue = room?.queue || [];
     $: if (insertAt !== 'end' && Number(insertAt) >= queue.length) insertAt = 'end';
     $: unavailable = !connected || !room || capabilities.ffmpeg === false;
-    $: youtubeUnavailable = unavailable || capabilities.youtube === false || !!busy;
+    $: linkKind = sourceKind(url.trim());
+    $: providerUnavailable = (linkKind === 'youtube' || linkKind === 'twitch') && capabilities[linkKind] === false;
+    $: youtubeUnavailable = unavailable || !!busy;
     $: uploadUnavailable = unavailable || !!busy || !manager;
     $: if (uploadUnavailable) resetFileDrag();
     $: if (mode !== 'upload') dropzoneDragDepth = 0;
     $: resetStartTime(url);
 
     function resetStartTime(value) {
-        const argument = isYoutubeUrl(value.trim()) ? youtubeTimeArgument(value.trim()) : null;
+        const argument = ['youtube', 'twitch'].includes(sourceKind(value.trim())) ? youtubeTimeArgument(value.trim()) : null;
         const seconds = argument === null ? null : parseStartTime(argument);
         hasStartTime = argument !== null;
         startTimeEnabled = hasStartTime;
@@ -82,11 +85,14 @@
     }
 
     async function addYoutube() {
-        if (busy || unavailable || capabilities.youtube === false) return;
+        if (busy || unavailable || providerUnavailable) return;
         error = '';
-        if (!isYoutubeUrl(url.trim())) {
-            error = 'Paste a complete youtube.com or youtu.be video or playlist URL.';
+        if (!linkKind) {
+            error = 'Paste a YouTube, Twitch VOD, or HTTP/HTTPS media file URL.';
             return;
+        }
+        if (linkKind === 'twitch') {
+            try { twitchURL(url.trim()); } catch (cause) { error = cause.message; return; }
         }
         const startAt = hasStartTime && startTimeEnabled ? readStartTime() : 0;
         if (startAt === null) return;
@@ -94,7 +100,7 @@
         const roomName = room.name;
         busy = 'youtube';
         try {
-            const result = await api(`/api/rooms/${encodeURIComponent(roomId)}/youtube`, {
+            const result = await api(`/api/rooms/${encodeURIComponent(roomId)}/media`, {
                 method: 'POST',
                 body: {url: url.trim(), insertAt: position(), startAt}
             });
@@ -200,8 +206,8 @@
         <div class="source-switch" role="group" aria-label="Video source">
             <button class:active={mode === 'youtube'} aria-pressed={mode === 'youtube'}
                     on:click={() => mode = 'youtube'}>
-                <Icon name="youtube" size={17}/>
-                <span>YouTube</span></button>
+                <Icon name="link" size={17}/>
+                <span>Video link</span></button>
             <button class:active={mode === 'upload'} class:drag-active={filesDragDepth > 0 && !uploadUnavailable}
                     aria-pressed={mode === 'upload'} title="Choose videos or drop files here"
                     on:click={() => mode = 'upload'} on:dragenter={event => dragEnter(event, 'files')}
@@ -212,11 +218,11 @@
     </div>
     {#if mode === 'youtube'}
         <form class="youtube-form" on:submit|preventDefault={addYoutube}>
-            <label for="youtube-url" class="sr-only">YouTube video or playlist URL</label>
+            <label for="youtube-url" class="sr-only">YouTube, Twitch VOD, or hosted media URL</label>
             <div class="url-field">
                 <Icon name="link" size={18}/>
                 <input id="youtube-url" bind:this={urlInput} bind:value={url} type="url"
-                       placeholder="Paste a YouTube video or playlist link" required
+                       placeholder="Paste a YouTube, Twitch VOD, or media file link" required
                        disabled={youtubeUnavailable} autocomplete="off"/></div>
             {#if hasStartTime}
                 <div class="youtube-start-time">
@@ -239,7 +245,7 @@
                 {/if}
             {/if}
             <button class="button primary" type="submit"
-                    disabled={youtubeUnavailable}>
+                    disabled={youtubeUnavailable || providerUnavailable}>
                 {#if busy === 'youtube'}<span class="spinner"></span>Adding…
                 {:else}
                     <Icon name="plus" size={18}/>
@@ -247,7 +253,7 @@
                 {/if}
             </button>
         </form>
-        {#if busy === 'youtube'}<p class="field-help" role="status">Finding the videos and expanding the playlist. This
+        {#if busy === 'youtube'}<p class="field-help" role="status">Loading media information. This
             can take a minute; please don’t submit it again.</p>{/if}
     {:else}
         <div class="upload-dropzone" class:drag-active={dropzoneDragDepth > 0 && !uploadUnavailable}
@@ -272,7 +278,7 @@
                disabled={uploadUnavailable}/>
     {/if}
     <div class="composer-bottom">
-        <p>{mode === 'youtube' ? 'Videos, Shorts, or a whole playlist. Up to 200 videos.' : 'Playback can start while uploading, when the container allows.'}</p>
+        <p>{mode === 'youtube' ? 'YouTube videos and playlists, Twitch VODs, or public HTTP/HTTPS video and audio files.' : 'Playback can start while uploading, when the container allows.'}</p>
         <label for="insert-position">Insert<select id="insert-position" bind:value={insertAt}
                                                    disabled={unavailable || !!busy}>
             <option value="end">At the end</option>
@@ -284,8 +290,8 @@
         <p class="form-error" role="alert">
             <Icon name="warning" size={16}/>{error}</p>
     {/if}
-    {#if mode === 'youtube' && capabilities.youtube === false}<p class="inline-note">YouTube is unavailable because
-        yt-dlp is missing on the server. Ask your administrator to install it.</p>{/if}
+    {#if mode === 'youtube' && providerUnavailable}<p class="inline-note">YouTube and Twitch require yt-dlp on the server.
+        Hosted media links are still available.</p>{/if}
     {#if mode === 'upload'}
         <details class="upload-explainer">
             <summary>How uploading and buffering work</summary>

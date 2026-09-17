@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { start, until } from './helpers.js';
-import { makeItem } from '../server/rooms.js';
+import { Rooms, makeItem } from '../server/rooms.js';
 
 test('room owners and administrators can manage rooms, while other users cannot', async t => {
   const { instance, api, connect } = await start(t, { maxTranscoders: 0 });
@@ -124,4 +124,53 @@ test('YouTube HTTP submissions honor start edits, opt-out, queue insertion and v
   assert.equal(room.playback.position, 0);
   instance.rooms.advance(room);
   assert.equal(room.playback.position, 45);
+});
+
+test('media submissions queue Twitch and hosted files with room authorization and persistent source types', async t => {
+  const { instance, api, connect } = await start(t, { maxTranscoders: 0 });
+  instance.capabilities.twitch = true;
+  t.mock.method(instance.twitch, 'extract', async () => ({ title: 'Twitch recording', duration: 120 }));
+  t.mock.method(instance.remote, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }]);
+  const submit = body => api('/api/rooms/lobby/media', { method: 'POST', body });
+  assert.equal((await submit({ url: 'https://twitch.tv/videos/12345' })).status, 403);
+  assert.equal((await api('/api/rooms/lobby/media', { method: 'POST', auth: '', body: {} })).status, 401);
+  const ws = await connect();
+  ws.send(JSON.stringify({ type: 'join', roomId: 'lobby' }));
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size);
+  assert.equal((await submit({ url: 'https://twitch.tv/videos/12345?t=30s' })).status, 201);
+  assert.equal(room.current.kind, 'twitch');
+  assert.equal(room.playback.position, 30);
+  instance.capabilities.youtube = false;
+  instance.capabilities.twitch = false;
+  assert.equal((await submit({ url: 'http://media.example/movie.mp4?token=secret', startAt: 12 })).status, 201);
+  assert.equal((await submit({ url: 'https://media.example/audio.mp3', insertAt: 0 })).status, 201);
+  assert.deepEqual(room.queue.map(item => item.title), ['audio.mp3', 'movie.mp4']);
+  assert.equal((await submit({ url: 'https://twitch.tv/videos/12345' })).status, 503);
+  for (const url of ['file:///movie.mp4', 'http://127.0.0.1/movie.mp4']) assert.equal((await submit({ url })).status, 400);
+  const snapshot = instance.rooms.snapshot(room);
+  assert.equal(JSON.stringify(snapshot).includes('token=secret'), false);
+  assert.ok(snapshot.queue.every(item => item.kind === 'http' && !item.source));
+  const restored = new Rooms({ store: instance.store }).get('lobby');
+  assert.equal(restored.current.source.url, 'https://www.twitch.tv/videos/12345');
+  assert.equal(restored.current.source.startAt, 30);
+  assert.equal(restored.queue[1].source.url, 'http://media.example/movie.mp4?token=secret');
+  assert.equal(restored.queue[1].startAt, 12);
+  instance.capabilities.ffmpeg = false;
+  assert.equal((await submit({ url: 'https://media.example/file.mp4' })).status, 503);
+});
+
+test('a room must still be joined when Twitch extraction finishes', async t => {
+  const { instance, api, connect } = await start(t, { maxTranscoders: 0 });
+  instance.capabilities.twitch = true;
+  t.mock.method(instance.twitch, 'extract', async () => {
+    instance.rooms.get('lobby').members.clear();
+    return { title: 'VOD', duration: 120 };
+  });
+  const ws = await connect();
+  ws.send(JSON.stringify({ type: 'join', roomId: 'lobby' }));
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size);
+  assert.equal((await api('/api/rooms/lobby/media', { method: 'POST', body: { url: 'https://twitch.tv/videos/12345' } })).status, 403);
+  assert.equal(room.current, null);
 });

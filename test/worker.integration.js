@@ -187,6 +187,38 @@ test('real Worker shares encrypted HLS cache with per-hit auth while uploads and
       !request.pathname.endsWith('/key.bin')), false, 'YouTube playlists and segments must not bypass the Worker.');
     t.diagnostic('Chrome decoded AES-128 YouTube HLS with Worker playlists/segments and a cross-site direct key.');
 
+    for (const {stalledFile, fail} of [{stalledFile: 'index.m3u8'}, {stalledFile: 'segment-*.ts'},
+      {stalledFile: 'segment-*.ts', fail: true}]) {
+      instance.rooms.control(room, {action: 'pause', revision: room.playback.revision});
+      instance.rooms.control(room, {action: 'seek', position: 0, revision: room.playback.revision});
+      const pending = [];
+      const pattern = `${origin}/media/${job.id}/${stalledFile}`;
+      await page.route(pattern, route => {
+        pending.push(route);
+        if (fail) return route.fulfill({status: 503, body: 'Proxy unavailable'});
+      });
+      try {
+        await page.reload();
+        await until(() => pending.length > 0);
+        instance.rooms.control(room, {action: 'play', revision: room.playback.revision});
+        const revision = room.playback.revision;
+        await page.locator('.playback-health[data-delivery="metal"]').waitFor({timeout: 12000});
+        await decodedPlayback(page, youtube);
+        assert.equal(room.playback.revision, revision, 'Local failover must not send shared playback controls.');
+        assert.ok(room.current.id === youtube.id && !room.playback.paused);
+        assert.match(await page.locator('.delivery-notice').textContent(), /Switched to metal/);
+        await until(() => page.locator('.playback-health').textContent().then(text => /\d+\.\d+s buffered/.test(text)));
+        for (const file of [/index\.m3u8$/, /segment-\d+\.ts$/]) {
+          assert.ok(browserRequests.some(request => request.origin === directOrigin &&
+            request.pathname.startsWith(`/direct/media/${job.id}/`) && file.test(request.pathname)));
+        }
+        t.diagnostic(`Chrome recovered automatically from ${fail ? 'failed' : 'stalled'} ${stalledFile} via metal and resumed decoded playback.`);
+      } finally {
+        await page.unroute(pattern);
+        await Promise.all(pending.map(route => route.abort().catch(() => {})));
+      }
+    }
+
     instance.rooms.advance(room);
     assert.equal(room.current, null);
     await until(() => page.locator('video').evaluate(video => !video.getAttribute('src')));

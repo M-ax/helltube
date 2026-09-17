@@ -29,25 +29,25 @@ export function youtubeURL(value) {
   throw httpError(400, 'The URL must identify a YouTube video or playlist.');
 }
 
-export function runJSON(command, args, { signal, timeout = 90000, redactErrors = false, env } = {}) {
+export function runJSON(command, args, { signal, timeout = 90000, redactErrors = false, env, provider = 'YouTube', failureMessage } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true, signal, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     let errors = '';
     let failure;
-    const timer = setTimeout(() => { failure = new Error('YouTube extraction timed out.'); child.kill(); }, timeout);
+    const timer = setTimeout(() => { failure = new Error(`${provider} extraction timed out.`); child.kill(); }, timeout);
     child.stdout.on('data', data => {
       output += data;
-      if (output.length > 16 * 1024 * 1024) { failure = new Error('YouTube response was too large.'); child.kill(); }
+      if (output.length > 16 * 1024 * 1024) { failure = new Error(`${provider} response was too large.`); child.kill(); }
     });
     child.stderr.on('data', data => { errors = (errors + data).slice(-3000); });
     child.on('error', error => { failure ||= error; });
     child.on('close', code => {
       clearTimeout(timer);
       if (failure) return reject(failure);
-      if (code !== 0) return reject(new Error(redactErrors
+      if (code !== 0) return reject(new Error(failureMessage || (redactErrors
         ? 'YouTube extraction failed with configured cookies. Refresh the cookies and update yt-dlp; YouTube may still require bot verification. Raw diagnostics are hidden to protect credentials.'
-        : errors.trim() || `yt-dlp exited with code ${code}.`));
+        : errors.trim() || `yt-dlp exited with code ${code}.`)));
       try { resolve(JSON.parse(output)); } catch { reject(new Error('yt-dlp returned invalid metadata.')); }
     });
   });

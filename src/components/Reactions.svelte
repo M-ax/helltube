@@ -24,6 +24,10 @@
             <svg class="hitmarker-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M5 5l7 7m8 8 7 7M27 5l-7 7m-8 8-7 7"/></svg>
             MW2 hit marker
         </button>
+        <button type="button" class="reaction-button" disabled={!connected} on:click={() => onReact('metalpipe')}
+                title="Drop a pipe · loud clang on impact">
+            <span class="metal-pipe-icon" aria-hidden="true"><span class="metal-pipe-body"></span></span>Metal pipe
+        </button>
         <button type="button" class="reaction-button" disabled={!connected} on:click={() => onReact('heart')}><span aria-hidden="true">❤️</span>Love</button>
         <button type="button" class="reaction-button" disabled={!connected} on:click={() => onReact('laugh')}><span aria-hidden="true">😂</span>Laugh</button>
         <button type="button" class="reaction-button" disabled={!connected} on:click={() => onReact('clap')}><span aria-hidden="true">👏</span>Applause</button>

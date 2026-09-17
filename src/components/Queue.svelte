@@ -1,6 +1,7 @@
 <script>
     import Icon from './Icon.svelte';
     import {imageUrl, time} from '../lib/format.js';
+    import {sourceLabels, sourceIcons} from '../../shared/media-source.js';
 
     export let room = null;
     export let connected = false;
@@ -75,12 +76,12 @@
                                     {#if imageUrl(item.thumbnail)}<img src={imageUrl(item.thumbnail)} alt=""
                                                                        loading="lazy"
                                                                        referrerpolicy="no-referrer"/>{:else}
-                                        <Icon name={item.kind === 'youtube' ? 'youtube' : 'file'} size={25}
+                                        <Icon name={sourceIcons[item.kind] || 'file'} size={25}
                                               stroke={1.3}/>
                                     {/if}<span>{time(item.duration)}</span></div>
                                 <div class="queue-item-info"><span
                                         class="queue-index">{String(index + 1).padStart(2, '0')}
-                                    / {item.kind === 'youtube' ? 'YOUTUBE' : 'LOCAL FILE'}</span>
+                                    / {(sourceLabels[item.kind] || 'Video').toUpperCase()}</span>
                                     <h3 title={item.title}>{item.title}</h3><span class="item-status"
                                                                                   class:status-error={item.status === 'error'}><i
                                             class={`item-dot ${item.status}`}></i>{statuses[item.status] || item.status}</span>
@@ -128,7 +129,7 @@
                                     referrerpolicy="no-referrer"/>{:else}<Icon name="film" size={22}/>{/if}<span
                                     class="history-play"><Icon name="play" size={16}/></span></span><span
                                     class="history-info"><strong>{item.title}</strong><span>{time(item.duration)}
-                                · {item.kind === 'youtube' ? 'YouTube' : 'Local video'}</span></span>
+                                · {sourceLabels[item.kind] || 'Video'}</span></span>
                                 <Icon name="refresh" size={16}/>
                             </button>
                         </li>

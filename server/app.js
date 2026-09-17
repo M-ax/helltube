@@ -11,6 +11,9 @@ import { Rooms } from './rooms.js';
 import { Reactions } from './reactions.js';
 import { Uploads, chunkSize } from './uploads.js';
 import { YouTube } from './youtube.js';
+import { Twitch } from './twitch.js';
+import { RemoteMedia } from './remote-media.js';
+import { sourceKind } from '../shared/media-source.js';
 import { Media, available } from './media.js';
 import { StateStore } from './store.js';
 import { DirectAccess, equalSecret } from './direct-access.js';
@@ -39,6 +42,8 @@ export async function createApp(overrides = {}) {
   } catch (error) { store.close(); throw error; }
   const accounts = new Accounts(config.dataDir, store);
   const youtube = new YouTube(config);
+  const twitch = new Twitch(config);
+  const remote = new RemoteMedia();
   let rooms;
   let uploads;
   let media;
@@ -46,7 +51,7 @@ export async function createApp(overrides = {}) {
     await accounts.init();
     rooms = new Rooms({ ...config, store });
     uploads = new Uploads(config, rooms, store);
-    media = new Media(config, rooms, uploads, youtube);
+    media = new Media(config, rooms, uploads, youtube, twitch);
     await uploads.init();
     await media.init();
   } catch (error) {
@@ -55,6 +60,8 @@ export async function createApp(overrides = {}) {
     throw error;
   }
   const capabilities = { ffmpeg: await available(config.ffmpeg), youtube: await available(config.ytdlp, ['--version']) };
+  capabilities.twitch = capabilities.youtube;
+  capabilities.http = capabilities.ffmpeg;
   const directAccess = new DirectAccess(accounts);
   const app = express();
   const server = createServer(app);
@@ -96,6 +103,13 @@ export async function createApp(overrides = {}) {
     next();
   });
   app.get('/internal/uploads/:id', (req, res) => uploads.serve(req, res, req.params.id));
+  app.get('/internal/remote/:jobId', async (req, res) => {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) ||
+      !equalSecret(req.query.key, media.sourceSecret)) throw httpError(403, 'Internal media access denied.');
+    const job = [...media.jobs.values()].find(job => job.id === req.params.jobId && !job.cancelled && job.item.kind === 'http');
+    if (!job) throw httpError(404, 'Media not found.');
+    await remote.serve(req, res, job.item.source.url);
+  });
   app.use('/api/rooms/:id/uploads/batch', express.json({ limit: '256kb' }));
   app.use(express.json({ limit: '32kb' }));
   app.use((req, _res, next) => { req.body ??= {}; next(); });
@@ -150,14 +164,16 @@ export async function createApp(overrides = {}) {
   app.get('/api/config', (_req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin }));
   app.get('/api/media/:jobId/access', (req, res) => {
     const job = mediaJob(req.params.jobId, req.auth);
+    const metalUrl = config.bareMetalOrigin
+      ? directUrl(`/direct/media/${job.id}/index.m3u8`, req.auth, `media:${job.id}`) : null;
     res.json({ url: config.bareMetalOrigin && job.item.kind === 'upload'
-      ? directUrl(`/direct/media/${job.id}/index.m3u8`, req.auth, `media:${job.id}`)
-      : `/media/${job.id}/index.m3u8` });
+      ? metalUrl : `/media/${job.id}/index.m3u8`,
+      ...(metalUrl && job.item.kind !== 'upload' ? { fallbackUrl: metalUrl } : {}) });
   });
   app.get('/api/edge/media/:jobId/:file', async (req, res) => {
     if (!req.edge) throw httpError(403, 'Edge proxy credentials required.');
     const job = mediaJob(req.params.jobId, req.auth);
-    if (job.item.kind !== 'youtube' || !Buffer.isBuffer(job.key) || job.key.length !== 16 ||
+    if (!['youtube', 'twitch', 'http'].includes(job.item.kind) || !Buffer.isBuffer(job.key) || job.key.length !== 16 ||
       !/^segment-\d{6,}\.ts$/.test(req.params.file)) throw httpError(403, 'This media is not edge-cacheable.');
     const file = await stat(path.join(job.dir, req.params.file)).catch(() => null);
     if (!file?.isFile()) throw httpError(404, 'Media not found.');
@@ -211,12 +227,16 @@ export async function createApp(overrides = {}) {
       .map(upload => uploads.discard(upload)));
     res.json({ ok: true });
   });
-  app.post('/api/rooms/:id/youtube', async (req, res) => {
+  app.post(['/api/rooms/:id/youtube', '/api/rooms/:id/media'], async (req, res) => {
     requireMedia();
-    if (!capabilities.youtube) throw httpError(503, 'yt-dlp is missing. Install it and restart the server.');
     limit(`submissions:${req.auth.user.id}`, 12);
     const room = membership(req);
-    const items = await youtube.items(text(req.body.url, 'URL', 2048), req.auth.user, req.body.startAt);
+    const url = text(req.body.url, 'URL', 8192);
+    const kind = req.path.endsWith('/youtube') ? 'youtube' : sourceKind(url);
+    if (!kind) throw httpError(400, 'Enter a YouTube, Twitch VOD, or HTTP/HTTPS media URL.');
+    if ((kind === 'youtube' || kind === 'twitch') && !capabilities[kind]) throw httpError(503, 'yt-dlp is missing. Install it and restart the server.');
+    const provider = { youtube, twitch, http: remote }[kind];
+    const items = await provider.items(url, req.auth.user, req.body.startAt);
     if (!accounts.authenticate(req.headers.cookie)) throw httpError(401, 'Session expired.');
     membership(req);
     rooms.add(room, items, req.body.insertAt);
@@ -276,7 +296,7 @@ export async function createApp(overrides = {}) {
       const scope = `media:${job.id}`;
       const keyUrl = directUrl(`/direct/media/${job.id}/key.bin`, req.auth, scope);
       contents = contents.replace(/URI="[^"]*"/g, `URI="${keyUrl}"`);
-      if (job.item.kind === 'upload') {
+      if (req.path.startsWith('/direct/')) {
         contents = contents.replace(/^segment-\d{6,}\.ts$/gm, file => directUrl(`/direct/media/${job.id}/${file}`, req.auth, scope));
       }
       return res.send(contents);
@@ -415,7 +435,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, rooms, reactions, uploads, media, youtube, capabilities, store, cleanup,
+  return { app, server, accounts, rooms, reactions, uploads, media, youtube, twitch, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;

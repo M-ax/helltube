@@ -414,7 +414,7 @@
                 <div class="capability-banner" role="status">
                     <Icon name="warning" size={18}/>
                     <div><strong>Some features need a little
-                        setup.</strong><span>{capabilities.ffmpeg === false ? 'FFmpeg is missing on the server, so video preparation is unavailable. ' : ''}{capabilities.youtube === false ? 'yt-dlp is missing, so YouTube submissions are unavailable. ' : ''}
+                        setup.</strong><span>{capabilities.ffmpeg === false ? 'FFmpeg is missing on the server, so video preparation is unavailable. ' : ''}{capabilities.youtube === false ? 'yt-dlp is missing, so YouTube and Twitch submissions are unavailable. ' : ''}
                         Ask your administrator to install the missing binaries and restart the server.</span></div>
                 </div>
             {/if}

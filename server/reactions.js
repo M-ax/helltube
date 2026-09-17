@@ -23,7 +23,7 @@ export class Reactions {
             this.broadcast(roomId, this.snapshot(roomId));
             return;
         }
-        if (!['hitmarker', 'heart', 'laugh', 'clap'].includes(kind)) throw httpError(400, 'Unknown reaction.');
+        if (!['hitmarker', 'metalpipe', 'heart', 'laugh', 'clap'].includes(kind)) throw httpError(400, 'Unknown reaction.');
         if (![message.x, message.y].every(value => Number.isFinite(value) && value >= 0 && value <= 1)) {
             throw httpError(400, 'Reaction position must be inside the player.');
         }

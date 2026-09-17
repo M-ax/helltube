@@ -6,6 +6,7 @@ import { parse } from 'svelte/compiler';
 import { api } from '../src/lib/api.js';
 import { createDeliveryClient, DeliveryError, isSameOriginUrl, uploadTransferUrl } from '../src/lib/delivery.js';
 import { targetPosition } from '../src/lib/format.js';
+import { createBufferHealth, isProxyLoadFailure } from '../src/lib/buffer-health.js';
 
 const appOrigin = 'https://app.example';
 const directOrigin = 'https://delivery.example';
@@ -197,14 +198,15 @@ test('API requests retain same-origin-only credentials for direct PUTs and authe
 const playerSource = await readFile(new URL('../src/components/Player.svelte', import.meta.url), 'utf8');
 const playerAst = parse(playerSource);
 const sourceLifecycle = playerAst.instance.content.body.filter(node => node.type === 'VariableDeclaration' ||
-  (node.type === 'FunctionDeclaration' && ['cleanupSource', 'attach', 'retryPlayback'].includes(node.id.name)))
+  (node.type === 'FunctionDeclaration' && ['cleanupSource', 'attach', 'retryPlayback', 'switchToMetal',
+    'reportBufferHealth', 'nativePlaybackError'].includes(node.id.name)))
   .map(node => playerSource.slice(node.start, node.end)).join('\n');
 
 function playerHarness(resolveMediaUrl, native = false) {
   const instances = [];
   const previews = [];
   class Hls {
-    static Events = { MEDIA_ATTACHED: 'attached', MANIFEST_PARSED: 'parsed', ERROR: 'error' };
+    static Events = { MEDIA_ATTACHED: 'attached', MANIFEST_PARSED: 'parsed', ERROR: 'error', FRAG_LOADED: 'loaded' };
     static ErrorTypes = { MEDIA_ERROR: 'media', NETWORK_ERROR: 'network' };
     static isSupported() { return !native; }
     constructor(config) { this.config = config; this.events = new Map(); instances.push(this); }
@@ -224,14 +226,19 @@ function playerHarness(resolveMediaUrl, native = false) {
     return preview;
   };
   const create = new Function('delivery', 'Hls', 'targetPosition', 'createSeekPreview', 'isSameOriginUrl',
-    'room', 'clockOffset', 'element', `${sourceLifecycle}
+    'room', 'clockOffset', 'element', 'createBufferHealth', 'isProxyLoadFailure', `${sourceLifecycle}
     video = element;
+    let connected = true;
     let item = room.current;
     let media = item.media;
-    return {attach, cleanupSource, retryPlayback,
-      state: () => ({playerError, localBuffering, previewPosition})};`);
-  return { ...create({ resolveMediaUrl }, Hls, targetPosition, createSeekPreview,
-    value => isSameOriginUrl(value, appOrigin), room, 0, video), instances, previews, video, room };
+    return {attach, cleanupSource, retryPlayback, switchToMetal, nativePlaybackError,
+      state: () => ({playerError, localBuffering, previewPosition, mediaAccess, fallbackNotice})};`);
+  return { ...create({ resolveMediaAccess: async (...args) => {
+    const access = await resolveMediaUrl(...args);
+    return typeof access === 'string' ? {url: access, fallbackUrl: null, route: 'metal'} : access;
+  } }, Hls, targetPosition, createSeekPreview,
+    value => isSameOriginUrl(value, appOrigin), room, 0, video, createBufferHealth, isProxyLoadFailure),
+    instances, previews, video, room };
 }
 
 test('player generation guards discard stale responses and errors after source changes, removal, or destruction', async t => {
@@ -317,5 +324,72 @@ test('HLS credentials follow each actual request origin, including encrypted key
     }
   }
   assert.match(playerSource, /<video\b[^>]*\bcrossorigin="anonymous"/);
+  player.cleanupSource();
+});
+
+test('fallback URLs are validated before use and are optional for older or local servers', async () => {
+  let fallbackUrl;
+  const client = createDeliveryClient({origin: () => appOrigin, request: async path => path === '/api/config'
+    ? {bareMetalOrigin: directOrigin} : {url: mediaPath, fallbackUrl}});
+  for (fallbackUrl of invalidDestinations(`/direct${mediaPath}`).filter(value => value != null)) {
+    await assert.rejects(client.resolveMediaAccess(mediaPath), DeliveryError);
+  }
+  fallbackUrl = directMediaUrl;
+  assert.deepEqual(await client.resolveMediaAccess(mediaPath), {
+    url: `${appOrigin}${mediaPath}`, fallbackUrl: directMediaUrl, route: 'cloudflare'});
+  fallbackUrl = undefined;
+  assert.equal((await client.resolveMediaAccess(mediaPath)).fallbackUrl, null);
+});
+
+test('automatic metal recovery reuses the validated grant, aligns to the room, and stays direct on retry', async () => {
+  for (const native of [false, true]) {
+    let requests = 0;
+    const player = playerHarness(async () => {
+      requests++;
+      return {url: `${appOrigin}${mediaPath}`, fallbackUrl: directMediaUrl, route: 'cloudflare'};
+    }, native);
+    const {id} = player.room.current;
+    await player.attach(id, mediaPath, 5);
+    const revision = player.room.playback.revision;
+    const oldInstance = player.instances[0];
+    if (native) {
+      player.video.error = {code: 2};
+      player.nativePlaybackError();
+    } else {
+      oldInstance.events.get('error')(null, {details: 'fragLoadTimeOut', type: 'network',
+        frag: {url: `${appOrigin}${mediaPath.replace('index.m3u8', 'segment-000001.ts')}`}});
+    }
+    assert.equal(requests, 1, 'Recovery must not request another grant through the stalled proxy.');
+    assert.equal(player.state().mediaAccess.route, 'metal');
+    assert.match(player.state().fallbackNotice, /Switched to metal/);
+    assert.equal(native ? player.video.src : player.instances.at(-1).source, directMediaUrl);
+    if (!native) {
+      assert.equal(oldInstance.destroyed, true);
+      assert.equal(player.instances.at(-1).config.startPosition, 25);
+      oldInstance.events.get('error')(null, {fatal: true, type: 'network'});
+      assert.equal(player.state().playerError, '', 'Late old-loader errors cannot replace the new source.');
+    }
+    assert.equal(player.room.playback.revision, revision);
+    assert.equal(player.switchToMetal('Another failure'), false, 'No retry loop after switching.');
+    player.retryPlayback();
+    await tick();
+    assert.equal(requests, 2);
+    assert.equal(player.state().mediaAccess.route, 'metal');
+    await player.attach(null, null, 0);
+    assert.equal(player.state().fallbackNotice, '');
+    await player.attach(id, mediaPath, 5);
+    assert.equal(player.state().mediaAccess.route, 'cloudflare', 'A new viewing starts on the default route.');
+    player.cleanupSource();
+  }
+});
+
+test('failed direct playback exposes the existing retry UI instead of cycling through routes', async () => {
+  const player = playerHarness(async () => ({url: `${appOrigin}${mediaPath}`, fallbackUrl: directMediaUrl, route: 'cloudflare'}));
+  await player.attach(player.room.current.id, mediaPath, 5);
+  player.switchToMetal('Buffer stayed low');
+  player.instances.at(-1).events.get('error')(null, {details: 'fragLoadError', type: 'network', fatal: true,
+    frag: {url: directMediaUrl.replace('index.m3u8', 'segment-000001.ts')}, response: {code: 502}});
+  assert.match(player.state().playerError, /could not be loaded/);
+  assert.equal(player.instances.length, 2);
   player.cleanupSource();
 });

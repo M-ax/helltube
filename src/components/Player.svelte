@@ -4,10 +4,14 @@
     import Icon from './Icon.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
     import Reactions from './Reactions.svelte';
+    import MetalPipeReaction from './MetalPipeReaction.svelte';
+    import {PIPE_LIFETIME_MS} from '../lib/metal-pipe.js';
     import {createReactionAudio} from '../lib/reaction-audio.js';
     import {ballArena, BALL_WIDTH, BALL_HEIGHT} from '../../shared/beach-ball.js';
     import {targetPosition, driftCorrection, time} from '../lib/format.js';
+    import {sourceLabels, sourceIcons} from '../../shared/media-source.js';
     import {delivery, isSameOriginUrl} from '../lib/delivery.js';
+    import {createBufferHealth, isProxyLoadFailure} from '../lib/buffer-health.js';
     import {createVideoRenderer} from '../lib/video-renderer.js';
     import {createSeekPreview} from '../lib/seek-preview.js';
 
@@ -46,6 +50,11 @@
     let sourceKey = '';
     let sourceGeneration = 0;
     let sourceController;
+    let mediaAccess = null;
+    let bufferMonitor = null;
+    let bufferReport = null;
+    let metalItemId = null;
+    let fallbackNotice = '';
     let initialAlign = true;
     let alignedRevision = -1;
     let playPending = false;
@@ -238,6 +247,9 @@
         sourceGeneration++;
         sourceController?.abort();
         sourceController = null;
+        mediaAccess = null;
+        bufferMonitor = null;
+        bufferReport = null;
         playing = false;
         controlsVisible = true;
         seekCenter = null;
@@ -256,7 +268,7 @@
         playPending = false;
     }
 
-    async function attach(id, url, baseTime) {
+    async function attach(id, url, baseTime, accessOverride = null) {
         const key = `${id || ''}|${url || ''}|${baseTime || 0}`;
         if (sourceKey === key) return;
         cleanupSource();
@@ -267,12 +279,16 @@
         alignedRevision = -1;
         scrubbing = false;
         position = targetPosition(room, clockOffset);
+        if (metalItemId !== id) {
+            metalItemId = null;
+            fallbackNotice = '';
+        }
         if (!url) return;
         const generation = sourceGeneration;
         sourceController = new AbortController();
-        let source;
+        let access;
         try {
-            source = await delivery.resolveMediaUrl(url, {signal: sourceController.signal});
+            access = accessOverride || await delivery.resolveMediaAccess(url, {signal: sourceController.signal});
         } catch (error) {
             if (generation !== sourceGeneration) return;
             playerError = error.message || 'The video access URL could not be loaded. Please retry playback.';
@@ -280,6 +296,12 @@
             return;
         }
         if (generation !== sourceGeneration) return;
+        if (metalItemId === id && access.fallbackUrl) {
+            access = {url: access.fallbackUrl, fallbackUrl: null, route: 'metal'};
+        }
+        mediaAccess = access;
+        bufferMonitor = createBufferHealth();
+        const source = access.url;
         const target = Math.max(0, targetPosition(room, clockOffset) - (baseTime || 0));
         if (Hls.isSupported()) {
             const instance = new Hls({
@@ -310,8 +332,12 @@
                 if (generation !== sourceGeneration) return;
                 instance.startLoad(Math.max(0, targetPosition(room, clockOffset) - (baseTime || 0)));
             });
+            instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+                if (generation === sourceGeneration) bufferMonitor?.fragmentLoaded(data.frag);
+            });
             instance.on(Hls.Events.ERROR, (_event, data) => {
                 if (generation !== sourceGeneration) return;
+                if (isProxyLoadFailure(data, source) && switchToMetal('Cloudflare request failed')) return;
                 if (!data.fatal) return;
                 if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
                     recovered = true;
@@ -331,6 +357,36 @@
             playerError = 'This browser does not support HLS playback. Try a current version of Chrome, Firefox, Edge, or Safari.';
             localBuffering = false;
         }
+    }
+
+    function switchToMetal(reason) {
+        if (!connected || !mediaAccess?.fallbackUrl || mediaAccess.route !== 'cloudflare') return false;
+        const access = {url: mediaAccess.fallbackUrl, fallbackUrl: null, route: 'metal'};
+        metalItemId = item.id;
+        fallbackNotice = `${reason}. Switched to metal for this video.`;
+        sourceKey = '';
+        // Reuse the already validated grant so recovery does not wait on another proxy request.
+        void attach(item.id, media.url, media.baseTime, access);
+        return true;
+    }
+
+    function reportBufferHealth() {
+        if (!video || !media || !bufferMonitor) return;
+        const absoluteTarget = targetPosition(room, clockOffset);
+        const target = Math.max(0, absoluteTarget - (media.baseTime || 0));
+        bufferReport = bufferMonitor.sample({ranges: video.buffered, currentTime: video.currentTime, target,
+            serverAhead: media.bufferedUntil - absoluteTarget,
+            remaining: Math.max(0, (duration || media.bufferedUntil) - absoluteTarget), complete: media.complete,
+            active: connected && !playerError, paused: room.playback.paused, blocked,
+            seeking: scrubbing || seekCenter !== null, buffering: localBuffering,
+            playbackRate: video.playbackRate, playbackRevision: room.playback.revision});
+        if (bufferReport.fallbackReason) switchToMetal(bufferReport.fallbackReason);
+    }
+
+    function nativePlaybackError() {
+        if (hls || !media) return;
+        if (video.error?.code === 2 && switchToMetal('Cloudflare request failed')) return;
+        playerError = 'The video stream could not be played. Retry playback or use another browser.';
     }
 
     function tryPlay(userGesture = false) {
@@ -438,7 +494,7 @@
         for (const event of state.events) {
             if (seenReactions.has(event.id)) continue;
             seenReactions.add(event.id);
-            const lifetime = event.kind === 'hitmarker' ? 450 : 1800;
+            const lifetime = event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
             activeReactions = [...activeReactions.slice(-39), event];
@@ -468,6 +524,10 @@
         } else {
             onCommand({type: 'reaction', kind, x: 0.2 + Math.random() * 0.6, y: 0.65});
         }
+    }
+
+    function pipeImpact() {
+        if (connected && !soundMuted && !muted && !document.hidden) reactionAudio?.play(volume, 'metalpipe');
     }
 
     function placeHitmarker(event) {
@@ -564,6 +624,7 @@
         if (navigator.userActivation?.hasBeenActive) unlockAudio();
         renderer = createVideoRenderer(canvas, video, active => webglActive = active, effectsCanvas);
         const timer = setInterval(sync, 250);
+        const healthTimer = setInterval(reportBufferHealth, 1000);
         document.addEventListener('visibilitychange', sync);
         return () => {
             document.removeEventListener('pointerdown', unlockAudio);
@@ -574,6 +635,7 @@
             renderer.destroy();
             renderer = null;
             clearInterval(timer);
+            clearInterval(healthTimer);
             document.removeEventListener('visibilitychange', sync);
         };
     });
@@ -594,11 +656,14 @@
                on:canplay={sync} on:waiting={() => localBuffering = true}
                on:playing={() => { playing = true; localBuffering = false; }}
                on:pause={() => playing = false} on:ended={() => playing = false}
-               on:error={() => { if (!hls && media) playerError = 'The video stream could not be played. Retry playback or use another browser.'; }}></video>
+               on:error={nativePlaybackError}></video>
         <canvas bind:this={canvas} class="video-canvas" class:video-visible={!!media && webglActive} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
+        {#each activeReactions.filter(reaction => reaction.kind === 'metalpipe') as reaction (reaction.id)}
+            <MetalPipeReaction {reaction} {clockOffset} onImpact={pipeImpact}/>
+        {/each}
         <div class="reaction-overlay" aria-hidden="true">
-            {#each activeReactions as reaction (reaction.id)}
+            {#each activeReactions.filter(reaction => reaction.kind !== 'metalpipe') as reaction (reaction.id)}
                 <span class="player-reaction" class:hitmarker={reaction.kind === 'hitmarker'}
                       data-reaction={reaction.kind} data-reaction-id={reaction.id}
                       style={`left: ${reaction.x * 100}%; top: ${reaction.y * 100}%`}>
@@ -625,7 +690,7 @@
             <div class="screen-empty"><span class="cinema-orbit"><Icon name="play" size={36} stroke={1.4}/></span>
                 <p class="eyebrow">LIGHTS DOWN. POSSIBILITIES UP.</p>
                 <h2>What’s the first <em>watch?</em></h2>
-                <p>Add a YouTube link or a video from your device.<br/>Good things are better with company.</p>
+                <p>Add a YouTube, Twitch VOD, or media link, or a video from your device.<br/>Good things are better with company.</p>
                 <button class="button primary" disabled={!connected} on:click={onAdd}>
                     <Icon name="plus" size={17}/>
                     Add something good
@@ -742,8 +807,8 @@
     <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
         <h2>{item?.title || 'A little less scrolling. A little more watching.'}</h2>
         <div class="media-meta">
-            {#if item}<span><Icon name={item.kind === 'youtube' ? 'youtube' : 'file'}
-                                  size={15}/>{item.kind === 'youtube' ? 'YouTube' : 'Local video'}</span>
+            {#if item}<span><Icon name={sourceIcons[item.kind] || 'file'}
+                                  size={15}/>{sourceLabels[item.kind] || 'Video'}</span>
                 {#if duration}<span>{time(duration)}</span>{/if}<span
                         class:status-error={item.status === 'error'}>{item.status}</span>{:else}<span>Everyone in the room can add videos and control playback.</span>{/if}
         </div>
@@ -752,6 +817,25 @@
           title={connected ? `Clock estimated using WebSocket round-trip midpoint${rtt !== null ? ` · RTT ${Math.round(rtt)} ms` : ''}` : 'Waiting for fresh room state'}><Icon
             name={connected ? 'wifi' : 'offline'} size={15}/>{connected ? 'Room synced' : 'Not connected'}
         {#if connected && rtt !== null}<span>{Math.round(rtt)} ms</span>{/if}</span></div>
+{#if media && mediaAccess}
+    <div class="playback-health" aria-label="Playback buffer health" data-delivery={mediaAccess.route}
+         data-buffer-status={bufferReport?.status || 'Loading'}>
+        <span class="buffer-health-state" class:status-error={bufferReport?.status === 'Buffering' || bufferReport?.status === 'Low buffer'}>
+            {bufferReport?.status || 'Loading video'}
+        </span>
+        <span>{mediaAccess.route === 'cloudflare' ? 'Cloudflare' : mediaAccess.route === 'metal' ? 'Metal' : 'Server'}</span>
+        {#if bufferReport}
+            <span>{bufferReport.seconds.toFixed(1)}s buffered</span>
+            <span title="Video prepared on the server ahead of the room position">{bufferReport.serverAhead.toFixed(1)}s ready at source</span>
+            {#if bufferReport.mbps !== null}
+                <span title="Recent segment download speed, including request latency">{bufferReport.mbps.toFixed(1)} Mbps · {bufferReport.downloadRate.toFixed(1)}× playback</span>
+            {/if}
+        {/if}
+    </div>
+{/if}
+{#if fallbackNotice && media}
+    <p class="delivery-notice" role="status">{fallbackNotice}</p>
+{/if}
 {#if item?.kind === 'upload' && media && !media.complete}
     <p class="inline-note">
         <Icon name="info" size={16}/>

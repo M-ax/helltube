@@ -63,7 +63,7 @@ export function createDeliveryClient({request = api, origin = () => window.locat
         return configPromise;
     }
 
-    async function resolveMediaUrl(value, {signal} = {}) {
+    async function resolveMediaAccess(value, {signal} = {}) {
         signal?.throwIfAborted();
         const currentOrigin = origin();
         let jobId;
@@ -81,13 +81,23 @@ export function createDeliveryClient({request = api, origin = () => window.locat
         const access = await request(`/api/media/${jobId}/access`, {signal});
         signal?.throwIfAborted();
         const path = `/media/${jobId}/index.m3u8`;
-        if (access?.url === path) return `${currentOrigin}${path}`;
+        const fallbackUrl = access?.fallbackUrl == null ? null
+            : directUrl(access.fallbackUrl, config.bareMetalOrigin, `/direct${path}`);
+        if (access?.fallbackUrl != null && !fallbackUrl) {
+            throw new DeliveryError('The server supplied an invalid fallback media URL. Please retry playback.');
+        }
+        if (access?.url === path) return {url: `${currentOrigin}${path}`, fallbackUrl,
+            route: config.bareMetalOrigin && currentOrigin !== config.bareMetalOrigin ? 'cloudflare' : 'local'};
         const url = directUrl(access?.url, config.bareMetalOrigin, `/direct${path}`);
-        if (url) return url;
+        if (url) return {url, fallbackUrl: null, route: 'metal'};
         throw new DeliveryError('The server supplied an invalid media access URL. Please retry playback.');
     }
 
-    return {getConfig, resolveMediaUrl};
+    async function resolveMediaUrl(value, options) {
+        return (await resolveMediaAccess(value, options)).url;
+    }
+
+    return {getConfig, resolveMediaUrl, resolveMediaAccess};
 }
 
 export const delivery = createDeliveryClient();

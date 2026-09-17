@@ -1186,6 +1186,45 @@ ul, ol {
 }
 .player-reaction.hitmarker { width: 38px; height: 38px; animation: hitmarker-flash .45s ease-out forwards; }
 .hitmarker svg { width: 100%; height: 100%; fill: none; stroke: #fff; stroke-width: 2.5; }
+.metal-pipe-reaction {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 5;
+}
+.falling-metal-pipe {
+    position: absolute;
+    top: -24px;
+    width: clamp(100px, 30%, 230px);
+    height: 24px;
+    transform: translateX(-50%) rotate(-28deg);
+    filter: drop-shadow(0 3px 3px #0008);
+}
+.metal-pipe-body {
+    display: block;
+    position: relative;
+    width: 100%;
+    height: 100%;
+    border: 1px solid #50565a;
+    border-radius: 4px;
+    background: repeating-linear-gradient(94deg, transparent 0 17px, #ffffff15 18px, transparent 19px 31px),
+        linear-gradient(#555b61, #9da3a7 15%, #d7d9db 30%, #9a9fa4 47%, #62686e 73%, #33383c);
+    box-shadow: inset 3px 0 2px #d9dcdf55, inset -5px 0 3px #10131655;
+}
+.metal-pipe-body::after {
+    content: '';
+    position: absolute;
+    right: -3px;
+    top: -1px;
+    bottom: -1px;
+    width: 10px;
+    border: 1px solid #989fa4;
+    border-radius: 50%;
+    background: radial-gradient(ellipse, #171a1d 40%, #50575c 48%, #c0c5c8 59%, #4c5359 75%);
+}
+.metal-pipe-icon { display: inline-block; width: 24px; height: 9px; transform: rotate(-28deg); }
+.metal-pipe-icon .metal-pipe-body::after { width: 5px; right: -2px; }
 .hitmarker-target {
     padding: 0;
     border: 0;
@@ -1737,6 +1776,31 @@ ul, ol {
 .player-shell:fullscreen .screen-message {
     height: 100%;
     min-height: 0;
+}
+
+.playback-health {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 16px;
+    margin: 0 0 12px;
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.buffer-health-state {
+    font-weight: 600;
+}
+
+.buffer-health-state:not(.status-error) {
+    color: var(--text);
+}
+
+.delivery-notice {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: var(--muted);
 }
 
 .now-playing {

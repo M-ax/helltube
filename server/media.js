@@ -20,11 +20,13 @@ export async function available(command, args = ['-version']) {
 }
 
 export class Media {
-  constructor(config, rooms, uploads, youtube) {
+  constructor(config, rooms, uploads, youtube, twitch) {
     this.config = config;
     this.rooms = rooms;
     this.uploads = uploads;
     this.youtube = youtube;
+    this.twitch = twitch;
+    this.sourceSecret = randomBytes(32).toString('hex');
     this.jobs = new Map();
     this.dir = path.join(config.dataDir, 'media', randomUUID());
     this.keyDir = path.join(config.dataDir, 'media-keys', path.basename(this.dir));
@@ -123,13 +125,15 @@ export class Media {
     const network = youtubeNetwork(item.kind === 'youtube' ? this.config : {});
     const args = ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y'];
     let inputs;
-    if (item.kind === 'youtube') {
-      const resolved = await this.youtube.resolve(item.source.url);
+    if (item.kind === 'youtube' || item.kind === 'twitch') {
+      const resolved = await this[item.kind].resolve(item.source.url);
       if (resolved.duration) item.duration = resolved.duration;
       if (baseTime > 0 && item.duration > 0 && baseTime >= item.duration) {
         throw new Error(`Start time must be before the end of the video (${item.duration} seconds).`);
       }
       inputs = resolved.inputs;
+    } else if (item.kind === 'http') {
+      inputs = [{ url: `http://127.0.0.1:${this.port}/internal/remote/${job.id}?key=${this.sourceSecret}`, headers: {} }];
     } else {
       const upload = this.uploads.get(item.source.uploadId);
       job.inputComplete = upload.complete;
@@ -146,7 +150,9 @@ export class Media {
       inputs = [{ url: `http://127.0.0.1:${this.port}/internal/uploads/${upload.id}?key=${this.uploads.secret}`, headers: {} }];
     }
     if (job.cancelled) return;
-    const inputFormats = 'mov,matroska,webm,avi,mpegts,mpeg,mpegvideo,ogg' + (item.kind === 'youtube' ? ',hls' : '');
+    const inputFormats = 'mov,matroska,webm,avi,mpegts,mpeg,mpegvideo,ogg' +
+      (item.kind === 'http' ? ',mp3,flac,wav,aac,aiff' : '') +
+      (item.kind === 'youtube' || item.kind === 'twitch' ? ',hls' : '');
     for (const input of inputs) {
       if (baseTime > 0) args.push('-ss', String(baseTime));
       if (network.proxy) args.push('-http_proxy', network.proxy);
@@ -156,7 +162,7 @@ export class Media {
       args.push('-rw_timeout', '120000000', '-protocol_whitelist', `http,https,tcp,tls,crypto${network.proxy ? ',httpproxy' : ''}`,
         '-format_whitelist', inputFormats, '-i', input.url);
     }
-    args.push('-map', '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
+    args.push('-map', item.kind === 'http' ? '0:v:0?' : '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
       '-vf', 'scale=w=min(1280\\,iw):h=min(720\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '3000k', '-bufsize', '6000k',
       '-threads', '2', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
@@ -210,7 +216,7 @@ export class Media {
     try {
       await Promise.all([...this.jobs.values()].filter(j => !j.done).map(async job => {
         await this.refresh(job);
-        if (job.item.kind === 'youtube' && Date.now() - job.lastProgress > 180000) {
+        if (job.item.kind !== 'upload' && Date.now() - job.lastProgress > 180000) {
           job.child?.kill();
         }
       }));
@@ -267,6 +273,7 @@ export class Media {
     this.closed = true;
     clearInterval(this.timer);
     this.youtube.close();
+    this.twitch?.close();
     const jobs = [...this.jobs.values()];
     for (const job of jobs) this.dispose(job);
     await Promise.all(this.cleanups);

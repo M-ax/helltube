@@ -41,7 +41,7 @@
         </div>
         <div class="login-editorial"><p class="eyebrow">THE INTERNET’S COZIEST SCREENING ROOM</p>
             <h1>Different places.<br/>Same <em>playhead.</em></h1>
-            <p>Pull up a chair. Share your next rabbit hole.<br/>Watch YouTube and your own videos, together.</p></div>
+            <p>Pull up a chair. Share your next rabbit hole.<br/>Watch YouTube, Twitch VODs, and your own media, together.</p></div>
         <footer class="login-footer"><span><i class="status-dot"></i> Built for watching together</span><span>NO COUNTDOWNS REQUIRED</span>
         </footer>
     </section>

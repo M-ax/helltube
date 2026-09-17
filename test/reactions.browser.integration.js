@@ -24,10 +24,17 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
         }));
         await page.addInitScript(() => {
             window.reactionSounds = 0;
+            window.pipeImpacts = [];
             window.decodedSounds = 0;
             const start = AudioBufferSourceNode.prototype.start;
             AudioBufferSourceNode.prototype.start = function (...args) {
                 window.reactionSounds++;
+                if (this.buffer?.duration > .5) {
+                    const pipe = document.querySelector('.falling-metal-pipe');
+                    const viewport = document.querySelector('.video-viewport');
+                    window.pipeImpacts.push({at: Date.now(), bottom: pipe?.getBoundingClientRect().bottom,
+                        floor: viewport?.getBoundingClientRect().bottom});
+                }
                 return start.apply(this, args);
             };
             const decode = BaseAudioContext.prototype.decodeAudioData;
@@ -41,7 +48,7 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
         await join(page);
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
-        await until(async () => await page.evaluate(() => window.decodedSounds > 0));
+        await until(async () => await page.evaluate(() => window.decodedSounds === 2));
     }
     const geometry = await a.locator('.reactions-panel').evaluate(panel => ({
         outside: !panel.closest('.player-shell'),
@@ -92,6 +99,29 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
         await a.getByRole('button', {name: label, exact: true}).click();
         await b.locator(`[data-reaction="${kind}"]`).waitFor();
     }
+
+    await b.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
+    const pipeButton = a.getByRole('button', {name: 'Metal pipe', exact: true});
+    await pipeButton.click();
+    await b.locator('[data-reaction="metalpipe"]').waitFor();
+    for (const page of [a, b]) {
+        assert.equal(await page.evaluate(() => window.pipeImpacts.length), 0, 'A falling pipe is silent before impact.');
+    }
+    await until(async () => await a.evaluate(() => window.pipeImpacts.length) === 1 && await b.evaluate(() => window.pipeImpacts.length) === 1);
+    const impacts = await Promise.all([a, b].map(page => page.evaluate(() => window.pipeImpacts[0])));
+    for (const impact of impacts) assert.ok(Math.abs(impact.bottom - impact.floor) < 1, 'The sound starts with the pipe touching the player bottom.');
+    assert.ok(Math.abs(impacts[0].at - impacts[1].at) < 120, 'Both viewers hear the same shared impact.');
+    const pipeMessage = messages.get(a).filter(message => message.kind === 'metalpipe').at(-1);
+    assert.ok(impacts[0].at - pipeMessage.serverTime >= 850, 'The clang is delayed until the end of the fall.');
+    await b.screenshot({path: 'test-artifacts/metal-pipe-impact.png', fullPage: true});
+    await until(async () => await b.locator('[data-reaction="metalpipe"]').count() === 0);
+    assert.equal(await a.evaluate(() => window.pipeImpacts.length), 1, 'Each drop makes exactly one sound.');
+
+    await pipeButton.click();
+    await b.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
+    await until(async () => await a.evaluate(() => window.pipeImpacts.length) === 2);
+    assert.equal(await b.evaluate(() => window.pipeImpacts.length), 1, 'Muting during the fall silences the upcoming impact.');
+    await until(async () => await a.locator('[data-reaction="metalpipe"]').count() === 0);
 
     // Place the real server-owned ball in the path of each user's browser cursor.
     for (const page of [a, b]) {

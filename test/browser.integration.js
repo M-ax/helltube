@@ -631,7 +631,7 @@ test('YouTube start-time editor and joystick feed timestamped playback to two br
     '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
     '-t', '60', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '60', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-movflags', '+faststart', sample]);
-  instance.app.get('/timestamp-source.mp4', (_req, res) => res.sendFile(sample));
+  instance.app.get('/timestamp-source.mp4', (_req, res) => res.sendFile(sample, { dotfiles: 'allow' }));
   t.mock.method(instance.youtube, 'extract', async () => ({ id: 'BaW_jenozKc', title: 'Timestamp video', duration: 60 }));
   t.mock.method(instance.youtube, 'resolve', async () => ({ duration: 60, inputs: [{ url: `${url}/timestamp-source.mp4`, headers: {} }] }));
   const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--enable-unsafe-swiftshader'] });
@@ -651,13 +651,13 @@ test('YouTube start-time editor and joystick feed timestamped playback to two br
   }
   const room = instance.rooms.get('lobby');
   await until(() => room.members.size === 2);
-  const input = editor.getByLabel('YouTube video or playlist URL', { exact: true });
+  const input = editor.getByLabel('YouTube, Twitch VOD, or hosted media URL', { exact: true });
   const checkbox = editor.getByRole('checkbox', { name: 'Start at', exact: true });
   const timeInput = editor.getByRole('textbox', { name: 'Video start time', exact: true });
   const joystick = editor.getByRole('slider', { name: 'Start time joystick', exact: true });
   const submissions = [];
   editor.on('request', request => {
-    if (request.url().endsWith('/api/rooms/lobby/youtube') && request.method() === 'POST') submissions.push(request.postDataJSON());
+    if (request.url().endsWith('/api/rooms/lobby/media') && request.method() === 'POST') submissions.push(request.postDataJSON());
   });
   assert.equal(await checkbox.count(), 0);
   await input.fill('https://www.youtube.com/watch?v=BaW_jenozKc&t=90');
@@ -721,7 +721,7 @@ test('YouTube start-time editor and joystick feed timestamped playback to two br
   await editor.setViewportSize({ width: 1280, height: 900 });
   await editor.screenshot({ path: path.resolve('test-artifacts', 'start-time-desktop.png'), fullPage: true });
   const submit = async () => {
-    const response = editor.waitForResponse(response => response.url().endsWith('/api/rooms/lobby/youtube') && response.request().method() === 'POST');
+    const response = editor.waitForResponse(response => response.url().endsWith('/api/rooms/lobby/media') && response.request().method() === 'POST');
     await editor.getByRole('button', { name: 'Add to queue', exact: true }).click();
     assert.equal((await response).status(), 201);
     await until(async () => await input.inputValue() === '');

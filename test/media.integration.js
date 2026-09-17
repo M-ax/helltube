@@ -9,8 +9,89 @@ import { start, until } from './helpers.js';
 import { makeItem } from '../server/rooms.js';
 import { createApp } from '../server/app.js';
 import { WebSocket } from 'ws';
+import { remoteURL } from '../server/remote-media.js';
 
 const exec = promisify(execFile);
+
+test('Twitch VOD HLS and HTTP media files share playable, seekable encrypted playback', { timeout: 60000 }, async t => {
+  const { instance, api, connect, url, cookie, dir } = await start(t, { youtubeProxy: 'http://127.0.0.1:1' });
+  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+    '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '60', '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+    path.join(dir, 'remote.mp4')]);
+  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-i', path.join(dir, 'remote.mp4'),
+    '-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'vod', path.join(dir, 'vod.m3u8')]);
+  const ranges = [];
+  instance.app.get('/remote-fixture/:file', (req, res) => {
+    ranges.push(req.headers.range);
+    res.sendFile(path.join(dir, path.basename(req.params.file)), { dotfiles: 'allow' });
+  });
+  t.mock.method(instance.remote, 'resolve', async value => {
+    const target = remoteURL(value);
+    assert.equal(target.hostname, 'media.test');
+    return { url: target, addresses: [{ address: '127.0.0.1', family: 4 }] };
+  });
+  instance.capabilities.twitch = true;
+  t.mock.method(instance.twitch, 'extract', async () => ({ title: 'VOD fixture', duration: 8 }));
+  t.mock.method(instance.twitch, 'resolve', async () => ({ duration: 8, inputs: [{ url: `${url}/remote-fixture/vod.m3u8`, headers: {} }] }));
+  const ws = await connect();
+  ws.send(JSON.stringify({ type: 'join', roomId: 'lobby' }));
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size);
+  const add = source => api('/api/rooms/lobby/media', { method: 'POST', body: { url: source } });
+  assert.equal((await add('https://twitch.tv/videos/12345')).status, 201);
+  const hosted = `${url.replace('127.0.0.1', 'media.test')}/remote-fixture/remote.mp4?signature=keep`;
+  assert.equal((await add(hosted)).status, 201);
+  for (const item of [room.current, room.queue[0]]) {
+    await until(() => {
+      assert.notEqual(item.status, 'error', instance.media.jobs.get(item.id)?.errors || item.error);
+      return item.media?.complete;
+    }, 20000);
+    const playlist = await fetch(url + item.media.url, { headers: { Cookie: cookie } });
+    await encryptedHLS(instance, url, cookie, item, await playlist.text());
+    await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-allowed_extensions', 'ALL',
+      '-headers', `Cookie: ${cookie}\r\n`, '-i', url + item.media.url, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
+  }
+  assert.ok(ranges.some(range => range?.startsWith('bytes=')), 'The upstream receives range requests for an MP4 with its index at EOF.');
+  instance.rooms.advance(room);
+  const item = room.current;
+  const previous = item.media.url;
+  instance.media.dispose(instance.media.jobs.get(item.id));
+  instance.rooms.control(room, { action: 'seek', position: 3, revision: room.playback.revision });
+  await until(() => {
+    assert.notEqual(item.status, 'error', instance.media.jobs.get(item.id)?.errors || item.error);
+    return item.media?.complete;
+  }, 20000);
+  assert.notEqual(item.media.url, previous);
+  assert.equal(item.media.baseTime, 3);
+  assert.ok(item.media.bufferedUntil >= 8);
+  assert.equal((await fetch(`${url}/internal/remote/${instance.media.jobs.get(item.id).id}?key=wrong`)).status, 403);
+});
+
+test('HTTP audio is playable and a hosted manifest cannot trigger nested requests', { timeout: 30000 }, async t => {
+  const { instance, connect, url, dir } = await start(t);
+  const audio = path.join(dir, 'audio.mp3');
+  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '5', audio]);
+  let nestedRequests = 0;
+  instance.app.get('/remote-audio.mp3', (_req, res) => res.sendFile(audio, { dotfiles: 'allow' }));
+  instance.app.get('/hosted-playlist.mp4', (_req, res) => res.type('application/vnd.apple.mpegurl').send(`#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n${url}/private.ts\n#EXT-X-ENDLIST\n`));
+  instance.app.get('/private.ts', (_req, res) => { nestedRequests++; res.sendStatus(404); });
+  t.mock.method(instance.remote, 'resolve', async value => ({ url: new URL(value), addresses: [{ address: '127.0.0.1', family: 4 }] }));
+  const ws = await connect();
+  ws.send(JSON.stringify({ type: 'join', roomId: 'lobby' }));
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size);
+  const items = [makeItem({ kind: 'http', url: `${url}/remote-audio.mp3` }), makeItem({ kind: 'http', url: `${url}/hosted-playlist.mp4` })];
+  instance.rooms.add(room, items);
+  await until(() => {
+    assert.notEqual(items[0].status, 'error', instance.media.jobs.get(items[0].id)?.errors || items[0].error);
+    return items[0].media?.complete && items[1].status === 'error';
+  }, 20000);
+  assert.ok(items[0].duration >= 5);
+  assert.equal(nestedRequests, 0);
+  assert.match(instance.media.jobs.get(items[1].id).errors, /not on whitelist/);
+});
 
 async function encryptedHLS(instance, url, cookie, item, contents) {
   const job = instance.media.jobs.get(item.id);
@@ -82,7 +163,7 @@ test('YouTube HLS input with separate audio becomes playable server HLS', { time
     '-map', '1:a:0', '-t', '8', '-c:a', 'libopus', path.join(dir, 'source.webm')]);
   instance.app.get('/youtube-source/:file', (req, res) => {
     if (!/^(source\.m3u8|source\.webm|source-\d+\.ts)$/.test(req.params.file)) return res.sendStatus(404);
-    res.sendFile(path.join(dir, req.params.file));
+    res.sendFile(path.join(dir, req.params.file), { dotfiles: 'allow' });
   });
   t.mock.method(instance.youtube, 'resolve', async () => ({ duration: 8, inputs: [
     { url: `${url}/youtube-source/source.m3u8`, headers: {} },

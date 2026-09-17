@@ -51,6 +51,25 @@ test('deployment origins and CSP reject credentials, paths and insecure public h
   assert.equal(headers['Referrer-Policy'], 'no-referrer');
 });
 
+test('Twitch and hosted media use authorized encrypted edge delivery and direct keys', async t => {
+  const { api, job, direct, url, cookie } = await fixture(t);
+  for (const kind of ['twitch', 'http']) {
+    const media = await job(kind);
+    const access = await api(`/api/media/${media.id}/access`);
+    assert.equal(access.data.url, `/media/${media.id}/index.m3u8`);
+    const edgePath = `/api/edge/media/${media.id}/segment-000000.ts`;
+    assert.equal((await api(edgePath)).status, 403);
+    assert.equal((await api(edgePath, { headers: { 'X-Helltube-Edge': secret } })).data.cacheable, true);
+    const playlist = await fetch(url + access.data.url, { headers: { Cookie: cookie } });
+    assert.equal(playlist.status, 200);
+    const contents = await playlist.text();
+    assert.match(contents, /\nsegment-000000\.ts\n/);
+    const keyUrl = contents.match(/URI="([^"]+)"/)[1];
+    assert.equal(new URL(keyUrl).origin, origin);
+    assert.deepEqual(Buffer.from(await (await direct(keyUrl)).arrayBuffer()), media.key);
+  }
+});
+
 test('direct grants are resource-scoped, survive restart, and enforce live session expiry/revocation', async t => {
   const { instance, cookie } = await start(t, { maxTranscoders: 0 });
   const auth = instance.accounts.authenticate(cookie);
@@ -125,6 +144,51 @@ test('YouTube keys bypass the Worker; uploaded playlists and segments are direct
   assert.equal((await direct(segmentUrl)).status, 403);
   instance.accounts.logout(cookie.slice('session='.length));
   assert.equal((await direct(keyUrl)).status, 401);
+});
+
+test('YouTube fallback playlists and segments bypass the edge with live, scoped authorization', async t => {
+  const {api, job, direct, room, instance, cookie} = await fixture(t);
+  const youtube = await job('youtube');
+  const access = (await api(`/api/media/${youtube.id}/access`)).data;
+  assert.equal(access.url, `/media/${youtube.id}/index.m3u8`);
+  assert.match(access.fallbackUrl, /^https:\/\/metal\.example\.net\/direct\/media\/.+\/index\.m3u8\?grant=/);
+  const response = await direct(access.fallbackUrl);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('access-control-allow-origin'), frontend);
+  const playlist = await response.text();
+  const segment = playlist.split('\n').find(line => line.startsWith(origin));
+  assert.ok(segment?.includes('/direct/media/') && segment.includes('?grant='));
+  assert.equal(new URL(segment).search, new URL(access.fallbackUrl).search);
+  const content = await direct(segment);
+  assert.equal(content.status, 200);
+  assert.deepEqual(Buffer.from(await content.arrayBuffer()), Buffer.alloc(32, 0xa5));
+  assert.equal((await direct(segment, {headers: {'X-Helltube-Edge': secret}})).status, 403);
+  assert.equal((await direct(segment.split('?')[0])).status, 401);
+  assert.equal((await api(`/api/media/${youtube.id}/access`, {auth: ''})).status, 401);
+  room.members.clear();
+  assert.equal((await api(`/api/media/${youtube.id}/access`)).status, 403);
+  assert.equal((await direct(access.fallbackUrl)).status, 403);
+  assert.equal((await direct(segment)).status, 403);
+  instance.accounts.logout(cookie.slice('session='.length));
+  assert.equal((await direct(access.fallbackUrl)).status, 401);
+  assert.equal((await direct(segment)).status, 401);
+});
+
+test('all proxied media kinds receive metal fallback access while uploads start on metal', async t => {
+  const {api, job} = await fixture(t);
+  for (const kind of ['youtube', 'twitch', 'http', 'upload']) {
+    const media = await job(kind);
+    const {data, status} = await api(`/api/media/${media.id}/access`);
+    assert.equal(status, 200);
+    if (kind === 'upload') {
+      assert.ok(data.url.startsWith(`${origin}/direct/`));
+      assert.equal(data.fallbackUrl, undefined);
+    } else {
+      assert.equal(data.url, `/media/${media.id}/index.m3u8`);
+      assert.ok(data.fallbackUrl.startsWith(`${origin}/direct/`));
+    }
+  }
 });
 
 test('direct chunk uploads support CORS, offsets and revocation without cross-site API access', async t => {
