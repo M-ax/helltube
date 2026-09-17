@@ -523,10 +523,12 @@
                 <span>{serverOverlay}</span></div>
         {/if}
         <div class="player-controls transport" role="group" aria-label="Playback controls">
-            <div class="controls-backdrop" aria-hidden="true">
-                <span class="controls-blur"></span><span class="controls-blur"></span>
-                <span class="controls-blur"></span><span class="controls-blur"></span>
-            </div>
+            {#if canAutoHide}
+                <div class="controls-backdrop" aria-hidden="true">
+                    <span class="controls-blur"></span><span class="controls-blur"></span>
+                    <span class="controls-blur"></span><span class="controls-blur"></span>
+                </div>
+            {/if}
             <div class="seek-track" style={`--progress: ${progress}%; --buffered: ${buffered}%`}>
                 <input type="range" min="0" max={seekMax} step="0.1" value={displayedPosition}
                        disabled={!connected || !media} aria-label="Seek shared video"
