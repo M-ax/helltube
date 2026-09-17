@@ -1,8 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { nativeMediaSources } from '../server/hosted-page.js';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { RemoteMedia, publicAddress, remoteURL } from '../server/remote-media.js';
+
+test('native media scanning ignores decoys in quoted attributes and raw text', () => {
+  const html = `İ<div title='<video src="decoy">'></div>
+    <!-- <video src="comment"> -->
+    <script data-text=">">"<video src='script'>";</scriptx><video src='still-script'></script>
+    <style><audio src="style"></style><textarea><video src="textarea"></textarea>
+    <source src="outside"><VIDEO data-src="decoy" SRC="real?x=1>0"></VIDEO>
+    <audio><source SRC=second></audio>`;
+  assert.deepEqual([...nativeMediaSources(html)].filter(Boolean), ['real?x=1>0', 'second']);
+  for (const prefix of ['<!--', '<script>', '<style>', '<div title="']) {
+    assert.deepEqual([...nativeMediaSources(`${prefix}<video src='hidden'>`)].filter(Boolean), []);
+  }
+});
+
+test('maximum-size malformed hosted pages cannot monopolize the event loop', async t => {
+  for (const token of ['<video ', '<!--', '<script>']) {
+    const malformed = token.repeat(Math.floor(256 * 1024 / token.length));
+    const { remote, base } = await pageFixture(t, () => malformed);
+    const started = performance.now();
+    await assert.rejects(remote.open(`${base}/watch`), /no direct video or audio source/);
+    assert.ok(performance.now() - started < 1000, `Malformed ${token} markup must finish within one second.`);
+  }
+});
 
 test('hosted media rejects local, private, reserved, mapped and non-HTTP addresses', () => {
   for (const address of ['127.0.0.1', '0.0.0.0', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254',

@@ -93,6 +93,10 @@ export function createWorker({ fetch: fetchOrigin = (request, options) => global
     }
     headers.delete('Host');
     headers.set('X-Helltube-Edge', secret);
+    // Cloudflare supplies this address; discard any caller-supplied private header.
+    headers.delete('X-Helltube-Client-IP');
+    const clientIP = request.headers.get('CF-Connecting-IP');
+    if (clientIP) headers.set('X-Helltube-Client-IP', clientIP);
     headers.set('Cache-Control', 'no-store');
     const method = authorizationPath ? 'GET' : request.method;
     const upstream = new Request(target, {

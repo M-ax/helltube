@@ -54,6 +54,7 @@ for directive in 'server_name metal.example.net;' \
   'location = /internal { return 404; }' 'location ^~ /internal/ { return 404; }' \
   'proxy_set_header Upgrade $http_upgrade;' 'proxy_set_header Connection $helltube_connection_upgrade;' \
   'proxy_set_header Host $host;' 'proxy_cache off;' 'proxy_buffering off;' \
+  'proxy_set_header X-Forwarded-For $remote_addr;' 'proxy_set_header X-Real-IP $remote_addr;' \
   'proxy_request_buffering off;' 'access_log off;' 'error_log /dev/null;' 'client_max_body_size 2m;'; do
   assert_contains "$nginx" "$directive"
 done

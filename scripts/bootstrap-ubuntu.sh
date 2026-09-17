@@ -774,7 +774,7 @@ main() {
   runuser -u helltube -- env DATA_DIR=/var/lib/helltube "$NODE_BIN" \
     /opt/helltube/app/scripts/bootstrap-admin.mjs < "$secrets/admin-password"
   {
-    printf 'NODE_ENV=production\nHOST=127.0.0.1\nPORT=3000\nDATA_DIR=/var/lib/helltube\nSECURE_COOKIES=true\n'
+    printf 'NODE_ENV=production\nHOST=127.0.0.1\nPORT=3000\nDATA_DIR=/var/lib/helltube\nSECURE_COOKIES=true\nTRUST_PROXY=true\n'
     printf 'FFMPEG_PATH=/usr/bin/ffmpeg\nYTDLP_PATH=/opt/helltube/tools/bin/yt-dlp\n'
     printf 'ALLOWED_ORIGINS=%s\n' "${frontend:-https://$hostname}"
     if [[ -n $frontend ]]; then

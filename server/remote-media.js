@@ -5,6 +5,7 @@ import { BlockList, isIP } from 'node:net';
 import { pipeline } from 'node:stream/promises';
 import { httpError } from './config.js';
 import { makeItem } from './rooms.js';
+import { nativeMediaSources } from './hosted-page.js';
 
 const blocked = new BlockList();
 for (const [address, prefix] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
@@ -57,20 +58,12 @@ async function pageMediaURL(response, pageURL) {
     chunks.push(chunk);
   }
   // Read static native media tags only; never execute page scripts or trust arbitrary links.
-  const html = Buffer.concat(chunks).toString('utf8')
-    .replace(/<!--[\s\S]*?-->|<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
-  let inMedia = false;
-  for (const tag of html.matchAll(/<(\/?)(video|audio|source)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)) {
-    const [, closing, name, attributes] = tag;
-    if (name.toLowerCase() !== 'source') inMedia = !closing;
-    if (closing || !inMedia) continue;
-    for (const attribute of attributes.matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
-      if (attribute[1].toLowerCase() !== 'src') continue;
-      const value = decodeAttribute(attribute[2] ?? attribute[3] ?? attribute[4] ?? '').trim();
-      if (!value) break;
-      try { return remoteURL(new URL(value, pageURL).href).href; }
-      catch { throw httpError(400, 'Hosted page media must use a public HTTP or HTTPS file URL.'); }
-    }
+  const html = Buffer.concat(chunks).toString('utf8');
+  for (const source of nativeMediaSources(html)) {
+    const value = decodeAttribute(source).trim();
+    if (!value) continue;
+    try { return remoteURL(new URL(value, pageURL).href).href; }
+    catch { throw httpError(400, 'Hosted page media must use a public HTTP or HTTPS file URL.'); }
   }
   throw httpError(400, 'Hosted page has no direct video or audio source. Use a directly downloadable media URL.');
 }

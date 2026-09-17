@@ -1,5 +1,7 @@
 import {paintBeachBall} from './beach-ball.js';
 import {advanceBeachBall, displayBeachBall} from '../../shared/beach-ball.js';
+import {crtFlameShader} from './crt-flames.js';
+import {createMarshmallowVisits, marshmallowPose, marshmallowShader} from './crt-marshmallow.js';
 
 const vertexSource = `
     attribute vec2 a_position;
@@ -20,8 +22,19 @@ const fragmentSource = `
     precision mediump float;
     uniform sampler2D u_video;
     uniform float u_opacity;
+    uniform float u_effect;
     varying vec2 v_uv;
+    ${crtFlameShader}
+    ${marshmallowShader}
     void main() {
+        if (u_effect > 1.5) {
+            gl_FragColor = crtMarshmallow(v_uv);
+            return;
+        }
+        if (u_effect > 0.5) {
+            gl_FragColor = crtFlame(v_uv);
+            return;
+        }
         vec4 color = texture2D(u_video, v_uv);
         gl_FragColor = vec4(color.rgb, color.a * u_opacity);
     }
@@ -47,7 +60,7 @@ export function videoRect(width, height, videoWidth, videoHeight) {
 export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let gl;
     try {
-        gl = canvas.getContext('webgl', {alpha: false, antialias: false, depth: false, stencil: false});
+        gl = canvas.getContext('webgl', {alpha: true, antialias: false, depth: false, stencil: false});
     } catch { /* Native video remains available if WebGL is blocked. */ }
     let overlay;
     try {
@@ -63,11 +76,22 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let rectLocation;
     let opacityLocation;
     let rotationLocation;
+    let effectLocation;
+    let flameSizeLocation;
+    let flameTimeLocation;
+    let marshmallowLocation;
+    let toastingLocation;
+    let stickLocation;
+    let breathPathLocation;
     let maxSize = 4096;
     let maxTextureSize;
     let frameId = null;
     let animationId = null;
     let lastBallTime = null;
+    let lastFlameTime = null;
+    let flameTime = 9.4;
+    let crtActive = false;
+    const marshmallows = createMarshmallowVisits();
     let active = false;
     let failed = false;
     let lost = false;
@@ -81,6 +105,9 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let ballSprite = null;
     let overlayDirty = true;
     let hasViewport = false;
+    // Gecko can deliver fewer video-frame callbacks than presented frames. Keep
+    // playback on its native compositor; WebGL still draws the idle CRT effects.
+    const nativeVideo = /\bGecko\//.test(window.navigator?.userAgent || '');
     const useVideoFrames = typeof video.requestVideoFrameCallback === 'function';
     const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
     let reducedMotion = !!motionQuery?.matches;
@@ -97,6 +124,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
         frameId = null;
         animationId = null;
         lastBallTime = null;
+        lastFlameTime = null;
     }
 
     function disposeResources() {
@@ -163,14 +191,23 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             rectLocation = gl.getUniformLocation(program, 'u_rect');
             opacityLocation = gl.getUniformLocation(program, 'u_opacity');
             rotationLocation = gl.getUniformLocation(program, 'u_rotation');
+            effectLocation = gl.getUniformLocation(program, 'u_effect');
+            flameSizeLocation = gl.getUniformLocation(program, 'u_flameSize');
+            flameTimeLocation = gl.getUniformLocation(program, 'u_flameTime');
+            marshmallowLocation = gl.getUniformLocation(program, 'u_marshmallow');
+            toastingLocation = gl.getUniformLocation(program, 'u_toasting');
+            stickLocation = gl.getUniformLocation(program, 'u_stick');
+            breathPathLocation = gl.getUniformLocation(program, 'u_breathPath');
             gl.uniform1i(gl.getUniformLocation(program, 'u_video'), 0);
             gl.activeTexture(gl.TEXTURE0);
             texture = createTexture();
+            // Keep the sampler complete even before the first decoded video frame.
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
             gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
             gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
             gl.disable(gl.DEPTH_TEST);
             gl.enable(gl.BLEND);
-            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
             gl.clearColor(5 / 255, 5 / 255, 6 / 255, 1);
             maxSize = Math.min(4096, gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
             maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
@@ -278,13 +315,42 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             return;
         }
         if (ball) ballBottomInset = parseFloat(getComputedStyle(canvas.parentElement).getPropertyValue('--controls-height')) || 71;
-        if (gl && !failed && !lost) {
+        if (gl && !failed && !lost && (crtActive || !nativeVideo)) {
             try {
                 resizeCanvas(canvas, width, height, maxSize);
                 gl.viewport(0, 0, canvas.width, canvas.height);
+                if (crtActive) gl.clearColor(0, 0, 0, 0);
+                else gl.clearColor(5 / 255, 5 / 255, 6 / 255, 1);
                 gl.clear(gl.COLOR_BUFFER_BIT);
+                gl.useProgram(program);
+                gl.uniformMatrix4fv(projectionLocation, false, orthographicProjection(width, height));
+                gl.uniform1f(effectLocation, 0);
                 const rect = videoRect(width, height, video.videoWidth, video.videoHeight);
-                if (video.readyState < 2 || !rect) {
+                if (crtActive) {
+                    setActive(false);
+                    const controlsHeight = parseFloat(getComputedStyle(canvas.parentElement).getPropertyValue('--controls-height')) || 71;
+                    const flameHeight = Math.min(height, controlsHeight + 24);
+                    gl.uniform1f(effectLocation, 1);
+                    gl.uniform2f(flameSizeLocation, width, flameHeight);
+                    gl.uniform1f(flameTimeLocation, flameTime);
+                    drawTexture(texture, [0, height - flameHeight, width, flameHeight]);
+                    const mallow = marshmallowPose(marshmallows.current(), width, height, controlsHeight);
+                    if (mallow && !reducedMotion) {
+                        // Include the fixed breath source as well as the moving fire and smoke.
+                        const sceneTop = Math.max(0, Math.min(mallow.y - mallow.size * 3.2,
+                            mallow.breathOriginY - mallow.size));
+                        const sceneHeight = height - sceneTop;
+                        gl.uniform1f(effectLocation, 2);
+                        gl.uniform2f(flameSizeLocation, width, sceneHeight);
+                        gl.uniform4f(marshmallowLocation, mallow.x, mallow.y - height + sceneHeight, mallow.size, mallow.angle);
+                        gl.uniform4f(toastingLocation, mallow.toast, mallow.char, mallow.fire, mallow.smoke);
+                        gl.uniform4f(stickLocation, mallow.side, mallow.shaft, mallow.blow, mallow.breathTime);
+                        gl.uniform4f(breathPathLocation, mallow.breathOriginX, mallow.breathOriginY - sceneTop,
+                            mallow.breathTargetX, mallow.breathTargetY - sceneTop);
+                        drawTexture(texture, [0, height - sceneHeight, width, sceneHeight]);
+                    }
+                    gl.uniform1f(effectLocation, 0);
+                } else if (video.readyState < 2 || !rect) {
                     videoUploaded = false;
                     setActive(false);
                 } else {
@@ -325,22 +391,33 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
 
     function schedule() {
         if (destroyed || document.hidden) return;
-        const renderVideo = gl && !failed && !lost;
+        const canRender = gl && !failed && !lost;
+        const renderVideo = canRender && !nativeVideo && !crtActive;
         if (renderVideo && useVideoFrames && frameId === null) frameId = video.requestVideoFrameCallback(frame);
         const animateBall = ball && !reducedMotion && hasViewport;
+        const animateFlames = canRender && crtActive && !reducedMotion && hasViewport;
         const animateVideo = renderVideo && hasViewport && !useVideoFrames && !video.paused && !video.ended;
-        if (animateBall || animateVideo) {
+        if (animateBall || animateVideo || animateFlames) {
             if (animationId === null) animationId = requestAnimationFrame(animate);
         } else if (animationId !== null) {
             cancelAnimationFrame(animationId);
             animationId = null;
         }
         if (!animateBall) lastBallTime = null;
+        if (!animateFlames) lastFlameTime = null;
     }
 
     function animate(time) {
         animationId = null;
         if (destroyed || document.hidden) return;
+        if (crtActive && !reducedMotion) {
+            if (lastFlameTime !== null) {
+                const elapsed = Math.min(0.05, Math.max(0, (time - lastFlameTime) / 1000));
+                flameTime = (flameTime + elapsed) % 256;
+                marshmallows.advance(elapsed);
+            }
+            lastFlameTime = time;
+        }
         if (ball && !reducedMotion) {
             const elapsed = lastBallTime === null ? 0 : Math.min(0.05, Math.max(0, (time - lastBallTime) / 1000));
             ball = advanceBeachBall(ball, elapsed, reducedMotion);
@@ -415,6 +492,13 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     refresh();
 
     return {
+        setCrtActive(value) {
+            if (destroyed || crtActive === !!value) return;
+            crtActive = !!value;
+            lastFlameTime = null;
+            marshmallows.reset();
+            redraw();
+        },
         setGhost(imageOrNull) {
             if (destroyed) return;
             ghost = imageOrNull || null;

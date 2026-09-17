@@ -34,6 +34,8 @@ Account/control HTTP requests are same-origin and cookie authenticated; an optio
 
 Clients retain selected `File` objects through backend deployments. Network failures, request timeouts, HTTP 408/429, and transient server errors retry automatically with exponential backoff capped at 15 seconds, without an attempt limit. Each retry first fetches upload status to recover the durable offset and current transfer grant; never blindly resend an unacknowledged chunk. Status requests time out after 15 seconds and chunk PUTs after 120 seconds. Online/room-reconnect events wake recovery waits without restarting paused, cancelled, or permanently failed uploads. Authentication/ownership failures, missing uploads, and invalid destinations/offsets stop the transfer. Defer automatic frontend deployment reloads while file-bearing unfinished transfers or upload registration are present; manual reloads still require file reselection.
 
+Upload reservations count the full declared file size and retained file count per account across rooms, including completed sources. Account limits return HTTP 409; the shared storage limit returns 507. Incomplete uploads expire after 24 hours without a successful chunk write by default (`UPLOAD_IDLE_TIMEOUT_MS`); status polling does not extend that deadline. Expiry removes the upload and its current/queue/history references, advances playback when necessary, and makes subsequent status/chunk requests return 404. Successful progress timestamps persist through restarts. Completed referenced uploads do not expire.
+
 ### Media and direct delivery
 
 - `/media/:jobId/index.m3u8` and `/media/:jobId/segment-NNNNNN.ts` are cookie/room authenticated. In split deployments YouTube, Twitch VODs, and hosted media use this route; uploaded media is rejected rather than proxied. Playlists are always uncached.
@@ -47,6 +49,8 @@ Direct grants are session-bound HMAC capabilities, scoped to one media job or up
 ## WebSocket `/ws`
 
 Authentication is the session cookie. Reconnect with exponential backoff, rejoin previous room; never replay stale commands. On connect server sends `{type:'rooms',rooms}`.
+
+The browser probes every 1.5 seconds while scheduled, with a 15-second response deadline while visible and a 15-second connection-attempt deadline. Hidden tabs and callbacks delayed by suspension receive a fresh response window instead of immediately timing out; visibility, focus, pageshow and online events probe or reconnect promptly. Timeouts use a monotonic clock. A failed socket is retired before retrying, without waiting for its close handshake; late events cannot affect its replacement. Reconnects reset clock samples and require a fresh room snapshot before enabling shared commands. Session checks are bounded to 10 seconds and cancelled on recovery/disconnect. Server protocol pings run every 15 seconds independently of browser JavaScript timers.
 
 Client sends:
 - `{type:'join',roomId}`

@@ -1076,6 +1076,11 @@ ul, ol {
     pointer-events: none;
 }
 
+.video-canvas.crt-flames {
+    z-index: 1;
+    background: transparent;
+}
+
 .player-effects {
     position: absolute;
     inset: 0;

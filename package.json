@@ -15,6 +15,7 @@
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:media": "node --test test/media.integration.js",
     "test:browser": "npm run build && node --test --test-concurrency=1 test/browser.integration.js test/reactions.browser.integration.js",
+    "test:firefox": "npm run build && node --test test/firefox.browser.integration.js",
     "test:worker": "npm run build && node --test test/worker.integration.js",
     "test:youtube": "node --test test/youtube.integration.js"
   },

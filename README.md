@@ -354,7 +354,7 @@ The buffer health row updates every second with **locally buffered seconds**, se
 
 The visual player is a WebGL video-textured plane with an **orthographic projection**, implemented without an extra graphics dependency in `src\lib\video-renderer.js`. Coordinates are CSS pixels from the viewport's top-left, ready for future composited overlays; the current room notices remain accessible HTML above the canvas. The native video element still handles HLS decoding, audio, and synchronization. Rendering follows decoded frames, preserves aspect ratio, redraws paused seeks and resizes, and caps resolution at 2× device pixels / 4096 per dimension. WebGL unavailability or context loss falls back to native video; a restored context rebuilds the renderer.
 
-Ghost and beach-ball layers share that orthographic WebGL composition, with a transparent 2D effects canvas for native-video fallback. Preview video bytes are capped at **32 MiB**, pruned with the local playback buffer, and cleared on media changes; only the requested fragment is decoded, into an image no larger than 960×540. Offsets are translated through the current stream's base time. Ball animation stops when hidden or disabled and does not re-upload unchanged video frames.
+Firefox (Gecko) displays the native video directly: its video-frame callbacks can arrive less frequently than presented frames, causing the WebGL copy to stutter despite healthy decoding and buffering. Idle CRT effects still use WebGL. Ghost and beach-ball layers use a transparent 2D effects canvas in Firefox and during native-video fallback; other browsers share the orthographic WebGL composition. Preview video bytes are capped at **32 MiB**, pruned with the local playback buffer, and cleared on media changes; only the requested fragment is decoded, into an image no larger than 960×540. Offsets are translated through the current stream's base time. Ball animation stops when hidden or disabled and does not re-upload unchanged video frames.
 
 ## Uploads and backpressure
 
@@ -391,8 +391,13 @@ Environment variables (set in PowerShell or your service manager; `.env` is not 
 | `MAX_TRANSCODERS` | `4` | Global concurrent media jobs |
 | `MAX_UPLOAD_BYTES` | `10737418240` | Maximum individual upload (10 GiB) |
 | `MAX_STORAGE_BYTES` | `32212254720` | Shared upload/media budget (30 GiB; checked every 10s) |
+| `MAX_USER_STORAGE_BYTES` | Half of `MAX_STORAGE_BYTES` (15 GiB by default) | Per-account total declared upload bytes, including completed sources still retained by rooms; reserved atomically before creating files |
+| `MAX_UPLOADS` | `200` | Maximum retained uploads across all accounts |
+| `MAX_USER_UPLOADS` | `100` | Maximum retained uploads per account, across all rooms |
+| `UPLOAD_IDLE_TIMEOUT_MS` | `86400000` | Expire incomplete uploads after 24 hours without a successful chunk write; queued and paused uploads also expire |
 | `CLEANUP_INTERVAL_MS` | `60000` | Interval for sweeping unreferenced uploads and streaming files |
 | `SECURE_COOKIES` | `false` | Set `true` behind HTTPS |
+| `TRUST_PROXY` | `false` | Trust loopback reverse proxies for client IPs; enable only when the proxy replaces `X-Forwarded-For` with its connection peer address (managed nginx does this) |
 | `ALLOWED_ORIGINS` | localhost Vite origins | Comma-separated additional trusted browser origins; same-origin always accepted |
 | `BARE_METAL_ORIGIN` | empty | Public DNS-only HTTPS backend origin for direct keys, uploaded-video playback, and upload chunks; also set as a Worker runtime binding |
 | `EDGE_PROXY_SECRET` | empty | Shared backend/Worker secret (at least 32 characters) enabling authenticated edge authorization; store as a Worker secret |
@@ -401,13 +406,15 @@ Durable application state lives in **`data\helltube.sqlite`**, using Node's buil
 
 Playback mutations are saved immediately, and advancing clocks are checkpointed every **750ms**. Offline time does not advance playback: restart rebuilds each current stream at the saved position, resuming only if it was previously playing or waiting for media. Paused rooms remain paused. Live connections/presence, decoders, temporary previews, and buffers are runtime resources and are recreated, not restored as phantom viewers.
 
-On startup, obsolete streaming segments under `data\media` and unreferenced/legacy files under `data\uploads` are removed. Original upload bytes remain on disk **while referenced by a current video, any queue, or the five-item history**; storing large video blobs inside SQLite is intentionally avoided. Missing source files produce an actionable error instead of a broken stream. Shutdown retains referenced uploads; runtime cleanup cancels obsolete jobs and removes their files, and sweeps orphan files every minute (configurable above). Cleanup never removes the SQLite database or unrelated files in `DATA_DIR`.
+On startup, obsolete streaming segments under `data\media` and unreferenced/legacy files under `data\uploads` are removed. Completed original uploads remain on disk **while referenced by a current video, any queue, or the five-item history**; storing large video blobs inside SQLite is intentionally avoided. Incomplete uploads expire after `UPLOAD_IDLE_TIMEOUT_MS` without successful chunk progress, even while referenced: cleanup removes their files and queue/history entries, and advances past an expired current video. Status polling does not renew reservations. Progress timestamps survive restart; older upload records use their creation time until a chunk succeeds. Expired files must be added again. Missing source files produce an actionable error instead of a broken stream. Shutdown retains uploads that have not expired; runtime cleanup cancels obsolete jobs and removes their files, and sweeps orphan files every minute (configurable above). Cleanup never removes the SQLite database or unrelated files in `DATA_DIR`.
 
 Run **one Node process** per data directory, not a load-balanced cluster. A database ownership guard rejects a second updated backend before it can clean an active server's media. Stop the existing server before upgrading. To back up, stop the server and copy `helltube.sqlite` **and `uploads` together**; live backups must use SQLite's backup facilities rather than copying a live database without its WAL.
 
 ## Security and operating limits
 
 Session cookies are HttpOnly/SameSite=Strict; HTTP and WebSocket origin checks, role checks, login/command/submission rate limits, bounded message/chunk sizes, upload ownership, and authenticated room-media checks are enforced. Password/role changes revoke sessions. The last administrator cannot be deleted or demoted. Only validated YouTube and Twitch VOD URLs reach yt-dlp, subprocesses do not use a shell, and uploaded network-playlist formats are denied to FFmpeg.
+
+Login limits use the connection address by default. Managed bootstrap enables `TRUST_PROXY=true` for its loopback nginx proxy, which overwrites incoming forwarding headers. Existing nginx deployments must add `TRUST_PROXY=true` to `/etc/helltube/helltube.env` and restart the backend to enable this behavior; code updates alone do not rewrite that file. Other deployments should enable it only with the same proxy/header configuration. In Worker deployments, publish the updated Worker as well as the backend: it replaces `X-Helltube-Client-IP` with Cloudflare's visitor address, which the backend accepts only alongside the shared edge secret. Unauthenticated client identity headers are ignored. Keep per-account byte/count limits below the corresponding global limits to preserve room for another account.
 
 Run media processing as an unprivileged OS account/container with CPU/disk limits and restricted egress if admitting untrusted users: FFmpeg and yt-dlp are external parsers, not a complete sandbox. The storage budget is a guardrail, not a filesystem quota. Native HLS fallback depends on browser buffering behavior; Chrome/Edge/Firefox use hls.js. Live broadcasts and DRM are not supported; private/paid/age-gated content is not guaranteed even with [optional cookie authentication](#youtube-authentication). YouTube may rate-limit or require bot verification; those failures surface as errors and can be skipped. Only stream content you have permission to access and share.
 
@@ -418,6 +425,8 @@ npm test
 npm run test:media
 npm run build
 npm run test:browser
+npx playwright install firefox
+npm run test:firefox
 npm run test:worker
 # Optional: contacts YouTube (requires a working Internet connection and current yt-dlp).
 npm run test:youtube
@@ -425,7 +434,7 @@ npm run test:youtube
 
 `npm test` covers SQLite migration/rollback, session and volume persistence, restart recovery, periodic cleanup and retention, room clocks, queues/playlists/history, upload resumption/pacing, URL validation, and real HTTP/WebSocket connections. It requires FFmpeg for capability checks but does not contact YouTube. `test:media` generates a synthetic video with FFmpeg, confirms playable HLS **before upload completion**, decodes served media before and after a server restart, checks next-video preparation/history, and rejects malicious uploaded playlists. Fixtures live under ignored `test-artifacts` and clean themselves up. No external YouTube availability is assumed by the deterministic test suite.
 
-`test:browser` requires installed Google Chrome. It builds the app and uses Playwright to test two separate user sessions, admin creation/deletion, uploaded video decoding, sub-second synchronization, shared pause/seek, offline recovery, display-name changes, and mobile overflow. It also checks WebGL pixels against native decoded frames, fullscreen/HiDPI resizing, context recovery, native fallback, joystick spring motion/alignment, and reduced motion. Desktop/mobile screenshots are saved under `test-artifacts`. `test:youtube` exercises the complete real YouTube-to-HLS path; set `YOUTUBE_TEST_URL` to test another public video or playlist. Its success depends on YouTube availability and access policies.
+`test:browser` requires installed Google Chrome. It builds the app and uses Playwright to test two separate user sessions, admin creation/deletion, uploaded video decoding, sub-second synchronization, shared pause/seek, offline recovery, display-name changes, and mobile overflow. It also checks WebGL pixels against native decoded frames, fullscreen/HiDPI resizing, context recovery, native fallback, joystick spring motion/alignment, and reduced motion. Desktop/mobile screenshots are saved under `test-artifacts`. `test:firefox` uses Playwright's Firefox to check native video playback without video texture uploads or frame-callback dependence, room synchronization, pause/seek/resume, CRT rendering, preview and ball overlays, context restoration, and mobile resizing. `test:youtube` exercises the complete real YouTube-to-HLS path; set `YOUTUBE_TEST_URL` to test another public video or playlist. Its success depends on YouTube availability and access policies.
 
 `test:worker` uses local Wrangler and Chrome with distinct frontend/backend origins. It checks real WebSocket proxying, direct upload and encrypted playback, cookie-free key delivery, shared segment caching, and authorization of warm cache hits using synthetic media; it does not deploy to Cloudflare or contact YouTube. Production DNS/TLS configuration, global cache behavior, and Safari/native HLS still require deployment smoke tests.
 

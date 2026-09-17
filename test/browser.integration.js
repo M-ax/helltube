@@ -80,6 +80,43 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   await page.getByRole('button', {name: 'Enter Helltube'}).click();
   await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
   await page.getByRole('heading', {name: 'NO SIGNAL'}).waitFor();
+  const flameFrame = () => page.locator('.video-canvas').evaluate(canvas => {
+    // Force a draw before reading a WebGL buffer that is discarded after compositing.
+    window.dispatchEvent(new Event('resize'));
+    const gl = canvas.getContext('webgl');
+    const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+    gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let hash = 0;
+    let orange = 0;
+    let highest = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      hash = (Math.imul(hash, 31) + pixels[i] + pixels[i + 1] + pixels[i + 3]) | 0;
+      if (pixels[i + 3] > 15) {
+        highest = Math.floor(i / 4 / canvas.width);
+        if (pixels[i] > pixels[i + 1] * 1.3 && pixels[i + 1] > pixels[i + 2] * 2) orange++;
+      }
+    }
+    const bounds = canvas.getBoundingClientRect();
+    const seek = document.querySelector('.seek-track').getBoundingClientRect();
+    return {hash, orange, top: bounds.bottom - highest * bounds.height / canvas.height,
+      seek: seek.top + seek.height / 2, error: gl.getError()};
+  });
+  const initialFlames = await flameFrame();
+  assert.ok(initialFlames.orange > 100, 'The existing WebGL canvas draws orange flames before video loads.');
+  assert.equal(initialFlames.error, 0);
+  assert.ok(initialFlames.top >= initialFlames.seek - 42, 'Flames stay in a shallow band above the seek bar.');
+  await until(async () => (await flameFrame()).hash !== initialFlames.hash);
+  await page.emulateMedia({reducedMotion: 'reduce'});
+  const stillFlames = await flameFrame();
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal((await flameFrame()).hash, stillFlames.hash, 'Reduced motion keeps a static flame frame.');
+  await page.emulateMedia({reducedMotion: 'no-preference'});
+  await page.locator('.video-canvas').evaluate(canvas => {
+    const extension = canvas.getContext('webgl').getExtension('WEBGL_lose_context');
+    canvas.addEventListener('webglcontextlost', () => setTimeout(() => extension.restoreContext(), 100), {once: true});
+    extension.loseContext();
+  });
+  await until(async () => (await flameFrame()).orange > 100);
   const viewport = page.locator('.video-viewport');
   const assertWidescreen = async () => {
     const bounds = await viewport.boundingBox();
@@ -88,6 +125,9 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   await assertWidescreen();
   await page.setViewportSize({width: 375, height: 850});
   await assertWidescreen();
+  const mobileFlames = await flameFrame();
+  assert.ok(mobileFlames.orange > 20 && mobileFlames.top >= mobileFlames.seek - 42,
+    'Mobile flames track the wrapped controls without covering the terminal.');
   const addButton = page.getByRole('button', {name: 'Add something good'});
   assert.equal(await addButton.evaluate(button => {
     const bounds = button.getBoundingClientRect();
@@ -154,6 +194,7 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   await until(() => room.current.media?.complete, 15000);
   assert.ok(room.current.preparation.seconds > 0, 'Real FFmpeg stdout produces progress.');
   await page.locator('.crt-screen').waitFor({state: 'detached'});
+  assert.equal(await page.locator('.video-canvas.crt-flames').count(), 0, 'Flames leave when the decoded video appears.');
   const exit = await page.evaluate(() => window.crtExit);
   assert.equal(exit.started && exit.ended, true, 'The CRT runs its exit before it is removed.');
   assert.ok(exit.frames.some(frame => frame.opacity > 0 && frame.opacity < .9), 'The overlay becomes transparent over the video.');

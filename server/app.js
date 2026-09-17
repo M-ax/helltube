@@ -1,6 +1,7 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +28,9 @@ export function validOrigin(origin, host, config) {
 
 export async function createApp(overrides = {}) {
   const config = { ...defaults, ...overrides };
+  for (const name of ['maxUserStorageBytes', 'maxUploads', 'maxUserUploads', 'uploadIdleTimeoutMs']) {
+    if (!Number.isSafeInteger(config[name]) || config[name] <= 0) throw new Error(`${name} must be a positive safe integer.`);
+  }
   config.bareMetalOrigin = deploymentOrigin(config.bareMetalOrigin);
   if (config.edgeProxySecret && config.edgeProxySecret.length < 32) throw new Error('EDGE_PROXY_SECRET must be at least 32 characters.');
   const store = new StateStore(config.dataDir);
@@ -76,6 +80,9 @@ export async function createApp(overrides = {}) {
   server.requestTimeout = 120000;
   server.headersTimeout = 20000;
   app.disable('x-powered-by');
+  // The managed nginx configuration replaces X-Forwarded-For with its peer IP.
+  // Never trust forwarding headers from a non-loopback socket.
+  app.set('trust proxy', config.trustProxy ? 'loopback' : false);
   app.use((req, res, next) => {
     req.startedAt = performance.now();
     res.set(securityHeaders(config.bareMetalOrigin));
@@ -168,7 +175,9 @@ export async function createApp(overrides = {}) {
     res.json({ ok: true, commit: deployment.commit });
   });
   app.post('/api/login', async (req, res) => {
-    limit(`login:${req.socket.remoteAddress}`, 10);
+    const edgeIP = req.edge && req.headers['x-helltube-client-ip'];
+    const clientIP = typeof edgeIP === 'string' && isIP(edgeIP) ? edgeIP : req.ip;
+    limit(`login:${clientIP}`, 10);
     const { user, token } = await accounts.login(req.body.username, req.body.password);
     res.set('Set-Cookie', cookie(token)).json({ user: publicUser(user), capabilities });
   });
@@ -408,6 +417,7 @@ export async function createApp(overrides = {}) {
         if (message.type === 'ping') return send(ws, { type: 'pong', sentAt: message.sentAt, serverTime: Date.now() });
         if (message.type === 'join') {
           const room = rooms.get(message.roomId);
+          if (ws.roomId === room.id) return;
           leave(ws);
           ws.roomId = room.id;
           room.members.set(ws.id, current.user);

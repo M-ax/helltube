@@ -9,6 +9,18 @@ const jobId = '12345678-1234-4234-8234-123456789abc';
 const segment = `/media/${jobId}/segment-000001.ts`;
 const env = { BARE_METAL_ORIGIN: origin, EDGE_PROXY_SECRET: 'test-edge-secret' };
 
+test('proxy replaces caller client identity with the Cloudflare visitor address', async () => {
+  for (const path of ['/api/login', segment]) {
+    const h = harness();
+    await h.request(path, { headers: { 'CF-Connecting-IP': '192.0.2.10', 'X-Helltube-Client-IP': 'forged' } });
+    for (const call of h.calls) assert.equal(call.request.headers.get('X-Helltube-Client-IP'), '192.0.2.10');
+    assert.ok(h.calls.length > 0);
+    const absent = harness();
+    await absent.request(path, { headers: { 'X-Helltube-Client-IP': 'forged' } });
+    for (const call of absent.calls) assert.equal(call.request.headers.get('X-Helltube-Client-IP'), null);
+  }
+});
+
 test('deployment heads-up uses the published manifest and runtime secret, rejecting stale builds and direct proxy attempts', async () => {
   const version = { buildId: '11111111-1111-4111-8111-111111111111', commit: 'a'.repeat(40) };
   const h = harness({ assets: { fetch: async request => {

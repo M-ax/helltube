@@ -1,7 +1,13 @@
 import {get, writable} from 'svelte/store';
 import {api} from './api.js';
 
-export function createRealtime({onMessage, onSessionEnded}) {
+const HEARTBEAT_INTERVAL = 1500;
+const RESPONSE_TIMEOUT = 15000;
+const CONNECTION_TIMEOUT = 15000;
+const SESSION_CHECK_TIMEOUT = 10000;
+
+export function createRealtime({onMessage, onSessionEnded, windowTarget = window, documentTarget = document,
+    WebSocketImpl = WebSocket, now = () => performance.now(), request = api}) {
     const emptyReactions = () => ({roomId: null, ball: null, serverTime: 0, events: []});
     const reactions = writable(emptyReactions());
     const state = writable({
@@ -12,23 +18,117 @@ export function createRealtime({onMessage, onSessionEnded}) {
     let stopped = true;
     let retryTimer;
     let heartbeat;
+    let connectionTimer;
+    let sessionCheck;
+    let sessionTimer;
     let attempt = 0;
     let generation = 0;
     let lastResponse = 0;
+    let lastHeartbeat = 0;
     let storageKey;
     let samples = [];
 
     function send(message) {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-        socket.send(JSON.stringify(message));
-        return true;
+        if (!socket || socket.readyState !== WebSocketImpl.OPEN) return false;
+        try {
+            socket.send(JSON.stringify(message));
+            return true;
+        } catch {
+            reconnect();
+            return false;
+        }
+    }
+
+    function closeSocket() {
+        generation++;
+        clearTimeout(retryTimer);
+        clearTimeout(connectionTimer);
+        clearInterval(heartbeat);
+        const previous = socket;
+        socket = null;
+        previous?.close();
+    }
+
+    function cancelSessionCheck() {
+        sessionCheck?.abort();
+        sessionCheck = null;
+        clearTimeout(sessionTimer);
+    }
+
+    function checkSession() {
+        if (sessionCheck) return;
+        const controller = new AbortController();
+        sessionCheck = controller;
+        sessionTimer = setTimeout(cancelSessionCheck, SESSION_CHECK_TIMEOUT);
+        void request('/api/me', {signal: controller.signal}).catch(error => {
+            if (error.status === 401 && sessionCheck === controller && !stopped) {
+                disconnect();
+                onSessionEnded();
+            }
+        }).finally(() => {
+            if (sessionCheck === controller) cancelSessionCheck();
+        });
+    }
+
+    function reconnect(event) {
+        if (stopped) return;
+        // Retire the socket immediately: a broken transport may never deliver close.
+        closeSocket();
+        if ([1008, 4001, 4401].includes(event?.code)) {
+            disconnect();
+            onSessionEnded();
+            return;
+        }
+        if (windowTarget.navigator.onLine === false) {
+            offline();
+            return;
+        }
+        state.update(current => ({...current, status: 'reconnecting', joined: false}));
+        reactions.set(emptyReactions());
+        checkSession();
+        const delay = Math.min(15000, 750 * 2 ** attempt++) + Math.random() * 350;
+        retryTimer = setTimeout(open, delay);
+    }
+
+    function resetClock() {
+        samples = [];
+        state.update(current => ({...current, clockReady: false, rtt: null}));
+    }
+
+    function beat() {
+        const time = now();
+        const delayed = time - lastHeartbeat > RESPONSE_TIMEOUT;
+        // Hidden/frozen tabs cannot meet a foreground deadline. Probe again after
+        // a delayed callback, giving queued messages time to run before judging it.
+        if (documentTarget.visibilityState === 'hidden' || delayed) {
+            lastResponse = time;
+        }
+        if (delayed) resetClock();
+        lastHeartbeat = time;
+        if (time - lastResponse >= RESPONSE_TIMEOUT) reconnect();
+        else send({type: 'ping', sentAt: Date.now()});
+    }
+
+    function wake() {
+        if (stopped || documentTarget.visibilityState === 'hidden' || windowTarget.navigator.onLine === false) return;
+        if (socket?.readyState === WebSocketImpl.OPEN) {
+            const time = now();
+            if (time - lastResponse >= RESPONSE_TIMEOUT) {
+                lastResponse = time;
+                resetClock();
+            }
+            lastHeartbeat = time;
+            send({type: 'ping', sentAt: Date.now()});
+        } else if (socket?.readyState !== WebSocketImpl.CONNECTING) {
+            retry();
+        }
     }
 
     function join(roomId) {
         reactions.set(emptyReactions());
         state.update((current) => ({...current, selectedRoomId: roomId, joined: false, room: null, overlay: null}));
         try {
-            localStorage.setItem(storageKey, roomId);
+            windowTarget.localStorage.setItem(storageKey, roomId);
         } catch { /* Storage can be unavailable in private browsing. */
         }
         send({type: 'join', roomId});
@@ -37,28 +137,35 @@ export function createRealtime({onMessage, onSessionEnded}) {
     function open() {
         if (stopped) return;
         reactions.set(emptyReactions());
-        if (navigator.onLine === false) {
+        if (windowTarget.navigator.onLine === false) {
             state.update((current) => ({...current, status: 'offline', joined: false}));
             return;
         }
         const activeGeneration = ++generation;
         state.update((current) => ({...current, status: attempt ? 'reconnecting' : 'connecting', joined: false}));
-        socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
-        const currentSocket = socket;
+        const {location} = windowTarget;
+        try {
+            socket = new WebSocketImpl(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
+        } catch {
+            reconnect();
+            return;
+        }
+        connectionTimer = setTimeout(() => {
+            if (generation === activeGeneration && !stopped) reconnect();
+        }, CONNECTION_TIMEOUT);
 
         socket.onopen = () => {
             if (generation !== activeGeneration || stopped) return;
-            attempt = 0;
-            lastResponse = Date.now();
+            clearTimeout(connectionTimer);
+            cancelSessionCheck();
+            lastResponse = lastHeartbeat = now();
+            resetClock();
             state.update((current) => ({...current, status: 'connected'}));
-            send({type: 'ping', sentAt: Date.now()});
+            clearInterval(heartbeat);
+            heartbeat = setInterval(beat, HEARTBEAT_INTERVAL);
+            if (!send({type: 'ping', sentAt: Date.now()})) return;
             const roomId = get(state).selectedRoomId;
             if (roomId) send({type: 'join', roomId});
-            clearInterval(heartbeat);
-            heartbeat = setInterval(() => {
-                if (Date.now() - lastResponse > 5000) currentSocket.close();
-                else send({type: 'ping', sentAt: Date.now()});
-            }, 1500);
         };
 
         socket.onmessage = ({data}) => {
@@ -69,7 +176,9 @@ export function createRealtime({onMessage, onSessionEnded}) {
             } catch {
                 return;
             }
-            lastResponse = Date.now();
+            if (!message || typeof message !== 'object') return;
+            lastResponse = now();
+            attempt = 0;
             if (message.type === 'pong') {
                 const rtt = Date.now() - message.sentAt;
                 if (!Number.isFinite(rtt) || rtt < 0 || rtt > 20000 || !Number.isFinite(message.serverTime)) return;
@@ -113,25 +222,12 @@ export function createRealtime({onMessage, onSessionEnded}) {
             }
         };
 
-        socket.onerror = () => currentSocket.close();
+        socket.onerror = () => {
+            if (generation === activeGeneration && !stopped) reconnect();
+        };
         socket.onclose = (event) => {
             if (generation !== activeGeneration || stopped) return;
-            clearInterval(heartbeat);
-            if ([1008, 4001, 4401].includes(event.code)) {
-                disconnect();
-                onSessionEnded();
-                return;
-            }
-            state.update((current) => ({...current, status: 'reconnecting', joined: false}));
-            reactions.set(emptyReactions());
-            void api('/api/me').catch((error) => {
-                if (error.status === 401 && generation === activeGeneration && !stopped) {
-                    disconnect();
-                    onSessionEnded();
-                }
-            });
-            const delay = Math.min(15000, 750 * 2 ** attempt++) + Math.random() * 350;
-            retryTimer = setTimeout(open, delay);
+            reconnect(event);
         };
     }
 
@@ -141,7 +237,7 @@ export function createRealtime({onMessage, onSessionEnded}) {
         storageKey = `helltube:room:${userId}`;
         let selectedRoomId = null;
         try {
-            selectedRoomId = localStorage.getItem(storageKey);
+            selectedRoomId = windowTarget.localStorage.getItem(storageKey);
         } catch { /* Optional room preference. */
         }
         state.update((current) => ({
@@ -155,31 +251,31 @@ export function createRealtime({onMessage, onSessionEnded}) {
         }));
         samples = [];
         attempt = 0;
-        window.addEventListener('offline', offline);
-        window.addEventListener('online', retry);
+        windowTarget.addEventListener('offline', offline);
+        windowTarget.addEventListener('online', wake);
+        windowTarget.addEventListener('focus', wake);
+        windowTarget.addEventListener('pageshow', wake);
+        documentTarget.addEventListener('visibilitychange', wake);
         open();
     }
 
     function offline() {
         reactions.set(emptyReactions());
-        generation++;
-        clearTimeout(retryTimer);
-        clearInterval(heartbeat);
-        socket?.close();
-        socket = null;
+        closeSocket();
+        cancelSessionCheck();
         state.update((current) => ({...current, status: 'offline', joined: false}));
     }
 
     function disconnect() {
         reactions.set(emptyReactions());
         stopped = true;
-        window.removeEventListener('offline', offline);
-        window.removeEventListener('online', retry);
-        generation++;
-        clearTimeout(retryTimer);
-        clearInterval(heartbeat);
-        socket?.close();
-        socket = null;
+        windowTarget.removeEventListener('offline', offline);
+        windowTarget.removeEventListener('online', wake);
+        windowTarget.removeEventListener('focus', wake);
+        windowTarget.removeEventListener('pageshow', wake);
+        documentTarget.removeEventListener('visibilitychange', wake);
+        closeSocket();
+        cancelSessionCheck();
         state.update((current) => ({...current, status: 'offline', joined: false}));
     }
 
@@ -196,10 +292,7 @@ export function createRealtime({onMessage, onSessionEnded}) {
 
     function retry() {
         if (stopped) return;
-        generation++;
-        socket?.close();
-        clearTimeout(retryTimer);
-        clearInterval(heartbeat);
+        closeSocket();
         attempt = 0;
         open();
     }

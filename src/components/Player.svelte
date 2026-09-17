@@ -17,6 +17,7 @@
     import {createVideoRenderer} from '../lib/video-renderer.js';
     import {createSeekPreview} from '../lib/seek-preview.js';
 
+    export let username = 'guest';
     export let room = null;
     export let connected = false;
     export let clockOffset = 0;
@@ -83,6 +84,8 @@
 
     $: item = room?.current;
     $: media = item?.media;
+    $: crtVisible = !media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error');
+    $: if (renderer) renderer.setCrtActive(crtVisible);
     $: duration = item?.duration;
     $: seekMax = Math.max(1, duration || media?.bufferedUntil || position);
     $: displayedPosition = scrubbing ? scrubPosition : position;
@@ -679,7 +682,8 @@
                on:playing={() => { playing = true; localBuffering = false; }}
                on:pause={() => playing = false} on:ended={() => playing = false}
                on:error={nativePlaybackError}></video>
-        <canvas bind:this={canvas} class="video-canvas" class:video-visible={!!media && webglActive} aria-hidden="true"></canvas>
+        <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
+                class:video-visible={crtVisible || (!!media && webglActive)} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
         {#each activeReactions.filter(reaction => reaction.kind === 'metalpipe') as reaction (reaction.id)}
             <MetalPipeReaction {reaction} {clockOffset} onImpact={pipeImpact}/>
@@ -708,8 +712,8 @@
         <div class="screen-topline"><span class="screen-brand"><Icon name="flame" size={16}/>HELLTUBE CINEMA</span><span
                 class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : room.playback.paused ? 'PAUSED TOGETHER' : 'WATCHING TOGETHER'}</span>
         </div>
-        {#if !media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error')}
-            <CrtScreen {item} {connected} {onAdd} onSkip={() => control('skip')}
+        {#if crtVisible}
+            <CrtScreen {username} {item} {connected} {onAdd} onSkip={() => control('skip')}
                        pending={item ? null : room?.preparation || (preparation?.roomId === room?.id ? preparation : null)}/>
         {:else if item.status === 'error' || playerError}
             <div class="screen-message error-screen" role="alert"><span class="screen-message-icon"><Icon name="warning"

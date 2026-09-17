@@ -2,7 +2,7 @@ import {time, bytes} from './format.js';
 
 export function startupRows(item, pending, connected) {
     const rows = [
-        {id: 'display', label: 'CRT display initialized', state: 'ok'},
+        {id: 'display', label: 'Display initialized', state: 'ok'},
         {id: 'connection', label: connected ? 'Room link established' : 'Reconnecting to room', state: connected ? 'ok' : 'wait'},
     ];
     if (!item && !pending) {

@@ -22,6 +22,7 @@ export function uploadHealth({ size, duration, received, position, transferBytes
 export class Uploads {
   constructor(config, rooms, store) {
     this.config = config;
+    this.now = config.now || Date.now;
     this.rooms = rooms;
     this.store = store;
     this.uploads = new Map();
@@ -52,6 +53,7 @@ export class Uploads {
         try { await handle.truncate(received); } finally { await handle.close(); }
       }
       const upload = { ...saved, item, file, received, complete: received === saved.size,
+        lastProgressAt: saved.lastProgressAt ?? saved.createdAt,
         busy: false, cancelled: false, readers: new Set() };
       item.source.complete = upload.complete;
       item.uploadProgress = { received, total: upload.size, complete: upload.complete };
@@ -70,9 +72,9 @@ export class Uploads {
 
   persist(upload) {
     if (upload.cancelled) return;
-    const { id, roomId, userId, size, received, complete, samples, lastWarning, createdAt, lastModified } = upload;
+    const { id, roomId, userId, size, received, complete, samples, lastWarning, createdAt, lastModified, lastProgressAt } = upload;
     this.store?.save('uploads', id, { id, itemId: upload.item.id, roomId, userId, size, received,
-      complete, samples, lastWarning, createdAt, lastModified });
+      complete, samples, lastWarning, createdAt, lastModified, lastProgressAt });
   }
 
   list(userId) {
@@ -83,6 +85,22 @@ export class Uploads {
   }
 
   async cleanup() {
+    const expired = [...this.uploads.values()].filter(u => !u.creating && !u.busy && !u.complete &&
+      this.now() - u.lastProgressAt >= this.config.uploadIdleTimeoutMs);
+    const expiredIds = new Set(expired.map(u => u.item.id));
+    // Cancel sources before notifying media preparation, so expired streams stop
+    // and an expired current item cannot be retained in the replay history.
+    const removals = expired.map(u => this.discard(u));
+    for (const room of this.rooms.rooms.values()) {
+      if (![room.current, ...room.queue, ...room.history].some(item => item && expiredIds.has(item.id))) continue;
+      room.queue = room.queue.filter(item => !expiredIds.has(item.id));
+      room.history = room.history.filter(item => !expiredIds.has(item.id));
+      if (expiredIds.has(room.current?.id)) {
+        room.current = null;
+        this.rooms.advance(room);
+      } else this.rooms.changed(room);
+    }
+    await Promise.all(removals);
     const referenced = new Set(this.rooms.allItems().map(item => item.id));
     await Promise.all([...this.uploads.values()].filter(u => !u.creating && !referenced.has(u.item.id)).map(u => this.discard(u)));
     for (const entry of await readdir(this.dir)) {
@@ -119,7 +137,13 @@ export class Uploads {
     const files = body.files.map(file => this.validateFile(file));
     if (room.queue.length + files.length > this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
     const reserved = [...this.uploads.values()].reduce((total, upload) => total + upload.size, 0);
-    if (this.uploads.size + files.length > 100 || reserved + files.reduce((total, file) => total + file.size, 0) > this.config.maxStorageBytes) {
+    const requested = files.reduce((total, file) => total + file.size, 0);
+    const own = [...this.uploads.values()].filter(upload => upload.userId === user.id);
+    if (own.length + files.length > this.config.maxUserUploads ||
+      own.reduce((total, upload) => total + upload.size, 0) + requested > this.config.maxUserStorageBytes) {
+      throw httpError(409, 'Your upload reservation limit is full. Remove unneeded uploads before adding more.');
+    }
+    if (this.uploads.size + files.length > this.config.maxUploads || reserved + requested > this.config.maxStorageBytes) {
       throw httpError(507, 'Upload storage budget is full. Remove unneeded queue items.');
     }
     const playlistId = files.length > 1 ? randomUUID() : null;
@@ -132,7 +156,7 @@ export class Uploads {
       });
       return { id, item, roomId: room.id, userId: user.id, size: file.size,
         received: 0, complete: false, busy: false, cancelled: false, file: path.join(this.dir, id),
-        samples: [], lastWarning: 0, readers: new Set(), createdAt: Date.now(),
+        samples: [], lastWarning: 0, readers: new Set(), createdAt: this.now(), lastProgressAt: this.now(),
         lastModified: file.lastModified, creating: true };
     });
     for (const upload of batch) this.uploads.set(upload.id, upload);
@@ -203,6 +227,7 @@ export class Uploads {
       }
       if (upload.cancelled) throw httpError(404, 'Upload no longer exists.');
       upload.received += bytes.length;
+      upload.lastProgressAt = this.now();
       upload.complete = upload.received === upload.size;
       upload.item.source.complete = upload.complete;
       upload.item.uploadProgress = { received: upload.received, total: upload.size, complete: upload.complete };

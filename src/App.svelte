@@ -296,7 +296,7 @@
     <meta name="description"
           content="Your own corner of the internet. Watch videos together in perfectly good company."/>
 </svelte:head>
-<svelte:window on:online={() => { browserOnline = true; if (user) client.retry(); }}
+<svelte:window on:online={() => browserOnline = true}
                on:offline={() => browserOnline = false}/>
 
 {#if checking}
@@ -491,7 +491,7 @@
                 <div class="work-grid">
                     <section class="stage" aria-label="Watch together">
                         {#key preferenceKey}
-                            <Player {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
+                            <Player username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
                                     overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
