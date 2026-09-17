@@ -11,6 +11,7 @@ export function createBufferHealth({now = () => performance.now()} = {}) {
     let graceUntil = now() + 4000;
     let lowSince = null;
     let stalledSince = null;
+    let qualityGraceUntil = null;
     let qualityLowSince = null;
     let qualityStalledSince = null;
     let depletingSince = null;
@@ -35,6 +36,7 @@ export function createBufferHealth({now = () => performance.now()} = {}) {
         if (revision !== playbackRevision || (lastSample !== null && at - lastSample > 2500)) {
             graceUntil = at + 4000;
             lowSince = stalledSince = null;
+            qualityGraceUntil = null;
             qualityLowSince = qualityStalledSince = depletingSince = previousSeconds = null;
         }
         revision = playbackRevision;
@@ -54,17 +56,21 @@ export function createBufferHealth({now = () => performance.now()} = {}) {
             : stalledSince !== null && at - stalledSince >= 3000 ? 'Playback stalled'
             : lowSince !== null && at - lowSince >= 6000 ? 'Buffer stayed low' : null;
         // A lower quality can recover source starvation when it is already prepared.
-        const qualityObserving = active && !paused && !blocked && !seeking && !coveredEnd;
-        qualityLowSince = qualityObserving && playableSeconds < 6 ? (qualityLowSince ?? at) : null;
+        // Let startup/resumed playback settle before collecting evidence for a sticky quality drop.
+        // Route recovery keeps its shorter grace period so it can repair delivery first.
+        const qualityActive = active && !paused && !blocked && !seeking && !coveredEnd;
+        qualityGraceUntil = qualityActive ? (qualityGraceUntil ?? at + 15000) : null;
+        const qualityObserving = qualityActive && at >= qualityGraceUntil;
+        qualityLowSince = qualityObserving && playableSeconds < 4 ? (qualityLowSince ?? at) : null;
         qualityStalledSince = qualityObserving && buffering && playableSeconds < 0.5 ? (qualityStalledSince ?? at) : null;
         const draining = qualityObserving && previousSeconds !== null && playableSeconds < previousSeconds - 0.2;
         depletingSince = draining ? (depletingSince ?? at) : null;
         previousSeconds = qualityObserving ? playableSeconds : null;
         const alternativeReady = alternativeAhead >= 4 || (alternativeComplete && alternativeAhead > 0);
-        const qualityFallbackReason = at < graceUntil || !alternativeReady ? null
-            : playableSeconds < 8 && depletingSince !== null && at - depletingSince >= 2000 ? 'Buffer is running low'
-            : qualityStalledSince !== null && at - qualityStalledSince >= 3000 ? 'Playback stalled'
-            : qualityLowSince !== null && at - qualityLowSince >= 6000 ? 'Buffer stayed low' : null;
+        const qualityFallbackReason = !qualityObserving || !alternativeReady ? null
+            : playableSeconds < 4 && depletingSince !== null && at - depletingSince >= 6000 ? 'Buffer is running low'
+            : qualityStalledSince !== null && at - qualityStalledSince >= 6000 ? 'Playback stalled'
+            : qualityLowSince !== null && at - qualityLowSince >= 12000 ? 'Buffer stayed low' : null;
         transfers = transfers.filter(transfer => at - transfer.at < 15000);
         const totals = transfers.reduce((sum, transfer) => ({bytes: sum.bytes + transfer.bytes,
             elapsed: sum.elapsed + transfer.elapsed, duration: sum.duration + transfer.duration}),

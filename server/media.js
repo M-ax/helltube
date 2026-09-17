@@ -7,6 +7,7 @@ import { FILE_INPUT_FORMATS, HOSTED_INPUT_FORMATS, probeCommand, probeDuration }
 import { sponsorPosition } from '../shared/sponsorblock.js';
 import { createProgressReader } from './media-progress.js';
 import { EncryptedFmp4 } from './encrypted-fmp4.js';
+import { encryptedMediaFile } from '../shared/media-files.js';
 
 export function playlistProgress(contents, baseTime = 0) {
   const durations = [...contents.matchAll(/^#EXTINF:([\d.]+)/gm)].map(m => Number(m[1]));
@@ -44,12 +45,12 @@ export class Media {
   }
 
   async init() {
-    await rm(path.dirname(this.dir), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    await rm(path.dirname(this.keyDir), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     await mkdir(this.dir, { recursive: true });
     await mkdir(this.keyDir, { recursive: true, mode: 0o700 });
     await chmod(path.dirname(this.keyDir), 0o700);
     await chmod(this.keyDir, 0o700);
+    await this.restore();
+    await this.cleanup();
     this.rooms.on('prepare', () => this.schedule());
     this.rooms.on('seek', (room, position) => {
       const job = this.jobs.get(room.current.id);
@@ -72,6 +73,73 @@ export class Media {
     this.timer.unref();
   }
 
+  persist(job) {
+    if (!this.rooms.store || job.cancelled || !job.item.media) return;
+    const state = { id: job.id, itemId: job.item.id, runId: path.basename(path.dirname(job.dir)), baseTime: job.baseTime,
+      duration: job.item.duration, sponsorSegments: job.item.sponsorSegments,
+      renditions: job.item.media.qualities.map(quality => {
+        const rendition = quality.id === 'original' ? job.original : job;
+        return { ...quality, jobId: rendition.id, runId: path.basename(path.dirname(rendition.dir)) };
+      }) };
+    const serialized = JSON.stringify(state);
+    if (job.saved === serialized) return;
+    this.rooms.store.save('media', job.item.id, state);
+    job.saved = serialized;
+  }
+
+  async restore() {
+    const items = new Map(this.rooms.allItems().map(item => [item.id, item]));
+    const validId = value => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
+    for (const saved of this.rooms.store?.load('media') || []) {
+      const item = items.get(saved.itemId);
+      if (!item || item.kind === 'desktop' || item.status === 'error' || !validId(saved.id) || !validId(saved.runId) ||
+        !Number.isFinite(saved.baseTime) || saved.baseTime < 0 || !Array.isArray(saved.renditions)) {
+        this.rooms.store.delete('media', saved.itemId);
+        continue;
+      }
+      const location = (id, runId = saved.runId) => ({ dir: path.join(path.dirname(this.dir), runId, id),
+        keyDir: path.join(path.dirname(this.keyDir), runId, id) });
+      // A finished Original can survive an interrupted or failed Standard encoder.
+      const job = { id: saved.id, item, baseTime: saved.baseTime, ...location(saved.id),
+        key: Buffer.alloc(16), failed: true, done: true, restored: true };
+      for (const quality of saved.renditions) {
+        if (!validId(quality.jobId) || !validId(quality.runId) || !['standard', 'original'].includes(quality.id) ||
+          (quality.id === 'standard') !== (quality.jobId === job.id) ||
+          !Number.isFinite(quality.baseTime) || quality.baseTime < 0) continue;
+        const rendition = { id: quality.jobId, item, baseTime: quality.baseTime, label: quality.label,
+          ...location(quality.jobId, quality.runId), done: true, interrupted: !quality.complete, lastBuffered: quality.baseTime };
+        rendition.clearDir = path.join(rendition.keyDir, 'staging');
+        try {
+          rendition.key = await readFile(path.join(rendition.keyDir, 'key.bin'));
+          const contents = await readFile(path.join(rendition.dir, 'index.m3u8'), 'utf8');
+          const files = contents.split(/\r?\n/).filter(line => line && !line.startsWith('#'));
+          for (const match of contents.matchAll(/^#EXT-X-MAP:URI="([^"]+)"/gm)) files.push(match[1]);
+          if (rendition.key.length !== 16 || !contents.startsWith('#EXTM3U') || !files.length ||
+            files.some(file => !encryptedMediaFile.test(file))) continue;
+          const validFiles = await Promise.all(files.map(async file => {
+            const info = await stat(path.join(rendition.dir, file));
+            return info.isFile() && info.size > 0;
+          }));
+          if (validFiles.some(valid => !valid)) continue;
+        } catch (error) {
+          if (['ENOENT', 'ENOTDIR'].includes(error.code)) continue;
+          throw error;
+        }
+        if (quality.id === 'standard') Object.assign(job, rendition, { failed: false });
+        else job.original = rendition;
+      }
+      if (job.failed && !job.original) {
+        this.rooms.store.delete('media', saved.itemId);
+        continue;
+      }
+      if (saved.duration > 0) item.duration = saved.duration;
+      if (saved.sponsorSegments) item.sponsorSegments = saved.sponsorSegments;
+      this.jobs.set(item.id, job);
+      await this.refresh(job);
+      if (!item.media) this.dispose(job);
+    }
+  }
+
   schedule() {
     if (this.closed || !this.listening) return;
     const allRooms = [...this.rooms.rooms.values()];
@@ -79,7 +147,18 @@ export class Media {
     const wantedIds = new Set(wanted.map(i => i.id));
     const referenced = new Set(this.rooms.allItems().map(i => i.id));
     for (const job of this.jobs.values()) {
-      if (!referenced.has(job.item.id) || (!wantedIds.has(job.item.id) && !job.done)) this.dispose(job);
+      if (!referenced.has(job.item.id)) this.dispose(job);
+      else if (job.restored && wantedIds.has(job.item.id)) {
+        const room = allRooms.find(room => room.current?.id === job.item.id);
+        const position = room ? this.rooms.position(room) : job.item.resumeAt ?? job.item.startAt ?? 0;
+        const prepared = job.item.media?.qualities.some(quality => position >= quality.baseTime &&
+          (quality.complete ? position <= quality.bufferedUntil : position <= quality.bufferedUntil - 4));
+        // Interrupted streams can serve their cached buffer, then prepare the missing range.
+        if (!prepared) {
+          this.dispose(job);
+          job.item.source.startAt = position;
+        }
+      }
     }
     for (const upload of this.uploads.uploads.values()) {
       if (!upload.creating && !referenced.has(upload.item.id)) this.uploads.discard(upload).catch(error => console.error('Upload cleanup:', error.message));
@@ -87,6 +166,24 @@ export class Media {
     let running = [...this.jobs.values()].filter(j => !j.done).length;
     for (const item of wanted) {
       if (running >= this.config.maxTranscoders) break;
+      const cached = this.jobs.get(item.id);
+      if (cached?.restored && item.media?.qualities.some(quality => quality.id === 'original' && quality.complete)) {
+        const room = allRooms.find(room => room.current?.id === item.id);
+        const position = room ? this.rooms.position(room) : item.resumeAt ?? item.startAt ?? 0;
+        const standard = item.media.qualities.find(quality => quality.id === 'standard');
+        if (!standard || (!standard.complete && position > standard.bufferedUntil - 4)) {
+          // Keep the finished copy while rebuilding only the interrupted Standard stream.
+          const original = cached.original;
+          const media = item.media;
+          delete cached.original;
+          this.dispose(cached);
+          item.media = media;
+          item.source.startAt = position;
+          running++;
+          this.start(item, position, original);
+          continue;
+        }
+      }
       if (this.jobs.has(item.id) || item.status === 'error' || item.kind === 'desktop') continue;
       if (item.kind === 'upload') {
         const upload = this.uploads.uploads.get(item.source.uploadId);
@@ -97,17 +194,27 @@ export class Media {
     }
   }
 
-  start(item, baseTime) {
+  start(item, baseTime, original) {
     if (item.kind === 'desktop') return; // Desktop media is delivered exclusively over WebRTC.
     const id = randomUUID();
     const job = { id, item, baseTime, dir: path.join(this.dir, id), child: null, done: false, cancelled: false,
       key: randomBytes(16), keyDir: path.join(this.keyDir, id), lastProgress: Date.now(), lastBuffered: baseTime, errors: '' };
+    if (original) job.original = original;
     this.jobs.set(item.id, job);
     item.status = 'processing';
-    item.media = null;
+    const prepared = original && item.media?.qualities.find(quality => quality.id === 'original');
+    item.media = prepared ? { ...prepared, qualities: [prepared] } : null;
+    if (prepared) item.status = 'ready';
     item.preparation = { stage: 'metadata', baseTime, seconds: 0 };
-    job.task = this.run(job).catch(error => {
+    this.persist(job);
+    job.task = this.run(job).catch(async error => {
       if (job.cancelled) return;
+      if (original) {
+        job.failed = error;
+        job.done = true;
+        await this.refresh(job);
+        if (item.media?.complete) return;
+      }
       if (item.kind === 'upload' && item.source.complete && job.inputComplete === false && !item.media) {
         this.dispose(job);
         return;
@@ -221,7 +328,7 @@ export class Media {
       '-hls_segment_filename', path.join(rendition.clearDir || rendition.dir, `segment-%06d.${rendition.clearDir ? 'm4s' : 'ts'}`),
       path.join(rendition.clearDir || rendition.dir, 'index.m3u8')];
     let originalTask = Promise.resolve();
-    if (copyQuality) {
+    if (copyQuality && !job.original) {
       const id = randomUUID();
       // Retain a short preroll, then measure the copied fragment's real start so an
       // imprecise keyframe seek cannot shift the room timeline.
@@ -303,6 +410,7 @@ export class Media {
       try { contents = await readFile(path.join(rendition.dir, 'index.m3u8'), 'utf8'); }
       catch (error) { if (error.code === 'ENOENT') continue; throw error; }
       const progress = playlistProgress(contents, rendition.baseTime);
+      if (rendition.interrupted) progress.complete = false;
       if (progress.bufferedUntil > rendition.lastBuffered) {
         rendition.lastBuffered = progress.bufferedUntil;
         rendition.lastProgress = Date.now();
@@ -326,6 +434,7 @@ export class Media {
     job.item.media = {...selected, qualities};
     job.item.status = 'ready';
     job.item.preparation = { ...job.item.preparation, stage: selected.complete ? 'ready' : 'buffering' };
+    this.persist(job);
   }
 
   async poll() {
@@ -362,13 +471,20 @@ export class Media {
   async cleanup() {
     this.schedule();
     await Promise.all(this.cleanups);
-    for (const entry of await readdir(this.dir)) {
-      if (this.retiring.has(entry) || this.allJobs().some(job => job.id === entry)) continue;
-      await rm(path.join(this.dir, entry), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    }
-    for (const entry of await readdir(path.dirname(this.dir))) {
-      if (entry === path.basename(this.dir)) continue;
-      await rm(path.join(path.dirname(this.dir), entry), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    for (const property of ['dir', 'keyDir']) {
+      const root = path.dirname(this[property]);
+      for (const run of await readdir(root, { withFileTypes: true })) {
+        const runDir = path.join(root, run.name);
+        if (run.isDirectory()) {
+          for (const entry of await readdir(runDir)) {
+            const dir = path.join(runDir, entry);
+            if (this.retiring.has(entry) || this.allJobs().some(job => job[property] === dir)) continue;
+            await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+          }
+          if (runDir === this[property] || (await readdir(runDir)).length) continue;
+        }
+        await rm(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      }
     }
   }
 
@@ -382,7 +498,10 @@ export class Media {
       job.original.child?.kill();
       this.retiring.add(job.original.id);
     }
-    if (this.jobs.get(job.item.id) === job) this.jobs.delete(job.item.id);
+    if (this.jobs.get(job.item.id) === job) {
+      this.jobs.delete(job.item.id);
+      this.rooms.store?.delete('media', job.item.id);
+    }
     job.item.media = null;
     job.item.preparation = null;
     job.item.status = 'queued';
@@ -404,13 +523,32 @@ export class Media {
   }
 
   async close() {
+    if (this.closed) return;
     this.closed = true;
     clearInterval(this.timer);
+    const referenced = new Set(this.rooms.allItems().map(item => item.id));
+    const retained = [];
+    for (const job of [...this.jobs.values()]) {
+      if (referenced.has(job.item.id)) await this.refresh(job);
+      if (!referenced.has(job.item.id) || !job.saved) { this.dispose(job); continue; }
+      retained.push(job);
+      job.cancelled = true;
+      job.probeController?.abort();
+      for (const rendition of [job, job.original].filter(Boolean)) {
+        rendition.cancelled = true;
+        rendition.child?.kill();
+      }
+    }
     this.youtube.close();
     this.twitch?.close();
-    const jobs = [...this.jobs.values()];
-    for (const job of jobs) this.dispose(job);
+    for (const job of retained) {
+      await job.task;
+      for (const rendition of [job, job.original].filter(Boolean)) {
+        await rendition.publisher?.pending.catch(() => {});
+        rendition.key.fill(0);
+      }
+    }
     await Promise.all(this.cleanups);
-    await Promise.all([this.dir, this.keyDir].map(dir => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })));
+    await this.cleanup();
   }
 }

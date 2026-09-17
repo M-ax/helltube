@@ -15,7 +15,7 @@ export function desktopSupport({secure = globalThis.isSecureContext, devices = g
     return '';
 }
 
-const emptyPlayback = () => ({itemId: null, stream: null, error: '', local: false});
+const emptyPlayback = () => ({itemId: null, stream: null, error: '', local: false, stats: null, connectionState: 'new'});
 const connectionError = 'The desktop connection to metal failed. Retry playback. If it keeps failing, the server administrator should check the media port or TURN configuration.';
 
 export function createDesktopShare(client, {devices = globalThis.navigator?.mediaDevices,
@@ -135,8 +135,15 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
                 pending.connectionTimer = setTimeout(() => { if (operation === pending) stop(connectionError); }, connectTimeout);
                 try {
                     pending.peer = makePeer({client, connection: message, Stream, stream: pending.stream,
+                        onStats: stats => {
+                            if (operation !== pending) return;
+                            pending.stats = stats;
+                            if (viewing?.local && viewing.itemId === pending.itemId) playback.update(value => ({...value, stats}));
+                        },
                         onState: status => {
                             if (operation !== pending) return;
+                            pending.connectionState = status;
+                            if (viewing?.local && viewing.itemId === pending.itemId) playback.update(value => ({...value, connectionState: status}));
                             if (status === 'connected') clearTimeout(pending.connectionTimer);
                             else if (status === 'failed') restartPublisher(pending);
                             else if (status === 'disconnected') {
@@ -159,10 +166,14 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
             try {
                 view.peer = makePeer({client, connection: message, Stream,
                     onStream: stream => {
-                        if (viewing === view) playback.set({itemId: view.itemId, stream, error: '', local: false});
+                        if (viewing === view && !view.finished) playback.update(value => ({...value, stream, error: ''}));
+                    },
+                    onStats: stats => {
+                        if (viewing === view && !view.finished) playback.update(value => ({...value, stats}));
                     },
                     onState: status => {
-                        if (viewing !== view) return;
+                        if (viewing !== view || view.finished) return;
+                        playback.update(value => ({...value, connectionState: status}));
                         if (status === 'connected') clearTimeout(view.timer);
                         else if (status === 'failed') failView(view);
                         else if (status === 'disconnected') {
@@ -190,7 +201,8 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
         if (!itemId) return;
         if (operation?.itemId === itemId) {
             viewing = {itemId, local: true};
-            playback.set({itemId, stream: operation.stream, error: '', local: true});
+            playback.set({...emptyPlayback(), itemId, stream: operation.stream, local: true,
+                stats: operation.stats || null, connectionState: operation.connectionState || 'new'});
         } else watch(itemId);
     });
     return {state, playback, start, stop, active: () => !!operation,

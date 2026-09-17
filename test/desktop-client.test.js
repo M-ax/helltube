@@ -161,7 +161,7 @@ test('failed or cancelled asynchronous publishing never leaves capture running',
     assert.equal(h.peers[0].closed, true);
 });
 
-function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilities = null, failProduce} = {}) {
+function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilities = null, failProduce, getStats} = {}) {
     const commands = [], produced = [], consumed = [], events = [];
     const connection = {requestId: 'capture', peerId: 'peer', itemId: 'desktop', transportOptions: {id: 'transport'},
         rtcConfig: {iceServers: [], iceTransportPolicy: 'all'}, routerRtpCapabilities: {}, producers: []};
@@ -179,6 +179,7 @@ function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilitie
     const makeTransport = () => {
         const transport = Object.assign(new EventEmitter(), {
             closed: false,
+            getStats,
             close() { this.closed = true; },
             async produce(options) {
                 produced.push(options);
@@ -205,14 +206,72 @@ function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilitie
     const device = {async load() {}, recvRtpCapabilities: {}, sendRtpCapabilities: {codecs},
         createSendTransport: makeTransport, createRecvTransport: makeTransport};
     let received;
+    const stats = [];
     const peer = createDesktopPeer({client, connection, stream, Stream: FakeStream,
-        loadDevice: load || (async () => device), mediaCapabilities, onStream: stream => { received = stream; }});
+        loadDevice: load || (async () => device), mediaCapabilities, onStream: stream => { received = stream; },
+        onStats: report => stats.push(report)});
     t.after(() => peer.close());
-    return {peer, client, connection, commands, produced, consumed, transports,
+    return {peer, client, connection, commands, produced, consumed, transports, stats,
         get transport() { return transports.at(-1); }, events, received: () => received};
 }
 
 const videoCodecs = [{mimeType: 'video/VP8'}, {mimeType: 'video/H264'}];
+
+test('statistics polling tolerates failure, avoids overlapping reads and ignores results after close', async t => {
+    t.mock.timers.enable({apis: ['setTimeout']});
+    const pending = Promise.withResolvers();
+    let reads = 0;
+    const h = relayHarness(t, {getStats: () => {
+        reads++;
+        if (reads === 1) throw new Error('Stats unavailable');
+        return pending.promise;
+    }});
+    await h.peer.start();
+    await flush();
+    assert.deepEqual(h.stats, [null]);
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.equal(reads, 2);
+    t.mock.timers.tick(10000);
+    assert.equal(reads, 2, 'Only one stats request may be outstanding');
+    h.peer.close();
+    pending.resolve(new Map());
+    await flush();
+    t.mock.timers.tick(10000);
+    assert.equal(reads, 2);
+    assert.deepEqual(h.stats, [null], 'A closed peer cannot publish a pending result');
+});
+
+test('publisher statistics follow the local preview and cannot outlive a share', async t => {
+    const h = fixture(t);
+    await h.share.start(); h.accept(); await flush();
+    const report = {bitrate: 3000000, encoderLoad: 15};
+    h.peers[0].onStats(report);
+    assert.equal(get(h.share.playback).stats, report);
+    assert.equal(get(h.share.playback).connectionState, 'connected');
+    h.share.stop();
+    h.peers[0].onStats(report);
+    assert.equal(get(h.share.playback).stats, null);
+});
+
+test('viewer statistics survive track updates and reset on retry or leaving', t => {
+    const h = fixture(t);
+    h.current('desktop');
+    h.client.desktopMessages.set({type: 'desktop:watching', requestId: h.commands.at(-1).requestId,
+        itemId: 'desktop', peerId: 'viewer'});
+    const peer = h.peers[0];
+    const report = {bitrate: 2000000};
+    peer.onStats(report);
+    peer.onStream(h.stream);
+    assert.equal(get(h.share.playback).stats, report);
+    h.share.retryView();
+    peer.onStats(report);
+    peer.onState('connected');
+    assert.equal(get(h.share.playback).stats, null);
+    assert.equal(get(h.share.playback).connectionState, 'new');
+    h.client.state.update(value => ({...value, joined: false}));
+    assert.equal(get(h.share.playback).stats, null);
+});
 
 test('a rejected preferred codec retries with fresh transport and publishes video before audio', async t => {
     const tracks = ['audio', 'video'].map(kind => ({kind, readyState: 'live'}));

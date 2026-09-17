@@ -82,10 +82,10 @@ for (const codec of ['vp9', 'h264']) {
   });
 }
 
-test('4K VP9 plays and a depleting buffer falls back to 720p only for the affected viewer', {timeout: 60000}, async t => {
+test('4K VP9 survives startup buffering and sustained stalls fall back only for the affected viewer', {timeout: 90000}, async t => {
   const context = await start(t);
   const {instance, url} = context;
-  await create4kFixture(t, context, {duration: 20});
+  await create4kFixture(t, context, {duration: 40});
   const browser = await chromium.launch({channel: 'chrome', headless: true});
   const gate = Promise.withResolvers();
   t.after(async () => {gate.resolve(); await browser.close();});
@@ -111,7 +111,7 @@ test('4K VP9 plays and a depleting buffer falls back to 720p only for the affect
   }
   const room = instance.rooms.get('lobby');
   await until(() => room.members.size === 2);
-  const item = makeItem({kind: 'youtube', url: 'https://youtu.be/jNQXAC9IVRw'}, {duration: 20});
+  const item = makeItem({kind: 'youtube', url: 'https://youtu.be/jNQXAC9IVRw'}, {duration: 40});
   instance.rooms.add(room, [item]);
   instance.rooms.control(room, {action: 'pause', revision: room.playback.revision});
   await until(() => instance.media.jobs.get(item.id)?.done, 15000);
@@ -126,12 +126,14 @@ test('4K VP9 plays and a depleting buffer falls back to 720p only for the affect
       const enable = page.getByRole('button', {name: 'Enable playback', exact: true});
       if (await enable.isVisible()) await enable.click();
     }
-    return await width(pages[0]) === 1280;
+    return targetPosition(room) >= 9;
   }, 15000);
+  const select = pages[0].getByRole('combobox', {name: 'Video quality on this device'});
+  assert.equal(await select.inputValue(), 'original', 'Startup buffering must not latch a Standard fallback.');
+  await until(async () => await width(pages[0]) === 1280, 20000);
   assert.ok(delayed > 0, 'Original fragment delivery was starved.');
   assert.equal(room.playback.revision, revision);
   assert.equal(await width(pages[1]), 3840);
-  const select = pages[0].getByRole('combobox', {name: 'Video quality on this device'});
   assert.equal(await select.inputValue(), 'standard');
   assert.match(await pages[0].locator('.delivery-notice').textContent(), /Buffer|Playback stalled/);
   assert.equal(room.playback.paused, false);

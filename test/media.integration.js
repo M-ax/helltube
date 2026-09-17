@@ -60,6 +60,19 @@ for (const codec of ['vp9', 'av1', 'h264']) {
       }
     }
     await exec(instance.media.config.ffmpeg, ['-v', 'error', '-xerror', '-i', copied, '-map', '0:v', '-map', '0:a', '-f', 'null', '-']);
+    instance.rooms.control(room, { action: 'pause', revision: room.playback.revision });
+    const qualities = structuredClone(item.media.qualities);
+    const keys = [Buffer.from(job.key), Buffer.from(job.original.key)];
+    await instance.close();
+    const restarted = await createApp({ dataDir: dir, port: 0, desktopPort: 0 });
+    t.after(() => restarted.close());
+    const resolve = t.mock.method(restarted.youtube, 'resolve', () => { throw new Error('Unexpected redownload.'); });
+    await restarted.listen(0);
+    assert.deepEqual(restarted.rooms.get('lobby').current.media.qualities, qualities);
+    const cachedJob = restarted.media.jobs.get(item.id);
+    assert.deepEqual([cachedJob.key, cachedJob.original.key], keys);
+    assert.equal(resolve.mock.callCount(), 0, 'Both real encoded and copied streams survive restart.');
+    await restarted.close();
   });
 }
 
@@ -530,9 +543,8 @@ test('real FFmpeg streams an incomplete upload, prebuffers the next item, and se
   instance.rooms.control(room, { action: 'seek', position: 12, revision: room.playback.revision });
   const oldMediaURL = room.current.media.url;
   await instance.close();
-  await assert.rejects(stat(instance.media.keyDir), { code: 'ENOENT' });
-  await assert.rejects(stat(encrypted.job.keyDir), { code: 'ENOENT' });
-  await assert.rejects(stat(nextJob.keyDir), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(path.join(encrypted.job.keyDir, 'key.bin')), encrypted.key);
+  assert.deepEqual(await readFile(path.join(nextJob.keyDir, 'key.bin')), nextKey);
   assert.deepEqual(encrypted.job.key, Buffer.alloc(16), 'Closed jobs erase their in-memory keys.');
   assert.deepEqual(nextJob.key, Buffer.alloc(16));
   const staleDir = path.join(dir, 'media-keys', 'stale-run', 'old-job');
@@ -554,34 +566,35 @@ test('real FFmpeg streams an incomplete upload, prebuffers the next item, and se
   }, 20000);
   assert.equal(recovered.playback.paused, true);
   assert.equal(recovered.playback.position, 12);
-  assert.equal(recovered.current.media.baseTime, 12);
-  assert.notEqual(recovered.current.media.url, oldMediaURL);
+  assert.equal(recovered.current.media.baseTime, 0);
+  assert.equal(recovered.current.media.url, oldMediaURL);
   assert.equal(recovered.queue[0].id, nextId);
   const recoveredPlaylist = await fetch(restartedURL + recovered.current.media.url, { headers: { Cookie: cookie } });
   const recoveredEncryption = await encryptedHLS(restarted, restartedURL, cookie, recovered.current, await recoveredPlaylist.text());
-  assert.notEqual(recoveredEncryption.job.id, encrypted.job.id);
-  assert.notDeepEqual(recoveredEncryption.key, encrypted.key, 'Restarted uploads get fresh keys.');
-  assert.notDeepEqual(restarted.media.jobs.get(nextId).key, nextKey);
-  assert.equal((await fetch(`${restartedURL}/direct/media/${encrypted.job.id}/key.bin`, { headers: { Cookie: cookie } })).status, 404);
+  assert.equal(recoveredEncryption.job.id, encrypted.job.id);
+  assert.deepEqual(recoveredEncryption.key, encrypted.key, 'Restarted uploads retain their playable cache and keys.');
+  assert.deepEqual(restarted.media.jobs.get(nextId).key, nextKey);
+  assert.equal((await fetch(`${restartedURL}/direct/media/${encrypted.job.id}/key.bin`, { headers: { Cookie: cookie } })).status, 200);
   await exec(restarted.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-allowed_extensions', 'ALL', '-headers', `Cookie: ${cookie}\r\n`,
     '-i', restartedURL + recovered.current.media.url, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
   restarted.rooms.control(recovered, { action: 'seek', position: 4, revision: recovered.playback.revision });
   await until(() => {
     assert.notEqual(recovered.current.status, 'error', recovered.current.error);
-    return recovered.current.media?.complete && recovered.current.media.baseTime === 4;
+    return recovered.current.media?.complete && recovered.playback.position === 4;
   }, 20000);
   const seekPlaylist = await fetch(restartedURL + recovered.current.media.url, { headers: { Cookie: cookie } });
   const seekEncryption = await encryptedHLS(restarted, restartedURL, cookie, recovered.current, await seekPlaylist.text());
-  assert.notEqual(seekEncryption.job.id, recoveredEncryption.job.id);
-  assert.notDeepEqual(seekEncryption.key, recoveredEncryption.key, 'Out-of-buffer seeks rotate the key and job.');
+  assert.equal(seekEncryption.job.id, recoveredEncryption.job.id);
+  assert.deepEqual(seekEncryption.key, recoveredEncryption.key, 'Seeking within a restored buffer retains its key and job.');
+  restarted.media.dispose(recoveredEncryption.job);
   await recoveredEncryption.job.cleanup;
   await assert.rejects(stat(recoveredEncryption.job.dir), { code: 'ENOENT' });
   await assert.rejects(stat(recoveredEncryption.job.keyDir), { code: 'ENOENT' });
   assert.deepEqual(recoveredEncryption.job.key, Buffer.alloc(16), 'Disposed jobs erase their in-memory keys.');
   assert.equal((await fetch(`${restartedURL}/direct/media/${recoveredEncryption.job.id}/key.bin`, { headers: { Cookie: cookie } })).status, 404);
   await restarted.close();
-  await assert.rejects(stat(restarted.media.keyDir), { code: 'ENOENT' });
-  t.diagnostic('A fresh backend rebuilt and decoded the saved upload at 12s and prebuffered the persisted queue.');
+  assert.deepEqual(await readFile(path.join(nextJob.keyDir, 'key.bin')), nextKey);
+  t.diagnostic('A fresh backend reused and decoded the saved upload at 12s and retained the prepared queue.');
 });
 
 test('an uploaded network playlist is not allowed to initiate nested media requests', { timeout: 30000 }, async t => {

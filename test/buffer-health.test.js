@@ -71,37 +71,77 @@ test('a prepared short video can still fail over when its remaining bytes have n
         remaining: 2, complete: true}).fallbackReason, 'Playback stalled');
 });
 
-test('depleting original buffer selects a prepared lower quality before it empties', () => {
+test('startup buffering and early draining recover without a quality downgrade', () => {
     const m = monitor();
-    for (let at = 0; at < 5000; at += 1000) {
-        assert.equal(m.sample(at, {ranges: ranges([0, 12 - at / 1000]), alternativeAhead: 30}).qualityFallbackReason, null);
+    for (let at = 0; at <= 30000; at += 1000) {
+        const seconds = at < 8000 ? 0 : at < 12000 ? 3 : at < 16000 ? 21 - at / 1000 : 20;
+        assert.equal(m.sample(at, {ranges: ranges([0, seconds]), buffering: seconds === 0,
+            alternativeAhead: 30}).qualityFallbackReason, null, `Startup at ${at}ms`);
     }
-    const report = m.sample(5000, {ranges: ranges([0, 7]), alternativeAhead: 30});
+});
+
+test('sustained draining needs six seconds and less than four seconds buffered after startup', () => {
+    const m = monitor();
+    m.observe(0, 15000, {ranges: ranges([0, 10]), alternativeAhead: 30});
+    for (let at = 16000; at < 22000; at += 1000) {
+        assert.equal(m.sample(at, {ranges: ranges([0, 25 - at / 1000]), alternativeAhead: 30}).qualityFallbackReason, null);
+    }
+    const report = m.sample(22000, {ranges: ranges([0, 3]), alternativeAhead: 30});
     assert.equal(report.qualityFallbackReason, 'Buffer is running low');
     assert.equal(report.fallbackReason, null, 'Quality can drop before route fallback is warranted.');
 });
 
-test('quality fallback handles stalls and source starvation only when Standard is ready', () => {
-    for (const options of [{ranges: ranges(), buffering: true}, {serverAhead: 2}]) {
+test('startup observations do not count toward sustained stalls or source starvation', () => {
+    for (const [options, fallbackAt, reason] of [
+        [{ranges: ranges(), buffering: true}, 21000, 'Playback stalled'],
+        [{serverAhead: 2}, 27000, 'Buffer stayed low'],
+    ]) {
         const m = monitor();
-        assert.ok(m.observe(0, 6000, {...options, alternativeAhead: 10}).qualityFallbackReason);
+        assert.equal(m.observe(0, fallbackAt - 1000, {...options, alternativeAhead: 10}).qualityFallbackReason, null);
+        assert.equal(m.sample(fallbackAt, {...options, alternativeAhead: 10}).qualityFallbackReason, reason);
     }
-    const pending = monitor();
-    assert.equal(pending.observe(0, 10000, {alternativeAhead: 2}).qualityFallbackReason, null);
-    assert.equal(pending.sample(11000, {alternativeAhead: 10}).qualityFallbackReason, 'Buffer stayed low');
 });
 
-test('quality fallback ignores pauses, seeks, autoplay blocks, disconnection, complete tails and transient dips', () => {
-    for (const options of [{paused: true}, {blocked: true}, {active: false}, {seeking: true}, {complete: true, remaining: 3}]) {
+test('quality fallback requires a prepared Standard stream, including completed short alternatives', () => {
+    const pending = monitor();
+    assert.equal(pending.observe(0, 30000, {alternativeAhead: 2}).qualityFallbackReason, null);
+    assert.equal(pending.sample(31000, {alternativeAhead: 10}).qualityFallbackReason, 'Buffer stayed low');
+    const complete = monitor();
+    assert.equal(complete.observe(0, 27000, {alternativeAhead: 2, alternativeComplete: true}).qualityFallbackReason, 'Buffer stayed low');
+});
+
+test('pauses, seeks, autoplay blocks, disconnection and complete tails grant fresh quality startup time', () => {
+    for (const options of [{paused: true}, {blocked: true}, {active: false}, {seeking: true}, {complete: true, remaining: 0}]) {
         const m = monitor();
-        assert.equal(m.observe(0, 12000, {...options, alternativeAhead: 30}).qualityFallbackReason, null);
+        const empty = {ranges: ranges(), buffering: true, alternativeAhead: 30};
+        m.observe(0, 20000, empty);
+        assert.equal(m.observe(21000, 40000, {...empty, ...options}).qualityFallbackReason, null);
+        assert.equal(m.observe(41000, 61000, empty).qualityFallbackReason, null, JSON.stringify(options));
+        assert.equal(m.sample(62000, empty).qualityFallbackReason, 'Playback stalled');
     }
+});
+
+test('room revisions and suspended tabs discard quality observations and restart the grace period', () => {
     const m = monitor();
-    m.observe(0, 3000, {alternativeAhead: 30});
-    assert.equal(m.sample(4000, {ranges: ranges([0, 20]), alternativeAhead: 30}).qualityFallbackReason, null);
-    assert.equal(m.sample(5000, {alternativeAhead: 30}).qualityFallbackReason, null);
-    assert.equal(m.sample(6000, {alternativeAhead: 30, playbackRevision: 2}).qualityFallbackReason, null);
-    assert.equal(m.sample(60000, {alternativeAhead: 30, playbackRevision: 2}).qualityFallbackReason, null);
+    const empty = {ranges: ranges(), buffering: true, alternativeAhead: 30};
+    m.observe(0, 20000, empty);
+    const sought = {...empty, playbackRevision: 2};
+    assert.equal(m.observe(21000, 41000, sought).qualityFallbackReason, null);
+    assert.equal(m.sample(42000, sought).qualityFallbackReason, 'Playback stalled');
+    assert.equal(m.observe(60000, 80000, sought).qualityFallbackReason, null);
+    assert.equal(m.sample(81000, sought).qualityFallbackReason, 'Playback stalled');
+});
+
+test('a modest steady buffer and brief dips preserve quality; recovery resets low-buffer observations', () => {
+    const m = monitor();
+    const ready = {alternativeAhead: 30};
+    assert.equal(m.observe(0, 30000, {...ready, ranges: ranges([0, 5])}).qualityFallbackReason, null);
+    for (let at = 31000; at <= 33000; at += 1000) {
+        assert.equal(m.sample(at, {...ready, ranges: ranges([0, 35 - at / 1000])}).qualityFallbackReason, null);
+    }
+    assert.equal(m.sample(34000, {...ready, ranges: ranges([0, 4])}).qualityFallbackReason, null);
+    assert.equal(m.observe(35000, 46000, ready).qualityFallbackReason, null);
+    assert.equal(m.sample(47000, ready).qualityFallbackReason, 'Buffer stayed low');
 });
 
 test('source availability alone is not reported as downloaded buffer', () => {

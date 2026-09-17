@@ -4,6 +4,7 @@
     import Icon from './Icon.svelte';
     import CrtScreen from './CrtScreen.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
+    import DesktopStats from './DesktopStats.svelte';
     import Reactions from './Reactions.svelte';
     import PointingFingers from './PointingFingers.svelte';
     import {trackReactionPointer} from '../lib/reaction-pointer.js';
@@ -902,7 +903,9 @@
           title={connected ? `Clock estimated using WebSocket round-trip midpoint${rtt !== null ? ` · RTT ${Math.round(rtt)} ms` : ''}` : 'Waiting for fresh room state'}><Icon
             name={connected ? 'wifi' : 'offline'} size={15}/>{connected ? 'Room synced' : 'Not connected'}
         {#if connected && rtt !== null}<span>{Math.round(rtt)} ms</span>{/if}</span></div>
-{#if media && mediaAccess}
+{#if live}
+    <DesktopStats playback={desktopPlayback.itemId === item.id ? desktopPlayback : null} {connected}/>
+{:else if media && mediaAccess}
     <div class="playback-health" aria-label="Playback buffer health" data-delivery={mediaAccess.route}
          data-buffer-status={bufferReport?.status || 'Loading'}>
         <span class="buffer-health-state" class:status-error={bufferReport?.status === 'Buffering' || bufferReport?.status === 'Low buffer'}>

@@ -88,6 +88,18 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
         const Peer = window.RTCPeerConnection;
         window.RTCPeerConnection = class extends Peer {
             constructor(config) { super(config); window.desktopPeers.push(this); }
+            async getStats(...args) {
+                const report = await super.getStats(...args);
+                if (codecScenario !== 'unavailable') return report;
+                return new Map([...report].map(([id, entry]) => {
+                    const value = {...entry};
+                    delete value.totalEncodeTime;
+                    delete value.encoderImplementation;
+                    delete value.powerEfficientEncoder;
+                    delete value.qualityLimitationReason;
+                    return [id, value];
+                }));
+            }
             async setRemoteDescription(description) {
                 if (codecScenario === 'retry' && description.type === 'answer' && /a=rtpmap:\d+ H264\/90000/i.test(description.sdp)) {
                     window.codecFailures++;
@@ -169,9 +181,27 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
         const stats = await peer.getSenders().find(sender => sender.track?.kind === 'video').getStats();
         const outbound = [...stats.values()].find(stat => stat.type === 'outbound-rtp' && stat.kind === 'video');
         return {encoder: outbound?.encoderImplementation, powerEfficient: outbound?.powerEfficientEncoder,
-            framesEncoded: outbound?.framesEncoded};
+            framesEncoded: outbound?.framesEncoded, totalEncodeTime: outbound?.totalEncodeTime};
     });
     assert.ok(encoding.framesEncoded > 0);
+    const senderStats = sender.getByLabel('Desktop stream statistics');
+    const viewerStats = viewer.getByLabel('Desktop stream statistics');
+    await until(async () => /(?:kbps|Mbps) sent/.test(await senderStats.innerText()));
+    await until(async () => /(?:kbps|Mbps) received/.test(await viewerStats.innerText()));
+    const senderStatus = await senderStats.innerText();
+    assert.match(senderStatus, /Encoder active/);
+    assert.match(senderStatus, /640×360/);
+    assert.match(senderStatus, /fps/);
+    assert.match(senderStatus, new RegExp(expectedCodec.replace('video/', ''), 'i'));
+    if (codecScenario === 'unavailable') assert.doesNotMatch(senderStatus, /Encoder load|ms\/frame|power efficient|quality limit/i);
+    else {
+        if (Number.isFinite(encoding.totalEncodeTime)) assert.match(senderStatus, /Encoder load ≈\d+%/);
+        if (encoding.encoder) assert.ok(senderStatus.includes(encoding.encoder));
+    }
+    assert.match(await viewerStats.innerText(), /Receiving desktop/);
+    assert.doesNotMatch(await viewerStats.innerText(), /Encoder load/);
+    assert.equal(await sender.getByLabel('Playback buffer health').count(), 0);
+    assert.equal(await viewer.getByLabel('Playback buffer health').count(), 0);
     t.diagnostic(`Codec scenario ${codecScenario}: ${expectedCodec}, ${JSON.stringify(encoding)}`);
     if (tcpOnly) assert.equal([...instance.desktop.sessions.values()][0].publisher.transport.iceSelectedTuple.protocol, 'tcp');
     const pixel = await until(() => viewer.locator('video').evaluate(video => {
@@ -218,8 +248,18 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     t.diagnostic(`Metal WebRTC capture-to-decoded-frame latency: median ${latency[12]}ms, p95 ${latency[23]}ms`);
     assert.ok(latency[23] < 1000, `Local desktop latency must remain subsecond: ${latency}`);
     assert.deepEqual(responses, [], 'Desktop must not request any HLS media');
+    await viewer.locator('.video-viewport').hover();
     assert.equal(await viewer.getByRole('slider', {name: 'Seek shared video'}).isDisabled(), true);
     assert.equal(await viewer.getByRole('button', {name: 'Pause for everyone'}).isDisabled(), true);
+    if (!split && !withAudio) {
+        await sender.screenshot({path: 'test-artifacts/desktop-encoder-stats.png', fullPage: true});
+        await sender.setViewportSize({width: 390, height: 844});
+        await sender.screenshot({path: 'test-artifacts/desktop-encoder-stats-mobile.png', fullPage: true});
+        assert.equal(await senderStats.evaluate(row => [...row.children].every(child => {
+            const bounds = child.getBoundingClientRect();
+            return bounds.left >= 0 && bounds.right <= window.innerWidth;
+        })), true, 'Statistics wrap within the mobile viewport');
+    }
     if (!split && withAudio) {
         const extra = await browser.newPage();
         watch(extra);
@@ -261,6 +301,8 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     const relayDump = await instance.desktop.relay.webRtcServer.dump();
     assert.deepEqual(relayDump.webRtcTransportIds, [], 'Stopping releases all metal transports');
     await until(() => viewer.locator('video').evaluate(video => video.srcObject === null));
+    assert.equal(await sender.getByLabel('Desktop stream statistics').count(), 0);
+    assert.equal(await viewer.getByLabel('Desktop stream statistics').count(), 0);
     assert.deepEqual(responses, [], 'Multiple viewers and reconnects must also bypass HLS');
     assert.deepEqual(errors, []);
 });

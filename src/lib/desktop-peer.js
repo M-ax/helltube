@@ -1,14 +1,17 @@
 import {desktopVideoCodecs, desktopVideoEncoding} from './desktop-encoding.js';
+import {createDesktopStats} from './desktop-stats.js';
 
 // mediasoup carries a single publishing connection to metal. All negotiation
 // stays scoped to this capture/subscription on the authenticated room socket.
 export function createDesktopPeer({client, connection, stream, Stream = globalThis.MediaStream,
     loadDevice = async () => (await import('mediasoup-client')).Device.factory(),
-    onStream = () => {}, onState = () => {}, requestTimeout = 15000,
+    onStream = () => {}, onState = () => {}, onStats = () => {}, requestTimeout = 15000,
     mediaCapabilities = globalThis.navigator?.mediaCapabilities}) {
     let closed = false;
     let device;
     let transport;
+    let statsTimer;
+    const stats = createDesktopStats({outbound: !!stream});
     let work = Promise.resolve();
     const received = stream ? null : new Stream();
     const requests = new Map();
@@ -18,6 +21,19 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
     const removed = new Set();
     const identity = {requestId: connection.requestId, itemId: connection.itemId, peerId: connection.peerId};
     let signalingFailed = false;
+
+    async function sampleStats() {
+        const current = transport;
+        try {
+            const report = await current.getStats();
+            if (!closed && transport === current) onStats(stats.sample(report));
+        } catch {
+            // Diagnostics are optional and must never interrupt desktop media.
+            if (!closed && transport === current) onStats(stats.sample(null));
+        } finally {
+            if (!closed) statsTimer = setTimeout(sampleStats, 1000);
+        }
+    }
 
     function createTransport(transportOptions) {
         const options = {...transportOptions, ...connection.rtcConfig};
@@ -154,6 +170,7 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
                 active();
                 await request('ready');
             } else await consumeTracks();
+            if (!closed) void sampleStats();
         },
         async restartIce() {
             const options = await request('restart-ice');
@@ -163,6 +180,7 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
         close() {
             if (closed) return;
             closed = true;
+            clearTimeout(statsTimer);
             unsubscribe();
             for (const pending of requests.values()) {
                 clearTimeout(pending.timer);
