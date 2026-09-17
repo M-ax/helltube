@@ -19,7 +19,7 @@
     const commands = [
         'ssh squeaker@orbitalioncannon.com',
         'sudo pacman -S emotional-support',
-        'systemctl restart brain.service',
+        'sudo systemctl restart brain.service',
         "git commit -m 'it got worse'",
         'ping -c 4 void.local',
         "find ~/ -name 'will-to-live'",

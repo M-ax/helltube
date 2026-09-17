@@ -212,21 +212,24 @@ export class Media {
       }
       return result;
     };
-    const outputArgs = (rendition, keyInfo) => ['-avoid_negative_ts', 'make_zero',
+    const outputArgs = (rendition, keyInfo) => ['-avoid_negative_ts', rendition.copyTimestamps ? 'disabled' : 'make_zero',
       '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'event', '-hls_list_size', '0',
       ...(rendition.clearDir ? ['-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4'] : ['-hls_key_info_file', keyInfo]),
+      ...(rendition.copyTimestamps ? ['-hls_segment_options', 'movflags=+frag_discont:use_editlist=0:avoid_negative_ts=disabled'] : []),
       '-hls_flags', `independent_segments+temp_file${rendition.clearDir ? '' : '+periodic_rekey'}`,
       '-hls_segment_filename', path.join(rendition.clearDir || rendition.dir, `segment-%06d.${rendition.clearDir ? 'm4s' : 'ts'}`),
       path.join(rendition.clearDir || rendition.dir, 'index.m3u8')];
     let originalTask = Promise.resolve();
     if (copyQuality) {
       const id = randomUUID();
-      // Copy from the beginning: an input seek can retain keyframe preroll and shift the
-      // room timeline. The parallel encoder still prepares far seeks immediately.
-      job.original = {id, item, baseTime: 0, dir: path.join(this.dir, id), keyDir: path.join(this.keyDir, id),
+      // Retain a short preroll, then measure the copied fragment's real start so an
+      // imprecise keyframe seek cannot shift the room timeline.
+      const copyStart = Math.max(0, baseTime - 4);
+      job.original = {id, item, baseTime: 0, requestedStart: baseTime, copyTimestamps: copyStart > 0,
+        dir: path.join(this.dir, id), keyDir: path.join(this.keyDir, id),
         key: randomBytes(16), label: copyQuality.label, lastProgress: Date.now(), lastBuffered: 0, errors: ''};
       const original = job.original;
-      if (copyQuality.container === 'fmp4') {
+      if (copyQuality.container === 'fmp4' || original.copyTimestamps) {
         original.clearDir = path.join(original.keyDir, 'staging');
         original.publisher = new EncryptedFmp4(original);
       }
@@ -235,7 +238,8 @@ export class Media {
         if (original.clearDir) await mkdir(original.clearDir, {recursive: true, mode: 0o700});
         if (job.cancelled) return;
         await this.convert(original, ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y',
-          ...inputArgs(0), '-map', '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
+          ...(original.copyTimestamps ? ['-copyts', '-start_at_zero'] : []),
+          ...inputArgs(copyStart), '-map', '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
           '-c', 'copy', ...outputArgs(original, keyInfo)], network);
         await original.publisher?.publish();
       })().catch(error => { original.failed ||= error; }).finally(() => { original.done = true; });

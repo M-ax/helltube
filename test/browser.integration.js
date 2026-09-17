@@ -10,6 +10,73 @@ import { createApp } from '../server/app.js';
 import { targetPosition } from '../src/lib/format.js';
 import { makeItem } from '../server/rooms.js';
 import { create4kFixture } from './media-4k-fixture.js';
+import { createSeekFixture } from './media-seek-fixture.js';
+
+test('Original remains aligned across quality changes, far seeks and backend restarts', {timeout: 60000}, async t => {
+  const context = await start(t);
+  const {instance, url, dir} = context;
+  const {resolved} = await createSeekFixture(t, context);
+  const browser = await chromium.launch({channel: 'chrome', headless: true});
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(url);
+  await page.getByLabel('Username', {exact: true}).fill('admin');
+  await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+  await page.getByRole('button', {name: 'Enter Helltube'}).click();
+  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+  await page.getByRole('button', {name: 'Your files', exact: true}).waitFor();
+  let room = instance.rooms.get('lobby');
+  await until(() => room.members.size);
+  const item = makeItem({kind: 'youtube', url: 'https://youtu.be/jNQXAC9IVRw', startAt: 63.3}, {duration: 80, startAt: 63.3});
+  instance.rooms.add(room, [item]);
+  instance.rooms.control(room, {action: 'pause', revision: room.playback.revision});
+  const select = page.locator('.quality-select');
+  const aligned = async (qualityId, target, color) => {
+    const quality = room.current.media?.qualities.find(quality => quality.id === qualityId);
+    if (!quality || await select.inputValue().catch(() => '') !== qualityId) return false;
+    return page.locator('video').evaluate((video, expected) => {
+      if (video.readyState < 2 || video.videoWidth !== expected.width ||
+        Math.abs(video.currentTime + expected.baseTime - expected.target) > 0.15) return false;
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext('2d');
+      context.drawImage(video, 0, 0, 1, 1);
+      const pixel = context.getImageData(0, 0, 1, 1).data;
+      return pixel[expected.color] > 180 && pixel[(expected.color + 1) % 3] < 60 && pixel[(expected.color + 2) % 3] < 60;
+    }, {width: qualityId === 'original' ? 1440 : 1280, baseTime: quality.baseTime, target, color});
+  };
+  await until(() => aligned('original', 63.3, 0), 15000);
+  const firstJob = instance.media.jobs.get(item.id);
+  assert.ok(firstJob.original.baseTime > 54);
+  const revision = room.playback.revision;
+  await select.selectOption('standard');
+  await until(() => aligned('standard', 63.3, 0));
+  await select.selectOption('original');
+  await until(() => aligned('original', 63.3, 0));
+  assert.equal(room.playback.revision, revision);
+  instance.rooms.control(room, {action: 'seek', position: 15.3, revision: room.playback.revision});
+  await until(() => aligned('original', 15.3, 2), 15000);
+  assert.notEqual(instance.media.jobs.get(item.id), firstJob);
+  assert.ok(instance.media.jobs.get(item.id).original.baseTime > 0);
+  instance.rooms.control(room, {action: 'seek', position: 65.3, revision: room.playback.revision});
+  await until(() => aligned('original', 65.3, 1), 15000);
+  await instance.close();
+  const restarted = await createApp({dataDir: dir, port: Number(new URL(url).port)});
+  try {
+    restarted.app.get('/seek-vp9/:file', (req, res) => res.sendFile(req.params.file, {root: dir, dotfiles: 'allow'}));
+    t.mock.method(restarted.youtube, 'resolve', async () => resolved);
+    room = restarted.rooms.get('lobby');
+    await restarted.listen();
+    await until(() => aligned('original', 65.3, 1), 15000);
+    assert.ok(restarted.media.jobs.get(item.id).original.baseTime > 55);
+    await select.selectOption('standard');
+    await until(() => aligned('standard', 65.3, 1));
+    assert.deepEqual(errors, []);
+  } finally { await restarted.close(); }
+});
 
 test('4K VP9 plays and a depleting buffer falls back to 720p only for the affected viewer', {timeout: 60000}, async t => {
   const context = await start(t);

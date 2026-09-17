@@ -4,6 +4,7 @@ import {readFile, rename, rm, writeFile} from 'node:fs/promises';
 import {pipeline} from 'node:stream/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 import path from 'node:path';
+import {fmp4Timeline} from './fmp4-timeline.js';
 
 // FFmpeg's HLS muxer cannot AES-128 encrypt fMP4. It writes copied packets to a
 // private staging directory; only complete, encrypted files reach media delivery.
@@ -42,7 +43,18 @@ export class EncryptedFmp4 {
     try { contents = await readFile(path.join(this.job.clearDir, 'index.m3u8'), 'utf8'); }
     catch (error) { if (error.code === 'ENOENT') return; throw error; }
     if (contents === this.contents) return;
+    if (this.job.copyTimestamps && !this.job.timelineReady) {
+      const first = contents.split(/\r?\n/).find(line => /^segment-\d{6,}\.m4s$/.test(line));
+      if (!first) return;
+      const timeline = await fmp4Timeline(path.join(this.job.clearDir, 'init.mp4'), path.join(this.job.clearDir, first));
+      if (this.job.cancelled) return;
+      if (timeline.baseTime > this.job.requestedStart) throw new Error('Copied stream starts after the requested position.');
+      this.job.baseTime = timeline.baseTime;
+      this.job.leadingDuration = timeline.leadingDuration;
+      this.job.timelineReady = true;
+    }
     const lines = [];
+    let firstDuration = true;
     for (const line of contents.split(/\r?\n/)) {
       if (this.job.cancelled) return;
       if (line.startsWith('#EXT-X-MAP:')) {
@@ -53,7 +65,11 @@ export class EncryptedFmp4 {
         if (!match) throw new Error('Unexpected media fragment.');
         lines.push(await this.encrypt(line, BigInt(match[1]) + 1n));
       }
-      lines.push(line);
+      if (firstDuration && line.startsWith('#EXTINF:')) {
+        firstDuration = false;
+        lines.push(line.replace(/^#EXTINF:([\d.]+)/, (_, duration) =>
+          `#EXTINF:${(Number(duration) + (this.job.leadingDuration || 0)).toFixed(6)}`));
+      } else lines.push(line);
     }
     if (this.job.cancelled) return;
     const target = path.join(this.job.dir, 'index.m3u8');

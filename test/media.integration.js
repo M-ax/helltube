@@ -11,8 +11,57 @@ import { createApp } from '../server/app.js';
 import { WebSocket } from 'ws';
 import { remoteURL } from '../server/remote-media.js';
 import { create4kFixture } from './media-4k-fixture.js';
+import { createSeekFixture } from './media-seek-fixture.js';
 
 const exec = promisify(execFile);
+
+for (const codec of ['vp9', 'av1', 'h264']) {
+  test(`resumed ${codec} copies only nearby packets and retains source timestamps and duration`, {timeout: 60000}, async t => {
+    const context = await start(t);
+    const {instance, connect, dir} = context;
+    const sources = await createSeekFixture(t, context, codec);
+    const ws = await connect();
+    ws.send(JSON.stringify({type: 'join', roomId: 'lobby'}));
+    const room = instance.rooms.get('lobby');
+    await until(() => room.members.size);
+    const item = makeItem({kind: 'youtube', url: 'https://youtu.be/jNQXAC9IVRw', startAt: 63.3}, {duration: 80, startAt: 63.3});
+    instance.rooms.add(room, [item]);
+    await until(() => instance.media.jobs.get(item.id)?.done, 30000);
+    const job = instance.media.jobs.get(item.id);
+    assert.equal(job.original.failed, undefined, job.original.failed?.message || job.original.errors);
+    assert.deepEqual(item.media.qualities.map(quality => quality.id), ['original', 'standard']);
+    const original = item.media.qualities[0];
+    assert.ok(original.baseTime > 54 && original.baseTime <= 63.3, `Actual preroll starts at ${original.baseTime}.`);
+    assert.ok(Math.abs(original.bufferedUntil - 80) < 0.25, `Reported end: ${original.bufferedUntil}`);
+    const contents = await readFile(path.join(job.original.dir, 'index.m3u8'), 'utf8');
+    const chunks = [];
+    let iv;
+    for (const line of contents.split('\n')) {
+      if (line.startsWith('#EXT-X-KEY:')) iv = Buffer.from(line.match(/IV=0x([a-f0-9]+)/)[1], 'hex');
+      const file = line.startsWith('#EXT-X-MAP:') ? 'init.mp4' : /^segment-\d+\.m4s$/.test(line) ? line : null;
+      if (!file) continue;
+      const cipher = createDecipheriv('aes-128-cbc', job.original.key, iv);
+      chunks.push(Buffer.concat([cipher.update(await readFile(path.join(job.original.dir, file))), cipher.final()]));
+    }
+    const copied = path.join(dir, 'resumed.mp4');
+    await writeFile(copied, Buffer.concat(chunks));
+    const probe = async (file, stream) => JSON.parse((await exec('ffprobe', ['-v', 'error', '-select_streams', stream,
+      '-show_packets', '-show_entries', 'format=start_time:packet=pts_time,dts_time,data_hash',
+      '-show_data_hash', 'sha256', '-of', 'json', file], {maxBuffer: 4 * 1024 * 1024})).stdout);
+    for (const [stream, source] of [['v:0', sources.video], ['a:0', sources.audio]]) {
+      const input = await probe(source, stream.startsWith('v') ? 'v:0' : 'a:0');
+      const output = await probe(copied, stream);
+      assert.ok(output.packets.length > 0 && output.packets.length < input.packets.length / 2);
+      const sourceStart = Number(input.format.start_time);
+      const byTime = new Map(input.packets.map(packet => [Math.round((Number(packet.pts_time) - sourceStart) * 1000), packet.data_hash]));
+      for (const packet of output.packets) {
+        assert.equal(packet.data_hash, byTime.get(Math.round(Number(packet.pts_time) * 1000)),
+          `${stream} packet at ${packet.pts_time} keeps both its bytes and normalized source timestamp.`);
+      }
+    }
+    await exec(instance.media.config.ffmpeg, ['-v', 'error', '-xerror', '-i', copied, '-map', '0:v', '-map', '0:a', '-f', 'null', '-']);
+  });
+}
 
 for (const codec of ['vp9', 'av1']) {
   test(`encrypted fMP4 copies ${codec} video and separate Opus audio alongside 720p`, {timeout: 60000}, async t => {

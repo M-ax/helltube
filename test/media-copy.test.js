@@ -9,7 +9,7 @@ import path from 'node:path';
 import {Media} from '../server/media.js';
 import {until} from './helpers.js';
 
-async function fixture(t) {
+async function fixture(t, baseTime = 0) {
   await mkdir('test-artifacts', {recursive: true});
   const dir = await mkdtemp(path.resolve('test-artifacts', 'copy-'));
   const calls = [];
@@ -23,10 +23,10 @@ async function fixture(t) {
   });
   syncBuiltinESMExports();
   const media = new Media({dataDir: dir, ffmpeg: 'fixture', youtubeProxy: 'http://127.0.0.1:8888'},
-    {rooms: new Map()}, {}, {resolve: async () => ({duration: 40, copyQuality: {label: 'Original (1080p)'},
+    {rooms: new Map()}, {}, {resolve: async () => ({duration: Math.max(40, baseTime + 30), copyQuality: {label: 'Original (1080p)'},
       inputs: [{url: 'https://video.googlevideo.com/source.m3u8', headers: {Referer: 'https://youtube.com/'}}]})});
   const item = {id: 'item', kind: 'youtube', source: {url: 'https://youtube.com/watch?v=jNQXAC9IVRw'}};
-  media.start(item, 10);
+  media.start(item, baseTime);
   const job = media.jobs.get(item.id);
   t.after(async () => {
     media.dispose(job);
@@ -45,11 +45,11 @@ async function fixture(t) {
   return {media, job, item, copy, encode, complete};
 }
 
-test('copy and encoding run concurrently with isolated keys, shared network rules and seek timelines', async t => {
+test('copy and encoding run concurrently with isolated keys, shared network rules and timelines', async t => {
   const {media, job, item, copy, encode, complete} = await fixture(t);
   assert.ok(!copy.args.includes('-vf') && !copy.args.includes('-c:v') && !copy.args.includes('-r'));
   assert.ok(!copy.args.includes('-ss'), 'Copy retains the zero-based source timeline.');
-  assert.equal(encode.args[encode.args.indexOf('-ss') + 1], '10');
+  assert.ok(!encode.args.includes('-ss'));
   for (const call of [copy, encode]) {
     assert.equal(call.args[call.args.indexOf('-http_proxy') + 1], 'http://127.0.0.1:8888');
     assert.match(call.args[call.args.indexOf('-headers') + 1], /Referer: https:\/\/youtube.com\//);
@@ -64,7 +64,18 @@ test('copy and encoding run concurrently with isolated keys, shared network rule
   await complete(encode);
   await job.task;
   assert.equal(job.done, true);
-  assert.deepEqual(item.media.qualities.map(quality => [quality.id, quality.baseTime]), [['original', 0], ['standard', 10]]);
+  assert.deepEqual(item.media.qualities.map(quality => [quality.id, quality.baseTime]), [['original', 0], ['standard', 0]]);
+});
+
+test('a resumed copy seeks near the room position and retains timestamps for fragment alignment', async t => {
+  const {job, copy, encode} = await fixture(t, 7742.0815);
+  assert.equal(copy.args[copy.args.indexOf('-ss') + 1], '7738.0815');
+  assert.equal(encode.args[encode.args.indexOf('-ss') + 1], '7742.0815');
+  assert.ok(copy.args.includes('-copyts') && copy.args.includes('-start_at_zero'));
+  assert.equal(copy.args[copy.args.indexOf('-avoid_negative_ts') + 1], 'disabled');
+  assert.equal(copy.args[copy.args.indexOf('-hls_segment_type') + 1], 'fmp4');
+  assert.equal(job.original.requestedStart, 7742.0815);
+  assert.equal(job.original.timelineReady, undefined, 'No guessed timestamp is published before the first fragment.');
 });
 
 for (const failed of ['copy', 'encode']) {
