@@ -1,6 +1,9 @@
+import { normalizeCommit } from '../../shared/deployment.js';
+
 export function watchDeployment({ buildId, fetchVersion = (...args) => fetch(...args),
     reload = () => window.location.reload(), windowTarget = window, documentTarget = document,
-    intervalMs = 30000, canReload = () => true } = {}) {
+    intervalMs = 30000, canReload = () => true, onBackendCommit,
+    fetchBackend = (...args) => fetch(...args) } = {}) {
     let stopped = false;
     let reloading = false;
     let request;
@@ -10,10 +13,18 @@ export function watchDeployment({ buildId, fetchVersion = (...args) => fetch(...
         const controller = new AbortController();
         request = controller;
         const timeout = setTimeout(() => controller.abort(), 10000);
+        const options = { cache: 'no-store', credentials: 'same-origin', signal: controller.signal };
+        const backend = onBackendCommit ? (async () => {
+            try {
+                const response = await fetchBackend('/api/version', options);
+                if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return;
+                const version = await response.json();
+                if (!stopped && !controller.signal.aborted) onBackendCommit(normalizeCommit(version?.commit));
+            } catch { /* Keep the last known backend commit through deployment outages. */ }
+        })() : Promise.resolve();
         try {
-            const response = await fetchVersion(`/version.json?check=${Date.now()}`, {
-                cache: 'no-store', credentials: 'same-origin', signal: controller.signal,
-            });
+            if (!buildId) return;
+            const response = await fetchVersion(`/version.json?check=${Date.now()}`, options);
             if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return;
             const version = await response.json();
             if (stopped || controller.signal.aborted || typeof version?.buildId !== 'string' ||
@@ -23,6 +34,7 @@ export function watchDeployment({ buildId, fetchVersion = (...args) => fetch(...
             reload();
         } catch { /* Retry after network errors and deployment interruptions. */ }
         finally {
+            await backend;
             clearTimeout(timeout);
             request = null;
         }

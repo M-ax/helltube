@@ -28,7 +28,7 @@ npm run build
 npm start
 ```
 
-The sidebar shows the frontend's build commit below the account controls (short hash, with the full hash on hover). Builds read Git `HEAD`; when building a source archive without Git metadata, set `HELLTUBE_COMMIT` to the full commit hash. The Ubuntu bootstrap passes the source checkout's commit automatically. In a split deployment, this identifies the Worker frontend release.
+The sidebar shows the frontend (`Web`) and running backend (`Metal`) commits together below the account controls (short hashes, full hashes on hover). Different known hashes show a broken chain and spinner until they match. Backend hashes refresh every 30 seconds and on tab focus/online events; an unavailable hash appears as `unknown`. Builds read Git `HEAD`; when building a source archive without Git metadata, set `HELLTUBE_COMMIT` to the full commit hash. The Ubuntu bootstrap passes the source checkout's commit automatically. Metal snapshots its source/build-manifest commit at startup and persists it in SQLite; a deployment announcement never changes the reported running version.
 
 Production browsers check the frontend's uncached `version.json` every 30 seconds and when returning to a tab or coming online. A changed build automatically reloads the page; the existing session and selected room are restored. Automatic reloads wait while the tab holds unfinished upload files (including paused uploads) or is registering new uploads, so an update cannot discard their file access. Reloading becomes eligible again after those uploads finish or are cancelled. Each build has a unique ID, including rebuilds of the same commit. Deploy the complete `dist` together. With a Worker frontend, backend-only updates do not trigger a frontend reload. Browsers must load this update once before they can detect subsequent deployments.
 
@@ -144,7 +144,7 @@ git pull --ff-only
 sudo bash scripts/bootstrap-ubuntu.sh
 ```
 
-The timer is enabled only after the bootstrap's deployment health checks succeed. Its first successful update establishes the Git revision baseline, so expect one build/restart even if your manual checkout was already current. Later checks do nothing when `main` has not changed. A successful manual bootstrap resets that baseline.
+The timer and `helltube-update.path` watcher are enabled only after the bootstrap's deployment health checks succeed. The path watcher wakes the same updater when metal saves a new Worker commit announcement to `/var/lib/helltube/worker-deployment.json`. Announcements are deduplicated and only wake it when the commits differ. The updater still fetches trusted `main` itself; announcements cannot select another branch or execute commands. Its first successful update establishes the Git revision baseline, so expect one build/restart even if your manual checkout was already current. Later checks do nothing when `main` has not changed. A successful manual bootstrap resets that baseline.
 
 For each new commit, the updater:
 
@@ -167,10 +167,10 @@ sudo journalctl -u helltube-update.service -n 200 --no-pager
 sudo systemctl start helltube-update.service
 
 # Pause future automatic checks; this does not cancel an in-progress update:
-sudo systemctl disable --now helltube-update.timer
+sudo systemctl disable --now helltube-update.timer helltube-update.path
 
 # Resume automatic checks after setup/recovery:
-sudo systemctl enable --now helltube-update.timer
+sudo systemctl enable --now helltube-update.timer helltube-update.path
 ```
 
 **Failures and recovery:** fetch, dependency, test, or build failures leave the old backend running and are retried on later checks. A failed startup/health check stops the candidate and leaves `/opt/helltube/update-state/pending.json`, which blocks further automatic deployments. Interrupted cutovers also require administrator review. The previous code is retained at `/opt/helltube/update-state/previous-app` after replacement; it is **not a data backup**. Before candidate startup, a failed code swap restores the old backend where possible.
@@ -277,7 +277,11 @@ If you separately need a **YouTube Data API key** for an application using Googl
 3. Run `npm run deploy:worker`, then attach your frontend hostname (for example `watch.example.com`) as the Worker's custom domain. Set `ALLOWED_ORIGINS` to match it. The backend hostname must not route back to this Worker.
 4. Change the seeded administrator password before permitting external access.
 
-The deploy script builds `dist` before publishing. Wrangler is a development dependency; no Worker runtime is needed on bare metal. For local split-host testing, build first and use `npm run dev:worker`; put local `BARE_METAL_ORIGIN` and `EDGE_PROXY_SECRET` overrides in an ignored `.dev.vars`, use the same settings on the backend, and allow the local Worker origin in `ALLOWED_ORIGINS`. Keep `SECURE_COOKIES=false` for HTTP loopback. Do not override protected routes with Cloudflare cache rules or expose the assets binding through a separate unauthenticated media route.
+The deploy script builds `dist`, publishes with Wrangler, then contacts the published Worker to send metal a commit heads-up using its existing runtime secret. It discovers the frontend URL from [Wrangler's structured output](https://developers.cloudflare.com/workers/wrangler/system-environment-variables/); set `HELLTUBE_WORKER_ORIGIN` to your frontend HTTPS origin if no usable target is reported. It waits for the exact new build, retries briefly, and reports a failed acknowledgement separately from a successful publish. Browser version checks retry missed notifications in the background. The notification always uses the Worker's own manifest, never a caller-provided commit.
+
+Deploy the updated backend before the Worker. **Rerun the trusted Ubuntu bootstrap once** to install `helltube-update.path`; leave automatic updates enabled to get immediate update checks. When automatic updates are disabled, metal still records the announcement but does not deploy. The periodic timer remains a fallback; the Worker commit must be on the updater's trusted `main` branch to converge.
+
+Wrangler is a development dependency; no Worker runtime is needed on bare metal. For local split-host testing, build first and use `npm run dev:worker`; put local `BARE_METAL_ORIGIN` and `EDGE_PROXY_SECRET` overrides in an ignored `.dev.vars`, use the same settings on the backend, and allow the local Worker origin in `ALLOWED_ORIGINS`. Keep `SECURE_COOKIES=false` for HTTP loopback. Do not override protected routes with Cloudflare cache rules or expose the assets binding through a separate unauthenticated media route.
 
 #### Diagnosing Worker 502 responses
 

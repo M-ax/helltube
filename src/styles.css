@@ -829,12 +829,19 @@ ul, ol {
 }
 
 .deployment-label {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 7px;
     margin: 0 -13px;
     padding: 0 13px 10px;
     background: #1c1b1e;
     color: var(--muted);
     font: 9px var(--mono);
 }
+
+.deployment-status { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); }
+.deployment-status .spinner { width: 10px; height: 10px; border-width: 1px; }
 
 .profile-button > span:last-child {
     min-width: 0;

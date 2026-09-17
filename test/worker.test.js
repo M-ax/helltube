@@ -9,6 +9,64 @@ const jobId = '12345678-1234-4234-8234-123456789abc';
 const segment = `/media/${jobId}/segment-000001.ts`;
 const env = { BARE_METAL_ORIGIN: origin, EDGE_PROXY_SECRET: 'test-edge-secret' };
 
+test('deployment heads-up uses the published manifest and runtime secret, rejecting stale builds and direct proxy attempts', async () => {
+  const version = { buildId: '11111111-1111-4111-8111-111111111111', commit: 'a'.repeat(40) };
+  const h = harness({ assets: { fetch: async request => {
+    assert.equal(new URL(request.url).pathname, '/version.json');
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers.get('Cookie'), null);
+    return Response.json(version);
+  } }, upstream: async request => {
+    assert.equal(request.url, `${origin}/api/edge/deployment`);
+    assert.equal(request.method, 'POST');
+    assert.equal(request.headers.get('X-Helltube-Edge'), env.EDGE_PROXY_SECRET);
+    assert.equal(request.headers.get('Cookie'), null);
+    assert.equal(request.headers.get('Origin'), null);
+    assert.equal(request.redirect, 'manual');
+    assert.deepEqual(await request.json(), { commit: version.commit });
+    return Response.json({ ok: true });
+  } });
+  for (const path of ['/api/edge/deployment', '/API/EDGE/DEPLOYMENT/', '/api/edge/%64eployment', '/internal/deployment']) {
+    assert.equal((await h.request(path, { method: 'POST' })).status, 404);
+  }
+  assert.equal((await h.request('/__deployment')).status, 405);
+  assert.equal((await h.request('/__deployment?buildId=old', { method: 'POST' })).status, 409);
+  assert.equal(h.calls.length, 0);
+  const response = await h.request(`/__deployment?buildId=${version.buildId}`, {
+    method: 'POST', body: JSON.stringify({ commit: 'b'.repeat(40) }),
+  });
+  assert.deepEqual(await response.json(), { ok: true, ...version });
+  privateResponse(response);
+  await h.request(`/__deployment?buildId=${version.buildId}`, { method: 'POST' });
+  assert.equal(h.calls.length, 1, 'Successful announcements are deduplicated in each Worker instance.');
+});
+
+test('version checks retry a missed notification without blocking assets or leaking failures', async () => {
+  let available = false;
+  const h = harness({ assets: { fetch: async () => Response.json({ buildId: 'build', commit: 'a'.repeat(40) }) },
+    upstream: () => available ? Response.json({ ok: true }) : new Response('offline', { status: 503 }) });
+  assert.equal((await h.request('/version.json')).status, 200);
+  await h.settle();
+  assert.equal(h.calls.length, 1);
+  available = true;
+  assert.equal((await h.request('/version.json')).status, 200);
+  await h.settle();
+  assert.equal(h.calls.length, 2);
+  await h.request('/version.json');
+  await h.settle();
+  assert.equal(h.calls.length, 2);
+});
+
+test('deployment notification failures are uncached and do not acknowledge delivery', async () => {
+  const h = harness({ assets: { fetch: async () => Response.json({ buildId: 'build', commit: 'a'.repeat(40) }) },
+    upstream: () => new Response('sensitive failure', { status: 500 }) });
+  const response = await h.request('/__deployment?buildId=build', { method: 'POST' });
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get('X-Helltube-Error'), 'deployment-notification-failed');
+  assert.equal(await response.text(), 'Upstream unavailable.');
+  privateResponse(response);
+});
+
 function encrypted(body = 'encrypted segment', init = {}) {
   return new Response(body, { ...init, headers: {
     'Content-Type': 'video/mp2t', 'X-Helltube-Encrypted': 'aes-128', 'Cache-Control': 'no-store', ...init.headers,

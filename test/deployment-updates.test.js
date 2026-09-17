@@ -6,6 +6,46 @@ const current = '11111111-1111-4111-8111-111111111111';
 const newer = '22222222-2222-4222-8222-222222222222';
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
+test('backend commits refresh on unchanged frontend builds and retain the last hash through outages', async t => {
+    const commits = [];
+    const first = 'a'.repeat(40);
+    const next = 'b'.repeat(40);
+    const responses = [Response.json({ commit: first }), new Response('offline', { status: 503 }),
+        Response.json({ commit: next.toUpperCase() }), Response.json({ commit: null })];
+    const state = fixture(t, async () => Response.json({ buildId: current }), {
+        onBackendCommit: value => commits.push(value), fetchBackend: async (url, options) => {
+            assert.equal(url, '/api/version');
+            assert.equal(options.cache, 'no-store');
+            return responses.shift();
+        },
+    });
+    await flush();
+    assert.deepEqual(commits, [first]);
+    state.windowTarget.dispatchEvent(new Event('online'));
+    await flush();
+    assert.deepEqual(commits, [first]);
+    state.windowTarget.dispatchEvent(new Event('online'));
+    await flush();
+    assert.deepEqual(commits, [first, next]);
+    state.windowTarget.dispatchEvent(new Event('online'));
+    await flush();
+    assert.deepEqual(commits, [first, next, null]);
+    assert.equal(state.reloads(), 0);
+});
+
+test('backend refresh runs independently of frontend failure and ignores responses after disposal', async t => {
+    const commits = [];
+    const response = Promise.withResolvers();
+    const state = fixture(t, async () => { throw new Error('frontend offline'); }, {
+        onBackendCommit: value => commits.push(value), fetchBackend: () => response.promise,
+    });
+    await flush();
+    state.stop();
+    response.resolve(Response.json({ commit: 'a'.repeat(40) }));
+    await flush();
+    assert.deepEqual(commits, []);
+});
+
 function fixture(t, fetchVersion, options = {}) {
     const windowTarget = new EventTarget();
     const documentTarget = new EventTarget();

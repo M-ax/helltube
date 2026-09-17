@@ -177,7 +177,7 @@ configure_auto_update() {
   if systemctl is-enabled --quiet helltube-update.timer 2>/dev/null; then default=yes; fi
   printf 'Optional automatic backend updates from public https://github.com/M-ax/helltube.git main.\n' >&3
   printf 'Enabling means you trust automatic main code, including npm dependencies; deployments cause brief restarts.\n' >&3
-  printf 'Checks run about 5 minutes after the previous job, 2 minutes after boot, plus up to 30 seconds random delay. Worker deployment stays separate and manual.\n' >&3
+  printf 'Checks run about 5 minutes after the previous job, 2 minutes after boot, plus up to 30 seconds random delay, and when a new Worker commit is announced. Worker deployment stays separate and manual.\n' >&3
   prompt choice "Enable automatic backend updates? [yes/no] (blank keeps $default; fresh default no): "
   case $choice in
     '') AUTO_UPDATE_ENABLED=$default ;;
@@ -239,6 +239,20 @@ WantedBy=timers.target
 EOF
 }
 
+render_update_path() {
+  cat <<'EOF'
+[Unit]
+Description=Wake Helltube updater when a Worker commit is announced
+
+[Path]
+PathChanged=/var/lib/helltube/worker-deployment.json
+Unit=helltube-update.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 reset_update_state() {
   local directory=$1 file
   [[ ! -L $directory && ( ! -e $directory || -d $directory ) ]] || die 'Refusing an unsafe updater state directory.'
@@ -253,13 +267,15 @@ install_update_units() {
   [[ $AUTO_UPDATE_ENABLED == yes || $AUTO_UPDATE_ENABLED == no ]] || die 'Invalid auto-update setting.'
   render_update_service > "$WORK_DIR/helltube-update.service"
   render_update_timer > "$WORK_DIR/helltube-update.timer"
+  render_update_path > "$WORK_DIR/helltube-update.path"
   install -o root -g root -m 644 "$WORK_DIR/helltube-update.service" /etc/systemd/system/helltube-update.service
   install -o root -g root -m 644 "$WORK_DIR/helltube-update.timer" /etc/systemd/system/helltube-update.timer
+  install -o root -g root -m 644 "$WORK_DIR/helltube-update.path" /etc/systemd/system/helltube-update.path
   systemctl daemon-reload
   if [[ $AUTO_UPDATE_ENABLED == yes ]]; then
-    systemctl enable --now helltube-update.timer
+    systemctl enable --now helltube-update.timer helltube-update.path
   else
-    systemctl disable --now helltube-update.timer
+    systemctl disable --now helltube-update.timer helltube-update.path
   fi
 }
 

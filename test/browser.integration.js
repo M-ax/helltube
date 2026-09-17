@@ -10,6 +10,45 @@ import { createApp } from '../server/app.js';
 import { targetPosition } from '../src/lib/format.js';
 import { makeItem } from '../server/rooms.js';
 
+test('deployment hashes show mismatch indicators and recover without reloading the frontend', { timeout: 30000 }, async t => {
+  const version = JSON.parse(await readFile('dist/version.json', 'utf8'));
+  assert.ok(version.commit);
+  const differing = version.commit.slice(0, 7) + (version.commit[7] === 'a' ? 'b' : 'a').repeat(version.commit.length - 7);
+  const { url } = await start(t, { backendCommit: differing });
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(url);
+  await page.getByLabel('Username', { exact: true }).fill('admin');
+  await page.getByLabel('Password', { exact: true }).fill('garbageTime_');
+  await page.getByRole('button', { name: 'Enter Helltube' }).click();
+  const label = page.locator('.deployment-label');
+  const status = label.getByRole('status');
+  await status.waitFor();
+  assert.match(await label.textContent(), new RegExp(`Web ${version.commit.slice(0, 7)}`));
+  assert.match(await label.textContent(), new RegExp(`Metal ${differing.slice(0, 7)}`));
+  assert.equal(await label.locator('[title="Backend commit: ' + differing + '"]').count(), 1);
+  assert.equal(await status.locator('svg').count(), 1);
+  assert.equal(await status.locator('.spinner').evaluate(element => getComputedStyle(element).animationName), 'spin');
+  await page.screenshot({ path: 'test-artifacts/deployment-mismatch.png' });
+  await page.setViewportSize({ width: 375, height: 850 });
+  await page.getByRole('button', { name: 'Open room navigation' }).click();
+  assert.equal(await label.evaluate(element => element.scrollWidth <= element.clientWidth), true);
+  await page.route('**/api/version', route => route.fulfill({ json: { commit: version.commit } }));
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await status.waitFor({ state: 'detached' });
+  assert.equal(await label.locator('[title="Backend commit: ' + version.commit + '"]').count(), 1);
+  await page.unroute('**/api/version');
+  await page.route('**/api/version', route => route.fulfill({ json: { commit: null } }));
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await until(async () => (await label.textContent()).includes('Metal unknown'));
+  assert.equal(await status.count(), 0);
+  assert.deepEqual(errors, []);
+});
+
 test('CRT startup shows metadata, measured progress, failures, and yields to real video on desktop and mobile', { timeout: 45000 }, async t => {
   const { instance, url, dir } = await start(t, { maxTranscoders: 0 });
   instance.capabilities.youtube = true;

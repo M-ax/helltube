@@ -10,7 +10,7 @@
     "dev": "concurrently -k -n server,web \"node --watch server/main.js\" \"vite --host 127.0.0.1\"",
     "build": "vite build",
     "dev:worker": "wrangler dev",
-    "deploy:worker": "npm run build && wrangler deploy",
+    "deploy:worker": "npm run build && node scripts/deploy-worker.mjs",
     "start": "node server/main.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:media": "node --test test/media.integration.js",

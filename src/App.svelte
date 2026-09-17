@@ -16,6 +16,8 @@
     import {watchDeployment} from './lib/deployment-updates.js';
 
     const deployedCommit = __DEPLOYED_COMMIT__;
+    let backendCommit = null;
+    $: commitsDiffer = Boolean(deployedCommit && backendCommit && deployedCommit !== backendCommit);
 
     let user = null;
     let capabilities = {};
@@ -271,9 +273,10 @@
     }
 
     onMount(() => {
-        const stopWatching = import.meta.env.PROD ? watchDeployment({
-            buildId: __BUILD_ID__, canReload: () => !manager?.hasPendingFiles(),
-        }) : () => {};
+        const stopWatching = watchDeployment({
+            buildId: import.meta.env.PROD ? __BUILD_ID__ : null, canReload: () => !manager?.hasPendingFiles(),
+            onBackendCommit: commit => backendCommit = commit,
+        });
         void checkSession();
         window.addEventListener('helltube:session-ended', sessionEnded);
         return () => {
@@ -383,8 +386,19 @@
                         <Icon name="logout" size={18}/>
                     </button>
                 </div>
-                <p class="deployment-label" title={deployedCommit ? `Deployed commit: ${deployedCommit}` : 'Commit unavailable for this build'}>
-                    {deployedCommit ? `Commit ${deployedCommit.slice(0, 7)}` : 'Commit unavailable'}
+                <p class="deployment-label" class:deployment-mismatch={commitsDiffer}>
+                    <span title={deployedCommit ? `Frontend commit: ${deployedCommit}` : 'Frontend commit unavailable'}>
+                        Web {deployedCommit ? deployedCommit.slice(0, 7) : 'unknown'}
+                    </span>
+                    {#if commitsDiffer}
+                        <span class="deployment-status" role="status" aria-label="Frontend and backend commits differ; waiting for them to match"
+                              title="Frontend and backend commits differ; waiting for them to match">
+                            <Icon name="unlink" size={13}/><span class="spinner" aria-hidden="true"></span>
+                        </span>
+                    {/if}
+                    <span title={backendCommit ? `Backend commit: ${backendCommit}` : 'Backend commit unavailable'}>
+                        Metal {backendCommit ? backendCommit.slice(0, 7) : 'unknown'}
+                    </span>
                 </p>
             </div>
         </aside>

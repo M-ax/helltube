@@ -1,3 +1,7 @@
+export function normalizeCommit(value) {
+  return typeof value === 'string' && [40, 64].includes(value.length) && /^[a-f0-9]+$/i.test(value) ? value.toLowerCase() : null;
+}
+
 export function deploymentOrigin(value = '') {
   if (value === '') return '';
   if (typeof value !== 'string') throw new Error('BARE_METAL_ORIGIN must be an HTTPS origin.');

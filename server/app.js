@@ -18,7 +18,8 @@ import { sourceKind } from '../shared/media-source.js';
 import { Media, available } from './media.js';
 import { StateStore } from './store.js';
 import { DirectAccess, equalSecret } from './direct-access.js';
-import { deploymentOrigin, securityHeaders } from '../shared/deployment.js';
+import { deploymentOrigin, securityHeaders, normalizeCommit } from '../shared/deployment.js';
+import { Deployment } from './deployment.js';
 
 export function validOrigin(origin, host, config) {
   return !origin || origin === `http://${host}` || origin === `https://${host}` || config.origins.includes(origin);
@@ -42,6 +43,7 @@ export async function createApp(overrides = {}) {
     });
   } catch (error) { store.close(); throw error; }
   const accounts = new Accounts(config.dataDir, store);
+  const deployment = new Deployment(config, store);
   const youtube = new YouTube(config);
   const twitch = new Twitch(config);
   const remote = new RemoteMedia();
@@ -49,6 +51,7 @@ export async function createApp(overrides = {}) {
   let uploads;
   let media;
   try {
+    await deployment.init();
     await accounts.init();
     rooms = new Rooms({ ...config, store });
     uploads = new Uploads(config, rooms, store);
@@ -156,6 +159,14 @@ export async function createApp(overrides = {}) {
     return job;
   };
   app.get('/api/health', (_req, res) => res.json({ ok: true, capabilities }));
+  app.get('/api/version', (_req, res) => res.json({ commit: deployment.commit }));
+  app.post('/api/edge/deployment', async (req, res) => {
+    if (!req.edge) throw httpError(403, 'Edge credentials required.');
+    const commit = normalizeCommit(req.body.commit);
+    if (!commit) throw httpError(400, 'A full commit hash is required.');
+    await deployment.announce(commit);
+    res.json({ ok: true, commit: deployment.commit });
+  });
   app.post('/api/login', async (req, res) => {
     limit(`login:${req.socket.remoteAddress}`, 10);
     const { user, token } = await accounts.login(req.body.username, req.body.password);
@@ -475,6 +486,7 @@ export async function createApp(overrides = {}) {
         await uploads.close();
         server.closeAllConnections();
         await stopped;
+        await deployment.pending;
         await accounts.close();
         store.delete('runtime', 'owner');
         store.close();

@@ -1,4 +1,4 @@
-import { deploymentOrigin, securityHeaders } from './shared/deployment.js';
+import { deploymentOrigin, securityHeaders, normalizeCommit } from './shared/deployment.js';
 
 const mediaPath = /^\/media\/([\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12})\/(index\.m3u8|segment-\d{6,}\.ts)$/;
 const conditionalHeaders = ['Range', 'If-Range', 'If-Match', 'If-None-Match', 'If-Modified-Since', 'If-Unmodified-Since'];
@@ -8,6 +8,8 @@ function route(pathname, method) {
   try { decoded = decodeURIComponent(pathname); } catch { return { status: 404 }; }
   if (/[\\\0]/.test(decoded) || /\/{2}|%(?:2f|5c|25|00)/i.test(pathname)) return { status: 404 };
   if (/^\/direct(?:\/|$)|^\/internal/i.test(decoded)) return { status: 404 };
+  if (/^\/api\/edge\/deployment\/?$/i.test(decoded)) return { status: 404 };
+  if (pathname === '/__deployment') return method === 'POST' ? { proxy: true, notify: true } : { status: 405 };
   if (/^\/(api|media|ws)(?:\/|$)/i.test(decoded) && decoded !== pathname) return { status: 404 };
   if (/^\/api(?:\/|$)/i.test(pathname)) {
     if (!/^\/api(?:\/|$)/.test(pathname)) return { status: 404 };
@@ -54,6 +56,30 @@ function segmentTTL(value) {
 }
 
 export function createWorker({ fetch: fetchOrigin = (request, options) => globalThis.fetch(request, options), cache } = {}) {
+  let announced;
+  let announcement;
+  async function notifyMetal(version, origin, secret) {
+    const commit = normalizeCommit(version?.commit);
+    if (!commit || !origin || typeof secret !== 'string' || !secret.trim() || secret !== secret.trim() || /[\r\n]/.test(secret)) {
+      throw new Error('Deployment notification is not configured.');
+    }
+    const key = `${origin}/${commit}`;
+    if (announced === key) return;
+    if (announcement) {
+      await announcement;
+      if (announced === key) return;
+    }
+    announcement = (async () => {
+      const response = await fetchOrigin(new Request(`${origin}/api/edge/deployment`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Helltube-Edge': secret },
+        body: JSON.stringify({ commit }), redirect: 'manual', cache: 'no-store', signal: AbortSignal.timeout(10000),
+      }), { redirect: 'manual', cache: 'no-store' });
+      if (!response.ok || (await response.json())?.ok !== true) throw new Error('Deployment notification failed.');
+      announced = key;
+    })();
+    try { await announcement; } finally { announcement = null; }
+  }
+
   async function proxy(request, origin, secret, authorizationPath) {
     const source = new URL(request.url);
     const target = new URL(origin);
@@ -93,6 +119,11 @@ export function createWorker({ fetch: fetchOrigin = (request, options) => global
           failureCode = 'assets-fetch-failed';
           const response = await env.ASSETS.fetch(request);
           const fresh = url.pathname === '/version.json' || response.headers.get('Content-Type')?.includes('text/html');
+          if (url.pathname === '/version.json' && request.method === 'GET' && response.ok &&
+              response.headers.get('Content-Type')?.includes('application/json') && context?.waitUntil) {
+            // Browser version checks also retry a heads-up missed during an outage.
+            context.waitUntil(response.clone().json().then(version => notifyMetal(version, origin, env.EDGE_PROXY_SECRET)).catch(() => {}));
+          }
           return responseHeaders(response, security, fresh);
         }
         if (!origin) return failure(502, security, 'origin-missing');
@@ -100,6 +131,16 @@ export function createWorker({ fetch: fetchOrigin = (request, options) => global
         if (secret === undefined || secret === '') return failure(502, security, 'edge-secret-missing');
         if (typeof secret !== 'string' || !secret.trim() || secret !== secret.trim() || /[\r\n]/.test(secret)) {
           return failure(502, security, 'edge-secret-invalid');
+        }
+
+        if (destination.notify) {
+          failureCode = 'deployment-notification-failed';
+          const manifest = await env.ASSETS.fetch(new Request(new URL('/version.json', url), { cache: 'no-store' }));
+          if (!manifest.ok) return failure(502, security, failureCode);
+          const version = await manifest.json();
+          if (url.searchParams.get('buildId') !== version.buildId) return failure(409, security);
+          await notifyMetal(version, origin, secret);
+          return responseHeaders(Response.json({ ok: true, buildId: version.buildId, commit: version.commit }), security);
         }
 
         let segmentCache;

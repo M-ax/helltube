@@ -12,6 +12,7 @@ import { unstable_dev } from 'wrangler';
 import { createApp } from '../server/app.js';
 import { makeItem } from '../server/rooms.js';
 import { until } from './helpers.js';
+import { notifyPublishedWorker } from '../scripts/deploy-worker.mjs';
 
 async function availablePorts(count) {
   const servers = [];
@@ -102,6 +103,12 @@ test('real Worker shares encrypted HLS cache with per-hit auth while uploads and
     const health = await fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(10000) });
     assert.equal(health.status, 200, 'The real Worker must reach bare metal before browser login.');
     await health.arrayBuffer();
+    const version = JSON.parse(await readFile('dist/version.json', 'utf8'));
+    await notifyPublishedWorker([origin], version, { attempts: 1 });
+    assert.equal(instance.store.load('deployment').find(record => record.id === 'worker')?.commit, version.commit,
+      'The real Worker acknowledges deployment only after metal persists its manifest commit.');
+    const backendVersion = await fetch(`${origin}/api/version`);
+    assert.equal((await backendVersion.json()).commit, instance.store.load('deployment').find(record => record.id === 'backend').commit);
     browser = await chromium.launch({ channel: 'chrome', headless: true,
       args: ['--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required'] });
     const watch = page => {

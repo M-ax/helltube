@@ -540,6 +540,11 @@ done
 [[ $update_timer != *'OnUnitActiveSec='* && $update_timer != *'ExecStart='* ]] || die 'Timer must schedule after completion, not execute checkout code.'
 printf 'PASS: updater runs the pinned root helper without secrets; timer schedules after completion\n'
 
+update_path=$(render_update_path)
+assert_contains "$update_path" 'PathChanged=/var/lib/helltube/worker-deployment.json'
+assert_contains "$update_path" 'Unit=helltube-update.service'
+assert_contains "$update_path" 'WantedBy=multi-user.target'
+
 # shellcheck disable=SC2329
 update_prompt_cases() (
   workspace=$(mktemp -d "$root/test/.bootstrap-update.XXXXXX")
@@ -687,7 +692,7 @@ update_install_cases() (
   trap 'rm -rf -- "$WORK_DIR"' EXIT
   install() {
     [[ $# == 8 && $1 == -o && $2 == root && $3 == -g && $4 == root && $5 == -m && $6 == 644 ]] || die 'Wrong updater unit permissions.'
-    [[ $7 == "$WORK_DIR/helltube-update.service" || $7 == "$WORK_DIR/helltube-update.timer" ]] || die 'Unexpected updater unit source.'
+    [[ $7 == "$WORK_DIR/helltube-update.service" || $7 == "$WORK_DIR/helltube-update.timer" || $7 == "$WORK_DIR/helltube-update.path" ]] || die 'Unexpected updater unit source.'
     [[ $8 == "/etc/systemd/system/${7##*/}" && -s $7 ]] || die 'Wrong updater unit destination.'
     printf 'install %s\n' "${7##*/}" >> "$WORK_DIR/actions"
   }
@@ -695,13 +700,13 @@ update_install_cases() (
   for AUTO_UPDATE_ENABLED in yes no; do
     : > "$WORK_DIR/actions"
     install_update_units
-    expected=$'install helltube-update.service\ninstall helltube-update.timer\ndaemon-reload\n'
+    expected=$'install helltube-update.service\ninstall helltube-update.timer\ninstall helltube-update.path\ndaemon-reload\n'
     if [[ $AUTO_UPDATE_ENABLED == yes ]]; then
-      expected+='enable --now helltube-update.timer'
+      expected+='enable --now helltube-update.timer helltube-update.path'
     else
-      expected+='disable --now helltube-update.timer'
+      expected+='disable --now helltube-update.timer helltube-update.path'
     fi
-    [[ $(< "$WORK_DIR/actions") == "$expected" ]] || die 'Updater units must install/reload before changing only the timer state.'
+    [[ $(< "$WORK_DIR/actions") == "$expected" ]] || die 'Updater units must install/reload before changing the timer/path state.'
   done
   AUTO_UPDATE_ENABLED=invalid
   : > "$WORK_DIR/actions"
@@ -709,7 +714,7 @@ update_install_cases() (
   [[ ! -s $WORK_DIR/actions ]] || die 'Invalid timer setting changed units.'
 )
 update_install_cases
-printf 'PASS: unit installation enables/disables only the timer; never starts or stops the updater service\n'
+printf 'PASS: unit installation enables/disables the timer and path together; never starts or stops the updater service\n'
 
 python3 - "$(declare -f main)" <<'PY'
 import sys

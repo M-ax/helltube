@@ -11,9 +11,10 @@ workspace=$(mktemp -d "$root/test-artifacts/bootstrap-units.XXXXXX")
 trap 'rm -rf -- "$workspace"' EXIT
 render_update_service > "$workspace/helltube-update.service"
 render_update_timer > "$workspace/helltube-update.timer"
-chmod 644 "$workspace/helltube-update.service" "$workspace/helltube-update.timer"
-systemd-analyze verify --man=no "$workspace/helltube-update.service" "$workspace/helltube-update.timer"
-printf 'PASS: systemd parses the rendered update service/timer pair and their dependencies\n'
+render_update_path > "$workspace/helltube-update.path"
+chmod 644 "$workspace/helltube-update.service" "$workspace/helltube-update.timer" "$workspace/helltube-update.path"
+systemd-analyze verify --man=no "$workspace/helltube-update.service" "$workspace/helltube-update.timer" "$workspace/helltube-update.path"
+printf 'PASS: systemd parses the rendered update service, timer and path and their dependencies\n'
 
 proxy_binary=${TINYPROXY_TEST_BIN:-/usr/bin/tinyproxy}
 [[ -x $proxy_binary && $proxy_binary == /* && $proxy_binary != *'|'* ]] || die 'Set TINYPROXY_TEST_BIN to an absolute Tinyproxy executable path.'

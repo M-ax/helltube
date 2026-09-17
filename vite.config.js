@@ -3,6 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { normalizeCommit } from './shared/deployment.js';
 
 let commit = process.env.HELLTUBE_COMMIT?.trim();
 if (!commit) {
@@ -12,7 +13,7 @@ if (!commit) {
     }).trim();
   } catch { /* Source archives may not include Git metadata. */ }
 }
-const deployedCommit = /^[a-f0-9]{40,64}$/i.test(commit || '') ? commit.toLowerCase() : null;
+const deployedCommit = normalizeCommit(commit);
 const buildId = randomUUID();
 
 export default defineConfig({
