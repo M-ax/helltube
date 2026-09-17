@@ -96,6 +96,35 @@ test('original quality uses its own authorized delivery, key and fallback grant'
   assert.equal((await api(`/api/media/${standard.id}/access`)).status, 200);
 });
 
+test('encrypted fMP4 rewrites initialization and media URLs separately from key URLs', async t => {
+  const {api, job, direct, url, cookie} = await fixture(t);
+  const media = await job('youtube');
+  await writeFile(path.join(media.dir, 'index.m3u8'), `#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-KEY:METHOD=AES-128,URI="/direct/media/${media.id}/key.bin",IV=0x${'0'.repeat(32)}\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\n#EXT-X-KEY:METHOD=AES-128,URI="/direct/media/${media.id}/key.bin",IV=0x${'0'.repeat(31)}1\nsegment-000000.m4s\n`);
+  for (const file of ['init.mp4', 'segment-000000.m4s']) await writeFile(path.join(media.dir, file), Buffer.alloc(32, 0xa5));
+  const access = (await api(`/api/media/${media.id}/access`)).data;
+  const text = await (await direct(access.fallbackUrl)).text();
+  const keyUrl = text.match(/#EXT-X-KEY:.*URI="([^"]+)"/)[1];
+  const initUrl = text.match(/#EXT-X-MAP:URI="([^"]+)"/)[1];
+  assert.notEqual(initUrl, keyUrl);
+  assert.equal(new URL(initUrl).pathname, `/direct/media/${media.id}/init.mp4`);
+  assert.equal(new URL(text.split('\n').find(line => line.startsWith('https://'))).pathname,
+    `/direct/media/${media.id}/segment-000000.m4s`);
+  assert.deepEqual(Buffer.from(await (await direct(keyUrl)).arrayBuffer()), media.key);
+  for (const file of ['init.mp4', 'segment-000000.m4s']) {
+    const response = await fetch(`${url}/media/${media.id}/${file}`, {headers: {Cookie: cookie}});
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /video\/mp4/);
+    assert.equal(response.headers.get('x-helltube-encrypted'), 'aes-128');
+    assert.equal((await api(`/api/edge/media/${media.id}/${file}`, {headers: {'X-Helltube-Edge': secret}})).data.cacheable, true);
+  }
+  const proxyText = await (await fetch(url + access.url, {headers: {Cookie: cookie}})).text();
+  assert.match(proxyText, /#EXT-X-MAP:URI="init.mp4"/);
+  assert.match(proxyText, /\nsegment-000000.m4s\n/);
+  for (const file of ['init.mp4.tmp', 'segment-000000.m4s.tmp', 'staging', 'key-info']) {
+    assert.equal((await fetch(`${url}/media/${media.id}/${file}`, {headers: {Cookie: cookie}})).status, 404);
+  }
+});
+
 test('direct grants are resource-scoped, survive restart, and enforce live session expiry/revocation', async t => {
   const { instance, cookie } = await start(t, { maxTranscoders: 0 });
   const auth = instance.accounts.authenticate(cookie);

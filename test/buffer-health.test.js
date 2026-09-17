@@ -71,6 +71,39 @@ test('a prepared short video can still fail over when its remaining bytes have n
         remaining: 2, complete: true}).fallbackReason, 'Playback stalled');
 });
 
+test('depleting original buffer selects a prepared lower quality before it empties', () => {
+    const m = monitor();
+    for (let at = 0; at < 5000; at += 1000) {
+        assert.equal(m.sample(at, {ranges: ranges([0, 12 - at / 1000]), alternativeAhead: 30}).qualityFallbackReason, null);
+    }
+    const report = m.sample(5000, {ranges: ranges([0, 7]), alternativeAhead: 30});
+    assert.equal(report.qualityFallbackReason, 'Buffer is running low');
+    assert.equal(report.fallbackReason, null, 'Quality can drop before route fallback is warranted.');
+});
+
+test('quality fallback handles stalls and source starvation only when Standard is ready', () => {
+    for (const options of [{ranges: ranges(), buffering: true}, {serverAhead: 2}]) {
+        const m = monitor();
+        assert.ok(m.observe(0, 6000, {...options, alternativeAhead: 10}).qualityFallbackReason);
+    }
+    const pending = monitor();
+    assert.equal(pending.observe(0, 10000, {alternativeAhead: 2}).qualityFallbackReason, null);
+    assert.equal(pending.sample(11000, {alternativeAhead: 10}).qualityFallbackReason, 'Buffer stayed low');
+});
+
+test('quality fallback ignores pauses, seeks, autoplay blocks, disconnection, complete tails and transient dips', () => {
+    for (const options of [{paused: true}, {blocked: true}, {active: false}, {seeking: true}, {complete: true, remaining: 3}]) {
+        const m = monitor();
+        assert.equal(m.observe(0, 12000, {...options, alternativeAhead: 30}).qualityFallbackReason, null);
+    }
+    const m = monitor();
+    m.observe(0, 3000, {alternativeAhead: 30});
+    assert.equal(m.sample(4000, {ranges: ranges([0, 20]), alternativeAhead: 30}).qualityFallbackReason, null);
+    assert.equal(m.sample(5000, {alternativeAhead: 30}).qualityFallbackReason, null);
+    assert.equal(m.sample(6000, {alternativeAhead: 30, playbackRevision: 2}).qualityFallbackReason, null);
+    assert.equal(m.sample(60000, {alternativeAhead: 30, playbackRevision: 2}).qualityFallbackReason, null);
+});
+
 test('source availability alone is not reported as downloaded buffer', () => {
     const m = monitor();
     const report = m.sample(0, {ranges: ranges(), serverAhead: 120, buffering: true});

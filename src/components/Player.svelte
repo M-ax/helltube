@@ -7,6 +7,8 @@
     import Reactions from './Reactions.svelte';
     import MetalPipeReaction from './MetalPipeReaction.svelte';
     import FlashbangReaction from './FlashbangReaction.svelte';
+    import BidenReaction from './BidenReaction.svelte';
+    import {BIDEN_LIFETIME_MS} from '../lib/biden.js';
     import {PIPE_LIFETIME_MS} from '../lib/metal-pipe.js';
     import {FLASH_LIFETIME_MS} from '../lib/flashbang.js';
     import {createReactionAudio} from '../lib/reaction-audio.js';
@@ -64,6 +66,8 @@
     let metalItemId = null;
     let fallbackNotice = '';
     let qualityPreference = 'original';
+    let qualityFallbackItemId = null;
+    let qualityNotice = '';
     let initialAlign = true;
     let alignedRevision = -1;
     let playPending = false;
@@ -88,7 +92,7 @@
 
     $: item = room?.current;
     $: qualities = availableQualities(item?.media);
-    $: media = selectQuality(item?.media, qualityPreference, position);
+    $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
     $: crtVisible = !media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error');
     $: if (renderer) renderer.setCrtActive(crtVisible);
     $: duration = item?.duration;
@@ -151,14 +155,17 @@
     }
 
     function changeQuality(event) {
+        qualityFallbackItemId = null;
+        qualityNotice = '';
         qualityPreference = event.currentTarget.value;
         revealControls();
     }
 
-    function useStandardQuality() {
-        if (media?.id !== 'original' || !qualities.some(quality => quality.id === 'standard' && qualityReady(quality, position))) return false;
-        qualityPreference = 'standard';
-        return true;
+    function useStandardQuality(reason = 'Original quality could not be played') {
+        if (media?.id !== 'original') return false;
+        qualityFallbackItemId = item.id;
+        qualityNotice = reason;
+        return qualities.some(quality => quality.id === 'standard' && qualityReady(quality, targetPosition(room, clockOffset)));
     }
 
     function scheduleControlsHide(eligible, held) {
@@ -309,6 +316,10 @@
             metalItemId = null;
             fallbackNotice = '';
         }
+        if (qualityFallbackItemId !== id) {
+            qualityFallbackItemId = null;
+            qualityNotice = '';
+        }
         if (!url) return;
         const generation = sourceGeneration;
         sourceController = new AbortController();
@@ -401,12 +412,17 @@
         if (!video || !media || !bufferMonitor) return;
         const absoluteTarget = targetPosition(room, clockOffset);
         const target = Math.max(0, absoluteTarget - (media.baseTime || 0));
+        const standard = media.id === 'original' ? qualities.find(quality => quality.id === 'standard' &&
+            quality.baseTime <= absoluteTarget) : null;
         bufferReport = bufferMonitor.sample({ranges: video.buffered, currentTime: video.currentTime, target,
             serverAhead: media.bufferedUntil - absoluteTarget,
             remaining: Math.max(0, (duration || media.bufferedUntil) - absoluteTarget), complete: media.complete,
             active: connected && !playerError, paused: room.playback.paused, blocked,
             seeking: scrubbing || seekCenter !== null, buffering: localBuffering,
-            playbackRate: video.playbackRate, playbackRevision: room.playback.revision});
+            playbackRate: video.playbackRate, playbackRevision: room.playback.revision,
+            alternativeAhead: standard ? standard.bufferedUntil - absoluteTarget : 0,
+            alternativeComplete: standard?.complete || false});
+        if (bufferReport.qualityFallbackReason && useStandardQuality(bufferReport.qualityFallbackReason)) return;
         if (bufferReport.fallbackReason) switchToMetal(bufferReport.fallbackReason);
     }
 
@@ -537,7 +553,7 @@
             if (seenReactions.has(event.id)) continue;
             seenReactions.add(event.id);
             if (!enabled) continue;
-            const lifetime = event.kind === 'flashbang' ? FLASH_LIFETIME_MS
+            const lifetime = event.kind === 'biden' ? BIDEN_LIFETIME_MS : event.kind === 'flashbang' ? FLASH_LIFETIME_MS
                 : event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
@@ -574,7 +590,7 @@
         if (reactionsEnabled && connected && !soundMuted && !muted && !document.hidden) reactionAudio?.play(volume, 'metalpipe');
     }
 
-    function flashbangSound(kind, level = 1) {
+    function reactionSound(kind, level = 1) {
         if (reactionsEnabled && connected && !soundMuted && !muted && !document.hidden) {
             return reactionAudio?.play(volume * level, kind);
         }
@@ -716,10 +732,13 @@
             <MetalPipeReaction {reaction} {clockOffset} onImpact={pipeImpact}/>
         {/each}
         {#each activeReactions.filter(reaction => reaction.kind === 'flashbang') as reaction (reaction.id)}
-            <FlashbangReaction {reaction} {clockOffset} onSound={flashbangSound}/>
+            <FlashbangReaction {reaction} {clockOffset} onSound={reactionSound}/>
+        {/each}
+        {#each activeReactions.filter(reaction => reaction.kind === 'biden') as reaction (reaction.id)}
+            <BidenReaction {reaction} {clockOffset} onSound={reactionSound}/>
         {/each}
         <div class="reaction-overlay" aria-hidden="true">
-            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang'].includes(reaction.kind)) as reaction (reaction.id)}
+            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang', 'biden'].includes(reaction.kind)) as reaction (reaction.id)}
                 <span class="player-reaction" class:hitmarker={reaction.kind === 'hitmarker'}
                       data-reaction={reaction.kind} data-reaction-id={reaction.id}
                       style={`left: ${reaction.x * 100}%; top: ${reaction.y * 100}%`}>
@@ -855,7 +874,17 @@
            onSoundToggle={() => { soundMuted = !soundMuted; reactionAudio?.unlock(); }}/>
 <div class="now-playing">
     <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
-        <h2>{item?.title || 'A little less scrolling. A little more watching.'}</h2>
+        <div class="now-playing-heading">
+            <h2>{item?.title || 'A little less scrolling. A little more watching.'}</h2>
+            {#if item?.hasOriginalStream}
+                <a class="icon-button bordered"
+                   href={`/api/rooms/${encodeURIComponent(room.id)}/items/${encodeURIComponent(item.id)}/original`}
+                   target="_blank" rel="noopener noreferrer"
+                   aria-label="Open original stream" title="Open original stream in a new tab">
+                    <Icon name="external" size={16}/>
+                </a>
+            {/if}
+        </div>
         <div class="media-meta">
             {#if item}<span><Icon name={sourceIcons[item.kind] || 'file'}
                                   size={15}/>{sourceLabels[item.kind] || 'Video'}</span>
@@ -888,6 +917,10 @@
 {/if}
 {#if fallbackNotice && media}
     <p class="delivery-notice" role="status">{fallbackNotice}</p>
+{/if}
+{#if qualityNotice && qualityFallbackItemId === item?.id}
+    <p class="delivery-notice" role="status">{qualityNotice}. {media?.id === 'standard'
+        ? 'Switched to Standard (up to 720p) for this video.' : 'Waiting for Standard (up to 720p) to be ready.'}</p>
 {/if}
 {#if item?.kind === 'upload' && media && !media.complete}
     <p class="inline-note">

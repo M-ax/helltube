@@ -10,8 +10,74 @@ import { makeItem } from '../server/rooms.js';
 import { createApp } from '../server/app.js';
 import { WebSocket } from 'ws';
 import { remoteURL } from '../server/remote-media.js';
+import { create4kFixture } from './media-4k-fixture.js';
 
 const exec = promisify(execFile);
+
+for (const codec of ['vp9', 'av1']) {
+  test(`encrypted fMP4 copies ${codec} video and separate Opus audio alongside 720p`, {timeout: 60000}, async t => {
+    const context = await start(t);
+    const {instance, connect, url, cookie, dir} = context;
+    const {video: source, audio} = await create4kFixture(t, context, {codec, size: codec === 'vp9' ? '3840x2160' : '640x360'});
+    const ws = await connect();
+    ws.send(JSON.stringify({type: 'join', roomId: 'lobby'}));
+    const room = instance.rooms.get('lobby');
+    await until(() => room.members.size);
+    const item = makeItem({kind: 'youtube', url: 'https://youtu.be/jNQXAC9IVRw'}, {duration: 6});
+    instance.rooms.add(room, [item]);
+    await until(() => {
+      assert.notEqual(item.status, 'error', item.error);
+      return instance.media.jobs.get(item.id)?.done;
+    }, 30000);
+    const job = instance.media.jobs.get(item.id);
+    assert.equal(job.original.failed, undefined, job.original.errors);
+    assert.equal(item.media.qualities.length, 2);
+    const quality = item.media.qualities.find(quality => quality.id === 'original');
+    const contents = await (await fetch(url + quality.url, {headers: {Cookie: cookie}})).text();
+    assert.match(contents, /#EXT-X-MAP:URI="init.mp4"/);
+    const decoded = [];
+    const ivs = new Set();
+    let iv;
+    for (const line of contents.split('\n')) {
+      if (line.startsWith('#EXT-X-KEY:')) {
+        iv = line.match(/IV=0x([a-f0-9]+)/)[1];
+        continue;
+      }
+      const file = line.startsWith('#EXT-X-MAP:') ? 'init.mp4' : /^segment-\d+\.m4s$/.test(line) ? line : null;
+      if (!file) continue;
+      assert.ok(!ivs.has(iv), 'Initialization and every media fragment use distinct IVs.');
+      ivs.add(iv);
+      const target = new URL(file, url + quality.url);
+      assert.equal((await fetch(target)).status, 401);
+      const response = await fetch(target, {headers: {Cookie: cookie}});
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('x-helltube-encrypted'), 'aes-128');
+      assert.match(response.headers.get('content-type'), /video\/mp4/);
+      const cipher = createDecipheriv('aes-128-cbc', job.original.key, Buffer.from(iv, 'hex'));
+      const encrypted = Buffer.from(await response.arrayBuffer());
+      decoded.push(Buffer.concat([cipher.update(encrypted), cipher.final()]));
+    }
+    assert.ok(decoded.length >= 3);
+    const copied = path.join(dir, 'decoded.mp4');
+    await writeFile(copied, Buffer.concat(decoded));
+    const probe = async (file, stream = 'v:0') => JSON.parse((await exec('ffprobe', ['-v', 'error', '-select_streams', stream, '-show_packets',
+      '-show_entries', 'stream=width,height,codec_name:packet=data_hash', '-show_data_hash', 'sha256', '-of', 'json', file])).stdout);
+    const original = await probe(source);
+    const output = await probe(copied);
+    assert.deepEqual(output.streams, original.streams);
+    assert.deepEqual(output.packets, original.packets, 'Encoded video packets are preserved byte for byte.');
+    assert.deepEqual((await probe(copied, 'a:0')).packets.map(packet => packet.data_hash),
+      (await probe(audio, 'a:0')).packets.map(packet => packet.data_hash),
+      'Encoded audio packets are also preserved byte for byte.');
+    await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-xerror', '-allowed_extensions', 'ALL',
+      '-headers', `Cookie: ${cookie}\r\n`, '-i', url + quality.url, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
+    assert.notDeepEqual(job.key, job.original.key);
+    instance.media.dispose(job);
+    await job.cleanup;
+    await assert.rejects(stat(job.original.clearDir), {code: 'ENOENT'});
+    assert.deepEqual(job.original.key, Buffer.alloc(16));
+  });
+}
 
 test('tail-indexed MP4 duration reaches viewers before conversion and enables a full-timeline seek', { timeout: 40000 }, async t => {
   const {instance, api, connect, url, cookie, dir} = await start(t);

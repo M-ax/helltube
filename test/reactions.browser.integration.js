@@ -4,6 +4,126 @@ import {chromium} from 'playwright';
 import {start, until} from './helpers.js';
 import {createBeachBall, ballArena} from '../shared/beach-ball.js';
 import {FLASH_DETONATE_MS, FLASH_LIFETIME_MS} from '../src/lib/flashbang.js';
+import {BIDEN_LIFETIME_MS, bidenSound} from '../src/lib/biden.js';
+
+test('Biden wanders in sync with local audio controls, reduced motion and no stale replay', {timeout: 60000}, async t => {
+    const {instance, url} = await start(t, {maxTranscoders: 0});
+    instance.rooms.create('Quiet room');
+    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--enable-unsafe-swiftshader']});
+    t.after(() => browser.close());
+    const a = await browser.newPage({viewport: {width: 1440, height: 1000}});
+    const b = await browser.newPage({viewport: {width: 900, height: 800}});
+    const errors = [];
+    const messages = [];
+    a.on('websocket', ws => ws.on('framereceived', frame => {
+        try { messages.push(JSON.parse(frame.payload)); } catch { /* Ignore non-JSON frames. */ }
+    }));
+    for (const page of [a, b]) {
+        page.setDefaultTimeout(8000);
+        page.on('pageerror', error => errors.push(error.message));
+        await page.addInitScript(() => {
+            window.bidenSounds = [];
+            window.bidenStops = 0;
+            window.decodedSounds = 0;
+            const start = AudioBufferSourceNode.prototype.start;
+            const stop = AudioBufferSourceNode.prototype.stop;
+            AudioBufferSourceNode.prototype.start = function (...args) {
+                window.bidenSounds.push({at: Date.now(), duration: this.buffer.duration});
+                return start.apply(this, args);
+            };
+            AudioBufferSourceNode.prototype.stop = function (...args) {
+                window.bidenStops++;
+                return stop.apply(this, args);
+            };
+            const decode = BaseAudioContext.prototype.decodeAudioData;
+            BaseAudioContext.prototype.decodeAudioData = function (...args) {
+                return decode.apply(this, args).then(buffer => { window.decodedSounds++; return buffer; });
+            };
+        });
+        await page.goto(url);
+        await page.getByLabel('Username', {exact: true}).fill('admin');
+        await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+        await page.getByRole('button', {name: 'Enter Helltube'}).click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
+        await until(async () => await page.evaluate(() => window.decodedSounds === 6));
+    }
+    const joe = page => page.locator('[data-reaction="biden"]');
+    const button = page => page.getByRole('button', {name: 'Joe wander', exact: true});
+    const mute = page => page.getByRole('button', {name: 'Mute reaction sounds', exact: true});
+    const enabled = page => page.getByRole('switch', {name: 'Enable reactions on this device'});
+    await button(a).click();
+    await joe(b).waitFor();
+    const id = await joe(a).getAttribute('data-reaction-id');
+    assert.equal(await joe(b).getAttribute('data-reaction-id'), id);
+    await until(async () => await a.evaluate(() => window.bidenSounds.length) === 1
+        && await b.evaluate(() => window.bidenSounds.length) === 1);
+    const sounds = await Promise.all([a, b].map(page => page.evaluate(() => window.bidenSounds[0])));
+    assert.equal(sounds[0].duration, sounds[1].duration, 'Everyone hears the same selected clip.');
+    assert.ok(Math.abs(sounds[0].at - sounds[1].at) < 180);
+    assert.equal(sounds[0].duration > 7, bidenSound(id) === 'bidenWord');
+    const geometry = await joe(a).evaluate(node => {
+        const image = node.querySelector('img');
+        const canvas = document.createElement('canvas');
+        canvas.width = 100;
+        canvas.height = 200;
+        canvas.getContext('2d').drawImage(image, 0, 0, 100, 200);
+        const alpha = canvas.getContext('2d').getImageData(0, 0, 100, 200).data.filter((_, index) => index % 4 === 3);
+        const viewport = node.parentElement;
+        return {pointerEvents: getComputedStyle(node).pointerEvents,
+            transparent: alpha.filter(value => value === 0).length / alpha.length,
+            opaque: alpha.filter(value => value >= 240).length / alpha.length,
+            bottom: image.getBoundingClientRect().bottom,
+            floor: viewport.getBoundingClientRect().bottom - parseFloat(getComputedStyle(viewport).getPropertyValue('--controls-height'))};
+    });
+    assert.equal(geometry.pointerEvents, 'none');
+    assert.ok(geometry.transparent > .2 && geometry.opaque > .2, 'The asset has a real transparent cutout.');
+    assert.ok(geometry.bottom < geometry.floor + 2, 'The feet stay above the transport controls.');
+    const before = await a.locator('.biden-walker').evaluate(node => node.style.left);
+    await until(async () => await a.locator('.biden-walker').evaluate(node => node.style.left) !== before);
+    await a.screenshot({path: 'test-artifacts/biden-desktop.png', fullPage: true});
+    await b.emulateMedia({reducedMotion: 'reduce'});
+    await until(async () => await b.locator('.biden-walker').getAttribute('data-walking') === 'false');
+    assert.equal(await b.locator('.biden-cutout').evaluate(node => node.style.transform),
+        'translateY(0px) scaleX(1) rotate(0deg) scaleY(1)');
+    await b.setViewportSize({width: 320, height: 844});
+    assert.equal(await b.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.ok((await b.locator('.biden-cutout').boundingBox()).height >= 65, 'The mobile cutout stays recognizable.');
+    await b.screenshot({path: 'test-artifacts/biden-mobile.png', fullPage: true});
+    await mute(b).click();
+    assert.ok(await b.evaluate(() => window.bidenStops) > 0, 'Muting stops an active voice clip.');
+    assert.equal(await joe(b).count(), 1, 'Mute keeps the cutout visible.');
+    await enabled(a).click();
+    assert.equal(await joe(a).count(), 0);
+    assert.ok(await a.evaluate(() => window.bidenStops) > 0);
+    await button(b).click();
+    await until(async () => await joe(b).count() === 2);
+    await until(async () => await b.locator('.biden-walker').last().evaluate(node => Number(node.style.opacity)) === 1);
+    assert.equal(await joe(a).count(), 0, 'Disabled reactions ignore incoming walkers.');
+    await enabled(a).click();
+    assert.equal(await joe(a).count(), 0, 'Re-enabling does not replay ignored events.');
+    await enabled(b).click();
+    assert.equal(await joe(b).count(), 0);
+
+    const emit = (id, age) => instance.reactions.broadcast('lobby', {type: 'reaction', roomId: 'lobby', id,
+        kind: 'biden', userId: instance.accounts.users[0].id, x: .5, y: .65, serverTime: Date.now() - age});
+    emit('late-biden', 4000);
+    await joe(a).waitFor();
+    await until(async () => await joe(a).count() === 0);
+    assert.equal(await a.evaluate(() => window.bidenSounds.length), 1, 'A late walker expires without replaying its line.');
+    assert.equal(await b.evaluate(() => window.bidenSounds.length), 1, 'Muted reactions never play queued audio.');
+    emit('expired-biden', BIDEN_LIFETIME_MS + 1000);
+    await until(() => messages.some(message => message.id === 'expired-biden'));
+    assert.equal(await joe(a).count(), 0);
+    await button(a).click();
+    await until(async () => await a.evaluate(() => window.bidenSounds.length) === 2);
+    const stops = await a.evaluate(() => window.bidenStops);
+    await a.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^Quiet room/}).click();
+    await until(async () => await joe(a).count() === 0);
+    assert.ok(await a.evaluate(() => window.bidenStops) > stops, 'Leaving stops the voice and removes the walker.');
+    assert.equal(instance.rooms.get('lobby').playback.revision, 0);
+    assert.deepEqual(errors, []);
+});
 
 test('two browsers share positioned reactions, audio, cursor physics and late-join state', {timeout: 60000}, async t => {
     const {instance, url} = await start(t, {maxTranscoders: 0});
@@ -49,7 +169,7 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
         await join(page);
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
-        await until(async () => await page.evaluate(() => window.decodedSounds === 4));
+        await until(async () => await page.evaluate(() => window.decodedSounds === 6));
     }
     const geometry = await a.locator('.reactions-panel').evaluate(panel => ({
         outside: !panel.closest('.player-shell'),
@@ -193,7 +313,7 @@ test('flashbang bounces and rings in sync, fades over the player, and obeys loca
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
         await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
-        await until(async () => await page.evaluate(() => window.decodedSounds === 4));
+        await until(async () => await page.evaluate(() => window.decodedSounds === 6));
     }
     const throwFlash = a.getByRole('button', {name: 'Flashbang', exact: true});
     const flash = page => page.locator('[data-reaction="flashbang"]');

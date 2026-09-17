@@ -1778,6 +1778,12 @@ ul, ol {
     min-width: 0;
 }
 
+.now-playing-heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .now-playing .eyebrow {
     font-size: 8px;
     color: #ac8c78;
@@ -1785,6 +1791,8 @@ ul, ol {
 }
 
 .now-playing h2 {
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-size: 17px;
     font-weight: 550;
     letter-spacing: -.02em;

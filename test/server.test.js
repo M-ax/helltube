@@ -3,6 +3,47 @@ import assert from 'node:assert/strict';
 import { start, until } from './helpers.js';
 import { Rooms, makeItem } from '../server/rooms.js';
 
+test('original streams open on demand for room members without exposing URLs in snapshots', async t => {
+  const { instance, url, cookie, connect } = await start(t, { maxTranscoders: 0 });
+  const room = instance.rooms.get('lobby');
+  const items = [
+    makeItem({ kind: 'youtube', url: 'https://www.youtube.com/watch?v=BaW_jenozKc' }),
+    makeItem({ kind: 'twitch', url: 'https://www.twitch.tv/videos/12345' }),
+    makeItem({ kind: 'http', url: 'https://media.example/video.mp4?token=private-token#start' }),
+    makeItem({ kind: 'upload', path: '/private/video.mp4', complete: true }),
+    makeItem({ kind: 'http', url: 'javascript:alert(1)' }),
+    makeItem({ kind: 'http', url: 'https://user:password@media.example/video.mp4' }),
+  ];
+  instance.rooms.add(room, items);
+  const open = (id, auth = cookie, roomId = room.id) => fetch(`${url}/api/rooms/${roomId}/items/${id}/original`, {
+    headers: { Cookie: auth }, redirect: 'manual',
+  });
+  assert.equal((await open(items[0].id, '')).status, 401);
+  assert.equal((await open(items[0].id)).status, 403);
+  const ws = await connect();
+  ws.send(JSON.stringify({ type: 'join', roomId: room.id }));
+  await until(() => room.members.size === 1);
+
+  const snapshot = instance.rooms.snapshot(room);
+  const exposed = [snapshot.current, ...snapshot.queue];
+  assert.deepEqual(exposed.map(item => item.hasOriginalStream), [true, true, true, false, false, false]);
+  assert.ok(exposed.every(item => !Object.hasOwn(item, 'source')));
+  assert.ok(!JSON.stringify(snapshot).includes('private-token'));
+  for (const item of items.slice(0, 3)) {
+    const response = await open(item.id);
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('location'), item.source.url);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+  }
+  for (const item of items.slice(3)) assert.equal((await open(item.id)).status, 404);
+  assert.equal((await open('missing')).status, 404);
+  const other = instance.rooms.create('Other room');
+  assert.equal((await open(items[0].id, cookie, other.id)).status, 403);
+  instance.rooms.control(room, { action: 'skip', revision: room.playback.revision });
+  assert.equal((await open(items[0].id)).status, 302, 'A click still opens the same video after playback advances.');
+});
+
 test('room owners and administrators can manage rooms, while other users cannot', async t => {
   const { instance, api, connect } = await start(t, { maxTranscoders: 0 });
   const member = (await api('/api/users', { method: 'POST', body: { username: 'roomowner', password: 'owner-password', role: 'user' } })).data.user;

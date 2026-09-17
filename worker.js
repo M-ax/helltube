@@ -1,6 +1,7 @@
 import { deploymentOrigin, securityHeaders, normalizeCommit } from './shared/deployment.js';
+import { publicMediaFile } from './shared/media-files.js';
 
-const mediaPath = /^\/media\/([\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12})\/(index\.m3u8|segment-\d{6,}\.ts)$/;
+const mediaPath = /^\/media\/([\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12})\/([^/]+)$/;
 const conditionalHeaders = ['Range', 'If-Range', 'If-Match', 'If-None-Match', 'If-Modified-Since', 'If-Unmodified-Since'];
 
 function route(pathname, method) {
@@ -19,7 +20,7 @@ function route(pathname, method) {
   if (/^\/ws(?:\/|$)/i.test(pathname)) return pathname === '/ws' ? { proxy: true } : { status: 404 };
   if (/^\/media(?:\/|$)/i.test(pathname)) {
     const match = mediaPath.exec(pathname);
-    if (!match) return { status: 404 };
+    if (!match || !publicMediaFile.test(match[2])) return { status: 404 };
     if (method !== 'GET' && method !== 'HEAD') return { status: 405 };
     return { proxy: true, segment: match[2] !== 'index.m3u8', jobId: match[1], file: match[2] };
   }
@@ -47,7 +48,7 @@ function failure(status, security, code) {
 function cacheable(response) {
   return response?.status === 200 && !response.headers.has('Set-Cookie') && !response.headers.has('Content-Range') &&
     response.headers.get('X-Helltube-Encrypted') === 'aes-128' &&
-    response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() === 'video/mp2t';
+    ['video/mp2t', 'video/mp4'].includes(response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase());
 }
 
 function segmentTTL(value) {

@@ -6,6 +6,7 @@ import { youtubeNetwork } from './youtube-network.js';
 import { FILE_INPUT_FORMATS, HOSTED_INPUT_FORMATS, probeCommand, probeDuration } from './media-metadata.js';
 import { sponsorPosition } from '../shared/sponsorblock.js';
 import { createProgressReader } from './media-progress.js';
+import { EncryptedFmp4 } from './encrypted-fmp4.js';
 
 export function playlistProgress(contents, baseTime = 0) {
   const durations = [...contents.matchAll(/^#EXTINF:([\d.]+)/gm)].map(m => Number(m[1]));
@@ -213,22 +214,30 @@ export class Media {
     };
     const outputArgs = (rendition, keyInfo) => ['-avoid_negative_ts', 'make_zero',
       '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'event', '-hls_list_size', '0',
-      '-hls_key_info_file', keyInfo,
-      '-hls_flags', 'independent_segments+temp_file+periodic_rekey',
-      '-hls_segment_filename', path.join(rendition.dir, 'segment-%06d.ts'), path.join(rendition.dir, 'index.m3u8')];
+      ...(rendition.clearDir ? ['-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4'] : ['-hls_key_info_file', keyInfo]),
+      '-hls_flags', `independent_segments+temp_file${rendition.clearDir ? '' : '+periodic_rekey'}`,
+      '-hls_segment_filename', path.join(rendition.clearDir || rendition.dir, `segment-%06d.${rendition.clearDir ? 'm4s' : 'ts'}`),
+      path.join(rendition.clearDir || rendition.dir, 'index.m3u8')];
     let originalTask = Promise.resolve();
-    if (copyQuality && inputs.length === 1) {
+    if (copyQuality) {
       const id = randomUUID();
       // Copy from the beginning: an input seek can retain keyframe preroll and shift the
       // room timeline. The parallel encoder still prepares far seeks immediately.
       job.original = {id, item, baseTime: 0, dir: path.join(this.dir, id), keyDir: path.join(this.keyDir, id),
         key: randomBytes(16), label: copyQuality.label, lastProgress: Date.now(), lastBuffered: 0, errors: ''};
       const original = job.original;
+      if (copyQuality.container === 'fmp4') {
+        original.clearDir = path.join(original.keyDir, 'staging');
+        original.publisher = new EncryptedFmp4(original);
+      }
       originalTask = (async () => {
         const keyInfo = await this.prepareEncryption(original);
+        if (original.clearDir) await mkdir(original.clearDir, {recursive: true, mode: 0o700});
         if (job.cancelled) return;
         await this.convert(original, ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y',
-          ...inputArgs(0), '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', ...outputArgs(original, keyInfo)], network);
+          ...inputArgs(0), '-map', '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
+          '-c', 'copy', ...outputArgs(original, keyInfo)], network);
+        await original.publisher?.publish();
       })().catch(error => { original.failed = error; }).finally(() => { original.done = true; });
     }
     args.push(...inputArgs(baseTime));
@@ -252,7 +261,9 @@ export class Media {
 
   async convert(job, args, network, reportProgress = false) {
     await new Promise((resolve, reject) => {
-      job.child = spawn(this.config.ffmpeg, args, { windowsHide: true, env: network.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const command = /[\\/]/.test(this.config.ffmpeg) ? path.resolve(this.config.ffmpeg) : this.config.ffmpeg;
+      job.child = spawn(command, args, { windowsHide: true, env: network.env,
+        ...(job.clearDir ? {cwd: job.clearDir} : {}), stdio: ['ignore', 'pipe', 'pipe'] });
       job.child.stdout.on('data', createProgressReader(progress => {
         if (job.cancelled || !reportProgress) return;
         job.item.preparation = { ...job.item.preparation, ...progress };
@@ -275,6 +286,12 @@ export class Media {
     const qualities = [];
     for (const rendition of [job.original, job].filter(Boolean)) {
       if (rendition.failed) continue;
+      try { await rendition.publisher?.publish(); }
+      catch (error) {
+        rendition.failed = error;
+        rendition.child?.kill();
+        continue;
+      }
       let contents;
       try { contents = await readFile(path.join(rendition.dir, 'index.m3u8'), 'utf8'); }
       catch (error) { if (error.code === 'ENOENT') continue; throw error; }
@@ -318,8 +335,10 @@ export class Media {
         this.lastQuotaCheck = Date.now();
         let bytes = [...this.uploads.uploads.values()].reduce((n, u) => n + u.received, 0);
         for (const job of this.allJobs()) {
-          const files = await readdir(job.dir).catch(() => []);
-          for (const file of files) bytes += (await stat(path.join(job.dir, file)).catch(() => ({ size: 0 }))).size;
+          for (const dir of [job.dir, job.clearDir].filter(Boolean)) {
+            const files = await readdir(dir).catch(() => []);
+            for (const file of files) bytes += (await stat(path.join(dir, file)).catch(() => ({ size: 0 }))).size;
+          }
         }
         if (bytes > this.config.maxStorageBytes) {
           for (const job of [...this.jobs.values()].filter(j => !j.done)) {
@@ -362,6 +381,7 @@ export class Media {
     job.item.status = 'queued';
     job.cleanup = Promise.resolve(job.task).then(async () => {
       for (const rendition of [job, job.original].filter(Boolean)) {
+        await rendition.publisher?.pending.catch(() => {});
         rendition.key.fill(0);
         await Promise.all([rendition.dir, rendition.keyDir].map(dir => rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })));
       }

@@ -6,8 +6,9 @@ export function qualityReady(quality, position) {
     return position >= quality.baseTime && (quality.complete || position < quality.bufferedUntil - 0.5);
 }
 
-export function selectQuality(media, preference, position) {
+export function selectQuality(media, preference, position, {standardOnly = false} = {}) {
     const qualities = availableQualities(media);
+    if (standardOnly) return qualities.find(quality => quality.id === 'standard' && position >= quality.baseTime);
     return qualities.find(quality => quality.id === preference && qualityReady(quality, position)) ||
         qualities.find(quality => quality.url === media.url && qualityReady(quality, position)) ||
         qualities.find(quality => qualityReady(quality, position)) || media;

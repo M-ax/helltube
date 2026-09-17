@@ -11,6 +11,10 @@ export function createBufferHealth({now = () => performance.now()} = {}) {
     let graceUntil = now() + 4000;
     let lowSince = null;
     let stalledSince = null;
+    let qualityLowSince = null;
+    let qualityStalledSince = null;
+    let depletingSince = null;
+    let previousSeconds = null;
     let lastSample = null;
     let revision;
     let transfers = [];
@@ -25,12 +29,13 @@ export function createBufferHealth({now = () => performance.now()} = {}) {
 
     function sample({ranges, currentTime, target, serverAhead, remaining = Infinity, complete = false,
         active = true, paused = false, blocked = false, seeking = false, buffering = false,
-        playbackRate = 1, playbackRevision}) {
+        playbackRate = 1, playbackRevision, alternativeAhead = 0, alternativeComplete = false}) {
         const at = now();
         // Room seeks and throttled/suspended tabs need a fresh observation window.
         if (revision !== playbackRevision || (lastSample !== null && at - lastSample > 2500)) {
             graceUntil = at + 4000;
             lowSince = stalledSince = null;
+            qualityLowSince = qualityStalledSince = depletingSince = previousSeconds = null;
         }
         revision = playbackRevision;
         lastSample = at;
@@ -48,6 +53,18 @@ export function createBufferHealth({now = () => performance.now()} = {}) {
         const fallbackReason = at < graceUntil ? null
             : stalledSince !== null && at - stalledSince >= 3000 ? 'Playback stalled'
             : lowSince !== null && at - lowSince >= 6000 ? 'Buffer stayed low' : null;
+        // A lower quality can recover source starvation when it is already prepared.
+        const qualityObserving = active && !paused && !blocked && !seeking && !coveredEnd;
+        qualityLowSince = qualityObserving && playableSeconds < 6 ? (qualityLowSince ?? at) : null;
+        qualityStalledSince = qualityObserving && buffering && playableSeconds < 0.5 ? (qualityStalledSince ?? at) : null;
+        const draining = qualityObserving && previousSeconds !== null && playableSeconds < previousSeconds - 0.2;
+        depletingSince = draining ? (depletingSince ?? at) : null;
+        previousSeconds = qualityObserving ? playableSeconds : null;
+        const alternativeReady = alternativeAhead >= 4 || (alternativeComplete && alternativeAhead > 0);
+        const qualityFallbackReason = at < graceUntil || !alternativeReady ? null
+            : playableSeconds < 8 && depletingSince !== null && at - depletingSince >= 2000 ? 'Buffer is running low'
+            : qualityStalledSince !== null && at - qualityStalledSince >= 3000 ? 'Playback stalled'
+            : qualityLowSince !== null && at - qualityLowSince >= 6000 ? 'Buffer stayed low' : null;
         transfers = transfers.filter(transfer => at - transfer.at < 15000);
         const totals = transfers.reduce((sum, transfer) => ({bytes: sum.bytes + transfer.bytes,
             elapsed: sum.elapsed + transfer.elapsed, duration: sum.duration + transfer.duration}),
@@ -56,7 +73,7 @@ export function createBufferHealth({now = () => performance.now()} = {}) {
             : paused ? 'Paused' : seeking ? 'Seeking' : coveredEnd ? 'Buffered to end'
             : sourceLimited ? 'Waiting for source' : buffering && seconds < 0.5 ? 'Buffering'
             : playableSeconds < 6 ? 'Low buffer' : 'Healthy buffer';
-        return {seconds, serverAhead: sourceAhead, status, fallbackReason,
+        return {seconds, serverAhead: sourceAhead, status, fallbackReason, qualityFallbackReason,
             mbps: totals.elapsed ? totals.bytes * 8 / totals.elapsed / 1000 : null,
             downloadRate: totals.elapsed ? totals.duration * 1000 / totals.elapsed : null};
     }

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { httpError, text } from './config.js';
 import { sponsorPosition } from '../shared/sponsorblock.js';
+import { sourceKind } from '../shared/media-source.js';
 
 export function makeItem(source, extra = {}) {
   return { id: randomUUID(), title: 'Untitled video', duration: null, thumbnail: null,
@@ -282,7 +283,7 @@ export class Rooms extends EventEmitter {
     const expose = item => {
       if (!item) return null;
       const { source, ...safe } = item;
-      return safe;
+      return { ...safe, hasOriginalStream: item.kind !== 'upload' && !!sourceKind(source?.url) };
     };
     return { id: room.id, name: room.name, ownerId: room.ownerId, version: room.version,
       members: [...new Map([...room.members.values()].map(u => [u.id, { id: u.id, displayName: u.displayName }])).values()],

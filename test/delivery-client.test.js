@@ -234,7 +234,7 @@ function playerHarness(resolveMediaUrl, native = false) {
     let media = item.media;
     const qualities = [];
     return {attach, cleanupSource, retryPlayback, switchToMetal, nativePlaybackError,
-      qualities, state: () => ({playerError, localBuffering, previewPosition, mediaAccess, fallbackNotice, qualityPreference})};`);
+      qualities, state: () => ({playerError, localBuffering, previewPosition, mediaAccess, fallbackNotice, qualityPreference, qualityFallbackItemId})};`);
   return { ...create({ resolveMediaAccess: async (...args) => {
     const access = await resolveMediaUrl(...args);
     return typeof access === 'string' ? {url: access, fallbackUrl: null, route: 'metal'} : access;
@@ -251,7 +251,8 @@ test('original playback errors select the ready standard quality in HLS.js and n
     await player.attach(player.room.current.id, mediaPath, 5);
     if (native) player.nativePlaybackError();
     else player.instances[0].events.get('error')('error', {fatal: true, type: 'media'});
-    assert.equal(player.state().qualityPreference, 'standard');
+    assert.equal(player.state().qualityPreference, 'original');
+    assert.equal(player.state().qualityFallbackItemId, player.room.current.id);
     assert.equal(player.state().playerError, '');
   }
 });

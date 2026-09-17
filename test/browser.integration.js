@@ -9,6 +9,71 @@ import { start, until } from './helpers.js';
 import { createApp } from '../server/app.js';
 import { targetPosition } from '../src/lib/format.js';
 import { makeItem } from '../server/rooms.js';
+import { create4kFixture } from './media-4k-fixture.js';
+
+test('4K VP9 plays and a depleting buffer falls back to 720p only for the affected viewer', {timeout: 60000}, async t => {
+  const context = await start(t);
+  const {instance, url} = context;
+  await create4kFixture(t, context, {duration: 20});
+  const browser = await chromium.launch({channel: 'chrome', headless: true});
+  const gate = Promise.withResolvers();
+  t.after(async () => {gate.resolve(); await browser.close();});
+  const pages = [await browser.newPage(), await browser.newPage()];
+  const errors = [];
+  let delayed = 0;
+  await pages[0].route('**/media/*/segment-*.m4s', async route => {
+    if (Number(/segment-(\d+)/.exec(route.request().url())[1]) >= 3) {
+      delayed++;
+      await gate.promise;
+    }
+    await route.continue().catch(() => {});
+  });
+  for (const page of pages) {
+    page.setDefaultTimeout(10000);
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(url);
+    await page.getByLabel('Username', {exact: true}).fill('admin');
+    await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+    await page.getByRole('button', {name: 'Enter Helltube'}).click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('button', {name: 'Your files', exact: true}).waitFor();
+  }
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size === 2);
+  const item = makeItem({kind: 'youtube', url: 'https://youtu.be/jNQXAC9IVRw'}, {duration: 20});
+  instance.rooms.add(room, [item]);
+  instance.rooms.control(room, {action: 'pause', revision: room.playback.revision});
+  await until(() => instance.media.jobs.get(item.id)?.done, 15000);
+  const width = page => page.locator('video').evaluate(video => video.readyState >= 2 ? video.videoWidth : 0);
+  await until(async () => (await Promise.all(pages.map(width))).every(width => width === 3840), 15000)
+    .catch(async error => {t.diagnostic(await pages[0].locator('body').innerText()); throw error;});
+  for (const page of pages) assert.equal(await page.getByRole('combobox', {name: 'Video quality on this device'}).inputValue(), 'original');
+  instance.rooms.control(room, {action: 'play', revision: room.playback.revision});
+  const revision = room.playback.revision;
+  await until(async () => {
+    for (const page of pages) {
+      const enable = page.getByRole('button', {name: 'Enable playback', exact: true});
+      if (await enable.isVisible()) await enable.click();
+    }
+    return await width(pages[0]) === 1280;
+  }, 15000);
+  assert.ok(delayed > 0, 'Original fragment delivery was starved.');
+  assert.equal(room.playback.revision, revision);
+  assert.equal(await width(pages[1]), 3840);
+  const select = pages[0].getByRole('combobox', {name: 'Video quality on this device'});
+  assert.equal(await select.inputValue(), 'standard');
+  assert.match(await pages[0].locator('.delivery-notice').textContent(), /Buffer|Playback stalled/);
+  assert.equal(room.playback.paused, false);
+  gate.resolve();
+  instance.rooms.control(room, {action: 'seek', position: 9, revision: room.playback.revision});
+  await until(async () => pages[0].locator('video').evaluate(video => video.currentTime >= 9 && video.readyState >= 3));
+  assert.equal(await select.inputValue(), 'standard', 'Recovery and seeking do not automatically return to Original.');
+  await pages[0].locator('.player-shell').focus();
+  await select.selectOption('original');
+  await until(async () => await width(pages[0]) === 3840);
+  assert.equal(await pages[0].locator('.delivery-notice').count(), 0);
+  assert.deepEqual(errors, []);
+});
 
 test('quality selection switches encrypted renditions locally and keeps the shared clock', {timeout: 45000}, async t => {
   const {instance, url, dir} = await start(t);

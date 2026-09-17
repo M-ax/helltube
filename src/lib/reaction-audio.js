@@ -5,6 +5,8 @@ export function createReactionAudio() {
         metalpipe: {url: '/sounds/metal-pipe.mp3', gain: 1},
         flashbangBounce: {url: '/sounds/csgo-flashbang-bounce.mp3', gain: .7},
         flashbangRing: {url: '/sounds/csgo-flashbang-ring.mp3', gain: .5},
+        bidenThing: {url: '/sounds/biden-you-know-the-thing.mp3', gain: .8},
+        bidenWord: {url: '/sounds/biden-one-word.mp3', gain: .8},
     };
     let destroyed = false;
     const sources = new Set();

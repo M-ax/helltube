@@ -43,6 +43,10 @@
                 title="Throw a CS:GO flashbang · bounces, rings, and fades from white">
             <span class="flashbang-icon" aria-hidden="true"><FlashbangGrenade/></span>Flashbang
         </button>
+        <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('biden')}
+                title="Joe Biden wanders around the bottom · parody with soundbites">
+            <img class="biden-icon" src="/images/joe-biden-walking.png" alt=""/>Joe wander
+        </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('heart')}><span aria-hidden="true">❤️</span>Love</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('laugh')}><span aria-hidden="true">😂</span>Laugh</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('clap')}><span aria-hidden="true">👏</span>Applause</button>
@@ -55,4 +59,5 @@
 
 <style>
     .flashbang-icon { display: inline-flex; width: 14px; height: 26px; transform: rotate(25deg); }
+    .biden-icon { width: 17px; height: 27px; object-fit: contain; }
 </style>

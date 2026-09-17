@@ -20,3 +20,17 @@ https://soundxpro.com/sounds/cs-go-flashbang
 The opening throw/collisions are trimmed at 0.62 seconds; the ringing tail is extended
 with a crossfade and fades over 3.75 seconds to match the whiteout.
 Original Counter-Strike audio belongs to Valve.
+
+`biden-one-word.mp3` and `biden-you-know-the-thing.mp3` are short, user-uploaded
+Biden speech excerpts sourced from Voicemod Tuna:
+- https://tuna.voicemod.net/sound/3ecbd337-ca1c-45ec-abe3-01246f2512af
+  (audio: https://us-tuna-sounds-files.voicemod.net/3ecbd337-ca1c-45ec-abe3-01246f2512af-1771630657565.mp3)
+- https://tuna.voicemod.net/sound/73335727-ab20-4392-9e1b-bd52c6288e69
+  (audio: https://us-tuna-sounds-files.voicemod.net/73335727-ab20-4392-9e1b-bd52c6288e69-1775964939945.mp3)
+
+These are soundboard excerpts used for the labeled parody reaction; they are not
+voice synthesis or a new statement. Original recordings belong to their respective
+rights holders. Local copies are normalized to -18 LUFS / -2 dBTP, encoded as mono
+96 kbps MP3, and played at 80% of the viewer's volume. No words are reordered or added.
+The event ID selects one clip per walk, beginning 600 ms after the shared timestamp.
+Late events skip the line; muting, leaving, disabling reactions, or hiding the tab stops it.

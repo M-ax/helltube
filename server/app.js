@@ -21,6 +21,7 @@ import { StateStore } from './store.js';
 import { DirectAccess, equalSecret } from './direct-access.js';
 import { deploymentOrigin, securityHeaders, normalizeCommit } from '../shared/deployment.js';
 import { Deployment } from './deployment.js';
+import { encryptedMediaFile, publicMediaFile, mediaContentType } from '../shared/media-files.js';
 
 export function validOrigin(origin, host, config) {
   return !origin || origin === `http://${host}` || origin === `https://${host}` || config.origins.includes(origin);
@@ -195,7 +196,7 @@ export async function createApp(overrides = {}) {
     if (!req.edge) throw httpError(403, 'Edge proxy credentials required.');
     const job = mediaJob(req.params.jobId, req.auth);
     if (!['youtube', 'twitch', 'http'].includes(job.item.kind) || !Buffer.isBuffer(job.key) || job.key.length !== 16 ||
-      !/^segment-\d{6,}\.ts$/.test(req.params.file)) throw httpError(403, 'This media is not edge-cacheable.');
+      !encryptedMediaFile.test(req.params.file)) throw httpError(403, 'This media is not edge-cacheable.');
     const file = await stat(path.join(job.dir, req.params.file)).catch(() => null);
     if (!file?.isFile()) throw httpError(404, 'Media not found.');
     res.json({ cacheable: true });
@@ -234,6 +235,14 @@ export async function createApp(overrides = {}) {
     res.json({ ok: true });
   });
   app.get('/api/rooms', (_req, res) => res.json({ rooms: rooms.list() }));
+  app.get('/api/rooms/:id/items/:itemId/original', (req, res) => {
+    const room = membership(req);
+    const item = [room.current, ...room.queue, ...room.history].find(item => item?.id === req.params.itemId);
+    if (!item || item.kind === 'upload' || !sourceKind(item.source?.url)) {
+      throw httpError(404, 'Original stream not available.');
+    }
+    res.set('Referrer-Policy', 'no-referrer').redirect(item.source.url);
+  });
   app.post('/api/rooms', (req, res) => {
     limit(`rooms:${req.auth.user.id}`, 10);
     const room = rooms.create(req.body.name, undefined, req.auth.user.id);
@@ -313,12 +322,12 @@ export async function createApp(overrides = {}) {
 
   const serveMedia = async (req, res, next) => {
     const job = mediaJob(req.params.jobId, req.auth);
-    if (!/^(index\.m3u8|segment-\d{6,}\.ts)$/.test(req.params.file)) throw httpError(404, 'Media not found.');
+    if (!publicMediaFile.test(req.params.file)) throw httpError(404, 'Media not found.');
     if (config.bareMetalOrigin && job.item.kind === 'upload' && !req.path.startsWith('/direct/')) {
       throw httpError(409, 'Uploaded media must be streamed directly from bare metal.');
     }
     res.set('Cache-Control', 'no-store');
-    res.type(req.params.file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
+    res.type(mediaContentType(req.params.file));
     if (req.params.file === 'index.m3u8') {
       let contents;
       try { contents = await readFile(path.join(job.dir, 'index.m3u8'), 'utf8'); }
@@ -327,13 +336,15 @@ export async function createApp(overrides = {}) {
       if (!config.bareMetalOrigin) return res.send(contents);
       const scope = `media:${job.id}`;
       const keyUrl = directUrl(`/direct/media/${job.id}/key.bin`, req.auth, scope);
-      contents = contents.replace(/URI="[^"]*"/g, `URI="${keyUrl}"`);
+      contents = contents.replace(/^#EXT-X-KEY:.*$/gm, line => line.replace(/URI="[^"]*"/, `URI="${keyUrl}"`));
       if (req.path.startsWith('/direct/')) {
-        contents = contents.replace(/^segment-\d{6,}\.ts$/gm, file => directUrl(`/direct/media/${job.id}/${file}`, req.auth, scope));
+        contents = contents.replace(/^segment-\d{6,}\.(?:ts|m4s)$/gm, file => directUrl(`/direct/media/${job.id}/${file}`, req.auth, scope));
+        contents = contents.replace(/^(#EXT-X-MAP:)URI="init\.mp4"/gm,
+          `$1URI="${directUrl(`/direct/media/${job.id}/init.mp4`, req.auth, scope)}"`);
       }
       return res.send(contents);
     }
-    if (req.params.file.endsWith('.ts') && job.key?.length === 16) res.set('X-Helltube-Encrypted', 'aes-128');
+    if (encryptedMediaFile.test(req.params.file) && job.key?.length === 16) res.set('X-Helltube-Encrypted', 'aes-128');
     res.sendFile(req.params.file, { root: job.dir, cacheControl: false }, error => { if (error) next(error); });
   };
   app.get('/media/:jobId/:file', identify, serveMedia);

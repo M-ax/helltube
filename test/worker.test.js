@@ -169,6 +169,26 @@ test('segment cache shares encrypted bytes across identities and query variants,
   }
 });
 
+test('encrypted fMP4 initialization and media fragments retain authorization on every cache hit', async () => {
+  for (const file of ['init.mp4', 'segment-000001.m4s']) {
+    let allowed = true;
+    const h = harness({upstream: () => encrypted('ciphertext', {headers: {'Content-Type': 'video/mp4'}}),
+      authorize: () => allowed ? Response.json({cacheable: true}) : new Response('denied', {status: 403})});
+    const path = `/media/${jobId}/${file}`;
+    for (let request = 0; request < 2; request++) {
+      const response = await h.request(path);
+      assert.equal(await response.text(), 'ciphertext');
+      privateResponse(response);
+      await h.settle();
+    }
+    assert.equal(h.puts.length, 1);
+    assert.equal(h.calls.length, 3);
+    allowed = false;
+    assert.equal((await h.request(path)).status, 403);
+    assert.equal(h.matches.length, 2);
+  }
+});
+
 test('warm cache cannot bypass membership revocation or logout', async () => {
   let status = 200;
   const h = harness({ authorize: () => status === 200 ? Response.json({ cacheable: true }) : new Response('private backend detail', { status }) });

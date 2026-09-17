@@ -120,7 +120,7 @@ export class YouTube {
 
   async resolve(url) {
     const [data, segments] = await Promise.all([
-      this.extract(['--no-playlist', '-f', 'bv*[height<=1080]+ba/b[height<=1080]/best', '--dump-single-json', '--', url]),
+      this.extract(['--no-playlist', '-f', 'bv*+ba/b', '-S', 'res,fps', '--dump-single-json', '--', url]),
       this.sponsorBlock.segments(videoId(new URL(url))),
     ]);
     if (data.is_live) throw new Error('Live broadcasts are not supported; use a video or completed livestream.');
@@ -133,7 +133,7 @@ export class YouTube {
       return { url: source.href, headers: format.http_headers || data.http_headers || {} };
     });
     const duration = Number(data.duration) || null;
-    return { inputs, duration, copyQuality: hlsCopyQuality(formats), sponsorSegments: normalizeSponsors(segments, duration) };
+    return { inputs, duration, copyQuality: hlsCopyQuality(formats, {allowFiles: true}), sponsorSegments: normalizeSponsors(segments, duration) };
   }
 
   close() {

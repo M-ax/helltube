@@ -86,11 +86,15 @@ export function sponsorPlaylist(contents, item, baseTime = 0) {
   let position = baseTime;
   // GAP preserves durations, sequence numbers and AES IVs while letting HLS load
   // post-ad content immediately instead of spending bandwidth on skipped fragments.
-  return contents.replace(/(^#EXTINF:([\d.]+),[^\r\n]*\r?\n)(segment-\d{6,}\.ts)(?=\r?$)/gm,
-    (_match, info, duration, uri) => {
-      const end = position + Number(duration);
+  let duration = null;
+  return contents.split(/\r?\n/).map(line => {
+      const info = /^#EXTINF:([\d.]+),/.exec(line);
+      if (info) duration = Number(info[1]);
+      if (duration === null || !/^segment-\d{6,}\.(?:ts|m4s)$/.test(line)) return line;
+      const end = position + duration;
       const blocked = sponsorContains(item.sponsorSegments, position, end);
       position = end;
-      return `${info}${blocked ? '#EXT-X-GAP\n' : ''}${uri}`;
-    });
+      duration = null;
+      return `${blocked ? '#EXT-X-GAP\n' : ''}${line}`;
+    }).join('\n');
 }
