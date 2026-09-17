@@ -70,6 +70,33 @@ test('Twitch and hosted media use authorized encrypted edge delivery and direct 
   }
 });
 
+test('desktop playback bypasses the Worker cache with authorized direct playlists, audio/video segments and keys', async t => {
+  const {api, job, direct, room, url, cookie} = await fixture(t);
+  const desktop = await job('desktop');
+  const access = (await api(`/api/media/${desktop.id}/access`)).data;
+  assert.equal(access.fallbackUrl, undefined, 'Desktop playback must start on metal, not wait for a forbidden edge request.');
+  assert.equal(new URL(access.url).origin, origin);
+  assert.equal(new URL(access.url).pathname, `/direct/media/${desktop.id}/index.m3u8`);
+  const playlist = await direct(access.url);
+  assert.equal(playlist.status, 200);
+  assert.equal(playlist.headers.get('access-control-allow-origin'), frontend);
+  const contents = await playlist.text();
+  const keyUrl = contents.match(/URI="([^"]+)"/)[1];
+  const segmentUrl = contents.split('\n').find(line => line.startsWith(origin));
+  assert.ok(segmentUrl, 'The playlist must also route segments directly to metal.');
+  assert.deepEqual(Buffer.from(await (await direct(keyUrl)).arrayBuffer()), desktop.key);
+  const segment = await direct(segmentUrl);
+  assert.equal(segment.status, 200);
+  assert.equal(segment.headers.get('cache-control'), 'no-store');
+  assert.equal((await direct(segmentUrl.split('?')[0])).status, 401);
+  assert.equal((await api(`/api/edge/media/${desktop.id}/segment-000000.ts`,
+    {headers: {'X-Helltube-Edge': secret}})).status, 403, 'Desktop content must remain excluded from the shared cache.');
+  assert.equal((await fetch(`${url}/media/${desktop.id}/segment-000000.ts`, {headers: {Cookie: cookie}})).status, 409);
+  room.members.clear();
+  assert.equal((await direct(access.url)).status, 403);
+  assert.equal((await direct(segmentUrl)).status, 403);
+});
+
 test('original quality uses its own authorized delivery, key and fallback grant', async t => {
   const {instance, api, job, direct, url, cookie} = await fixture(t);
   const standard = await job('twitch');

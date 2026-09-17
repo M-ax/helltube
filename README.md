@@ -40,7 +40,7 @@ Open a room, choose **Share desktop**, then **Choose screen to share**. The brow
 
 Sharing starts immediately for everyone, including people joining later. The current video is placed first in the queue at its interrupted position; stopping the share returns to that queue. The sender's player stays muted to prevent feedback without changing saved volume preferences. Live shares cannot be paused, sought, or replayed from history. Use **Stop sharing**, the browser's stop button, or the room's skip button to end the share. Leaving the room, signing out, disconnecting, or losing the audio/video capture also stops it; reconnecting requires a fresh screen selection. Automatic frontend updates wait until sharing ends.
 
-Video and audio travel together over the authenticated room WebSocket and are converted to the existing encrypted HLS stream (up to 720p, with several seconds of buffering). This is view-only sharing, not remote keyboard/mouse control. Temporary segments count toward `MAX_STORAGE_BYTES` and are removed when sharing ends. Shares have a four-hour limit; a stalled sender or overloaded connection is stopped instead of accumulating an unlimited buffer. The existing `/ws` proxy route supports capture with both local and Worker deployments.
+Video and audio travel together over the authenticated room WebSocket and are converted to the existing encrypted HLS stream (up to 720p, with several seconds of buffering). This is view-only sharing, not remote keyboard/mouse control. Temporary segments count toward `MAX_STORAGE_BYTES` and are removed when sharing ends. Shares have a four-hour limit; a stalled sender or overloaded connection is stopped instead of accumulating an unlimited buffer. The existing `/ws` proxy route supports capture with both local and Worker deployments. With a Worker frontend, desktop playlists, segments, and keys play directly from metal using scoped grants, like uploaded video; desktop content never enters the shared Worker cache.
 
 ## Cloudflare Worker frontend + bare-metal backend
 
@@ -50,7 +50,7 @@ Video and audio travel together over the authenticated room WebSocket and are co
 Browser → Worker: frontend, API, WebSocket, remote-media playlists
 Browser → Worker cache: encrypted YouTube, Twitch VOD, and hosted-media segments (90 seconds)
 Worker → bare metal: live authorization before every cached segment
-Browser → bare metal directly: HLS keys, upload bytes, uploaded-video HLS
+Browser → bare metal directly: HLS keys, upload bytes, uploaded-video and desktop HLS
 Browser → bare metal on slow Cloudflare delivery: proxied playlists and segments
 ```
 

@@ -188,11 +188,12 @@ export async function createApp(overrides = {}) {
   app.get('/api/config', (_req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin }));
   app.get('/api/media/:jobId/access', (req, res) => {
     const job = mediaJob(req.params.jobId, req.auth);
+    const directOnly = ['upload', 'desktop'].includes(job.item.kind);
     const metalUrl = config.bareMetalOrigin
       ? directUrl(`/direct/media/${job.id}/index.m3u8`, req.auth, `media:${job.id}`) : null;
-    res.json({ url: config.bareMetalOrigin && job.item.kind === 'upload'
+    res.json({ url: config.bareMetalOrigin && directOnly
       ? metalUrl : `/media/${job.id}/index.m3u8`,
-      ...(metalUrl && job.item.kind !== 'upload' ? { fallbackUrl: metalUrl } : {}) });
+      ...(metalUrl && !directOnly ? { fallbackUrl: metalUrl } : {}) });
   });
   app.get('/api/edge/media/:jobId/:file', async (req, res) => {
     if (!req.edge) throw httpError(403, 'Edge proxy credentials required.');
@@ -325,8 +326,8 @@ export async function createApp(overrides = {}) {
   const serveMedia = async (req, res, next) => {
     const job = mediaJob(req.params.jobId, req.auth);
     if (!publicMediaFile.test(req.params.file)) throw httpError(404, 'Media not found.');
-    if (config.bareMetalOrigin && job.item.kind === 'upload' && !req.path.startsWith('/direct/')) {
-      throw httpError(409, 'Uploaded media must be streamed directly from bare metal.');
+    if (config.bareMetalOrigin && ['upload', 'desktop'].includes(job.item.kind) && !req.path.startsWith('/direct/')) {
+      throw httpError(409, 'This media must be streamed directly from bare metal.');
     }
     res.set('Cache-Control', 'no-store');
     res.type(mediaContentType(req.params.file));
