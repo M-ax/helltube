@@ -815,31 +815,33 @@ test('overlay controls autohide accessibly and account volume survives reloads a
   };
   await login(page);
   const volume = page.getByRole('slider', { name: 'Volume on this device', exact: true });
-  assert.equal(await volume.inputValue(), '0.8');
+  assert.equal(await volume.inputValue(), '0.95');
+  assert.equal(await page.locator('video').evaluate(video => video.volume), .8);
+  const savedVolume = 1 / 11;
   const changes = [];
   page.on('request', request => {
     if (request.url().endsWith('/api/me/preferences')) changes.push(request.postDataJSON());
   });
   await volume.evaluate(input => {
-    for (const value of [.6, .5, .4, .23]) {
+    for (const value of [.6, .5, .4, .5]) {
       input.value = value;
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }
     input.dispatchEvent(new Event('change', { bubbles: true }));
   });
-  await until(() => instance.accounts.users[0].preferences.volume === .23);
-  assert.deepEqual(changes, [{ volume: .23 }], 'A slider gesture coalesces and commits only changed preferences.');
+  await until(() => instance.accounts.users[0].preferences.volume === savedVolume);
+  assert.deepEqual(changes, [{ volume: savedVolume }], 'A slider gesture coalesces and commits only changed preferences.');
   await page.getByRole('button', { name: 'Mute on this device', exact: true }).click();
   await until(() => instance.accounts.users[0].preferences.muted);
   await page.reload();
   await join(page);
-  assert.equal(await volume.inputValue(), '0.23');
-  assert.deepEqual(await page.locator('video').evaluate(video => ({ volume: video.volume, muted: video.muted })), { volume: .23, muted: true });
+  assert.equal(await volume.inputValue(), '0.5');
+  assert.deepEqual(await page.locator('video').evaluate(video => ({ volume: video.volume, muted: video.muted })), { volume: savedVolume, muted: true });
   const secondContext = await browser.newContext({ viewport: { width: 1280, height: 844 }, isMobile: true, hasTouch: true });
   const mobile = await secondContext.newPage();
   await login(mobile);
   await mobile.setViewportSize({ width: 390, height: 844 });
-  assert.equal(await mobile.getByRole('slider', { name: 'Volume on this device' }).inputValue(), '0.23');
+  assert.equal(await mobile.getByRole('slider', { name: 'Volume on this device' }).inputValue(), '0.5');
   assert.equal(await mobile.locator('video').evaluate(video => video.muted), true);
   await secondContext.close();
 

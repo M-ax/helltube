@@ -619,7 +619,28 @@ ul, ol {
 
 .room-navigation-row { display: flex; align-items: center; gap: 2px; }
 .room-navigation-row .room-button { flex: 1; min-width: 0; }
-.room-edit { flex-shrink: 0; }
+.room-edit {
+    flex-shrink: 0;
+    opacity: 0;
+    transform: translateX(6px);
+    transition: opacity 140ms ease-out, transform 140ms ease-out;
+    pointer-events: none;
+}
+
+.room-navigation-row:hover .room-edit,
+.room-navigation-row:focus-within .room-edit {
+    opacity: 1;
+    transform: translateX(0);
+    pointer-events: auto;
+}
+
+@media (hover: none) {
+    .room-edit {
+        opacity: 1;
+        transform: none;
+        pointer-events: auto;
+    }
+}
 .room-delete { margin-top: 24px; }
 
 .room-button {
@@ -1544,10 +1565,48 @@ ul, ol {
 }
 
 .volume-range {
-    width: 50px;
+    width: 70px;
     height: 28px;
     margin: 0 6px 0 0;
+    appearance: none;
+    background: transparent;
     touch-action: none;
+}
+
+.volume-range::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--accent) var(--volume-progress), #ffffff38 var(--volume-progress));
+}
+
+.volume-range::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: #ffffff38;
+}
+
+.volume-range::-moz-range-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--accent);
+}
+
+.volume-range::-webkit-slider-thumb {
+    appearance: none;
+    width: 8px;
+    height: 8px;
+    margin-top: -2px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--accent);
+}
+
+.volume-range::-moz-range-thumb {
+    width: 8px;
+    height: 8px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--accent);
 }
 
 .player-shell:fullscreen {
@@ -3844,7 +3903,7 @@ progress::-moz-progress-bar {
     }
 
     .volume-range {
-        width: 50px;
+        width: 60px;
         margin-right: 3px;
     }
 

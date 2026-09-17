@@ -52,6 +52,7 @@
     let transportRowHeight = 43;
     let hideTimer;
     const CONTROLS_HIDE_DELAY = 3000;
+    const VOLUME_CURVE = 100;
 
     $: item = room?.current;
     $: media = item?.media;
@@ -67,6 +68,7 @@
     $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null;
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
+    $: volumePosition = Math.round(Math.log1p(volume * (VOLUME_CURVE - 1)) / Math.log(VOLUME_CURVE) * 100) / 100;
     $: if (video) attach(item?.id, media?.url, media?.baseTime);
     $: if (video) {
         video.volume = volume;
@@ -81,10 +83,22 @@
         muted = typeof next?.muted === 'boolean' ? next.muted : false;
     }
 
-    function changeVolume(event) {
-        volume = Number(event.currentTarget.value);
+    function setVolume(position) {
+        // An audio taper gives the quiet end finer control, with exact silence at zero.
+        const level = Math.max(0, Math.min(1, position));
+        volume = (VOLUME_CURVE ** level - 1) / (VOLUME_CURVE - 1);
         muted = false;
         onPreferencesChange?.({volume, muted}, {key: preferenceKey, commit: false});
+    }
+
+    function changeVolume(event) {
+        setVolume(Number(event.currentTarget.value));
+    }
+
+    function scrollVolume(event) {
+        if (!event.deltaY) return;
+        setVolume(Math.round((volumePosition - Math.sign(event.deltaY) * 0.05) * 100) / 100);
+        revealControls();
     }
 
     function commitVolume() {
@@ -551,8 +565,10 @@
                         <Icon name={muted || volume === 0 ? 'mute' : 'volume'} size={19}/>
                     </button>
                     <input class="volume-range" aria-label="Volume on this device" type="range" min="0" max="1" step="0.01"
-                           value={volume} aria-valuetext={`${Math.round(volume * 100)}%`}
-                           on:input={changeVolume} on:change={commitVolume} on:blur={commitVolume}/>
+                           value={volumePosition} aria-valuetext={`${Math.round(volumePosition * 100)}%`}
+                           style={`--volume-progress: ${volumePosition * 100}%`}
+                           on:input={changeVolume} on:change={commitVolume} on:blur={commitVolume}
+                           on:wheel|nonpassive|preventDefault|stopPropagation={scrollVolume}/>
                     <button class="icon-button" aria-label="Toggle fullscreen" on:click={fullscreen}>
                         <Icon name="fullscreen" size={18}/>
                     </button>
