@@ -49,6 +49,7 @@
     const realtimeState = client.state;
     const desktop = createDesktopShare(client);
     const desktopState = desktop.state;
+    const desktopPlayback = desktop.playback;
     const reactions = client.reactions;
     $: room = $realtimeState.room;
     $: connected = $realtimeState.status === 'connected' && $realtimeState.joined && browserOnline;
@@ -498,6 +499,7 @@
                             <Player username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
                                     overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
                                     captureMuted={$desktopState.hasAudio}
+                                    desktopPlayback={$desktopPlayback} onRetryDesktop={desktop.retryView}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
                         <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify} {desktop}

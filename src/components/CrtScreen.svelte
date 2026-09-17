@@ -17,7 +17,6 @@
         : rows.find(row => row.state === 'busy')?.label || 'Awaiting video input.';
     const labels = {ok: 'OK', busy: 'RUN', wait: 'WAIT', halt: 'HALT', fail: 'FAIL'};
     const commands = [
-        'ssh squeaker@orbitalioncannon.com',
         'sudo pacman -S emotional-support',
         'sudo systemctl restart brain.service',
         "git commit -m 'it got worse'",
@@ -119,7 +118,7 @@
             <div class="crt-output">
                 <div class="crt-heading">
                     <span class="crt-kicker">HELLTUBE // VIDEO TERMINAL</span>
-                    <h2>{heading}<span class="crt-cursor" aria-hidden="true">_</span></h2>
+                    <h2>{heading}</h2>
                     <p class="crt-source">{item?.title || pending?.title || (active ? 'Initializing media pipeline' : 'The next transmission is yours.')}</p>
                 </div>
                 <div class="crt-log" aria-label="Video startup status">

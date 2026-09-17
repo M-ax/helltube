@@ -5,6 +5,8 @@
     import CrtScreen from './CrtScreen.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
     import Reactions from './Reactions.svelte';
+    import PointingFingers from './PointingFingers.svelte';
+    import {trackReactionPointer} from '../lib/reaction-pointer.js';
     import MetalPipeReaction from './MetalPipeReaction.svelte';
     import FlashbangReaction from './FlashbangReaction.svelte';
     import BidenReaction from './BidenReaction.svelte';
@@ -12,7 +14,6 @@
     import {PIPE_LIFETIME_MS} from '../lib/metal-pipe.js';
     import {FLASH_LIFETIME_MS} from '../lib/flashbang.js';
     import {createReactionAudio} from '../lib/reaction-audio.js';
-    import {ballArena, BALL_WIDTH, BALL_HEIGHT} from '../../shared/beach-ball.js';
     import {targetPosition, driftCorrection, time, bufferDuration} from '../lib/format.js';
     import {sourceLabels, sourceIcons} from '../../shared/media-source.js';
     import {sponsorPosition} from '../../shared/sponsorblock.js';
@@ -36,6 +37,8 @@
     export let preferenceKey = null;
     export let onPreferencesChange;
     export let captureMuted = false;
+    export let desktopPlayback = {itemId: null, stream: null, error: '', local: false};
+    export let onRetryDesktop;
     let video;
     let canvas;
     let effectsCanvas;
@@ -45,6 +48,8 @@
     let previewOffset = null;
     let previewPosition = null;
     let hitmarkerArmed = false;
+    let fingerArmed = false;
+    let localFinger = null;
     let hitmarkerTarget;
     let aim = {x: 0.5, y: 0.5};
     let activeReactions = [];
@@ -95,7 +100,7 @@
     $: live = item?.kind === 'desktop';
     $: qualities = availableQualities(item?.media);
     $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
-    $: crtVisible = !media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error');
+    $: crtVisible = (!media && !live) || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error');
     $: if (renderer) renderer.setCrtActive(crtVisible);
     $: duration = item?.duration;
     $: seekMax = Math.max(1, duration || media?.bufferedUntil || position);
@@ -103,8 +108,8 @@
     $: progress = Math.min(100, displayedPosition / seekMax * 100);
     $: buffered = Math.min(100, Math.max(0, (media?.bufferedUntil || 0) / seekMax * 100));
     $: serverOverlay = overlay && overlay.expiresAt > now + clockOffset ? overlay.message : '';
-    $: preparing = item && !media && item.status !== 'error';
-    $: canAutoHide = !!media && connected && playing && !room?.playback.paused && !preparing
+    $: preparing = item && !media && !live && item.status !== 'error';
+    $: canAutoHide = (!!media || live) && connected && playing && !room?.playback.paused && !preparing
         && !localBuffering && !blocked && !playerError && item?.status !== 'error';
     $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed;
     $: beachBall = reactionsEnabled && connected && reactions.roomId === room?.id && !!reactions.ball;
@@ -115,10 +120,10 @@
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
     $: volumePosition = Math.round(Math.log1p(volume * (VOLUME_CURVE - 1)) / Math.log(VOLUME_CURVE) * 100) / 100;
-    $: if (video) attach(item?.id, media?.url, media?.baseTime);
+    $: if (video) attach(item?.id, media?.url, media?.baseTime, null, live ? desktopPlayback : null);
     $: if (video) {
         video.volume = volume;
-        video.muted = muted || captureMuted;
+        video.muted = muted || captureMuted || (live && desktopPlayback.local);
     }
     $: if (!connected && video) video.pause();
     $: if (!connected || playerError || item?.status === 'error') previewRelative(null);
@@ -297,15 +302,20 @@
         hls = null;
         video?.pause();
         if (video) {
+            video.srcObject = null;
             video.removeAttribute('src');
             video.load();
         }
         playPending = false;
     }
 
-    async function attach(id, url, baseTime, accessOverride = null) {
-        const key = `${id || ''}|${url || ''}|${baseTime || 0}`;
-        if (sourceKey === key) return;
+    async function attach(id, url, baseTime, accessOverride = null, desktop = null) {
+        const key = `${id || ''}|${url || ''}|${baseTime || 0}|${desktop ? 'desktop' : 'hls'}`;
+        const stream = desktop && desktop.itemId === id ? desktop.stream : null;
+        if (sourceKey === key && (!desktop || video.srcObject === stream)) {
+            if (desktop) playerError = desktop.error || '';
+            return;
+        }
         cleanupSource();
         sourceKey = key;
         playerError = '';
@@ -321,6 +331,14 @@
         if (qualityFallbackItemId !== id) {
             qualityFallbackItemId = null;
             qualityNotice = '';
+        }
+        if (desktop) {
+            playerError = desktop.error || '';
+            localBuffering = !stream;
+            video.srcObject = stream;
+            video.playbackRate = 1;
+            if (stream) tryPlay();
+            return;
         }
         if (!url) return;
         const generation = sourceGeneration;
@@ -429,7 +447,7 @@
     }
 
     function nativePlaybackError() {
-        if (hls || !media) return;
+        if (hls || (!media && !live)) return;
         if (video.error?.code === 2 && switchToMetal('Cloudflare request failed')) return;
         if (useStandardQuality()) return;
         playerError = 'The video stream could not be played. Retry playback or use another browser.';
@@ -447,7 +465,7 @@
         Promise.resolve(result).then(() => {
             if (generation !== sourceGeneration) return;
             blocked = false;
-            if (!connected || room?.playback.paused) video.pause();
+            if (!connected || (!live && room?.playback.paused)) video.pause();
         }).catch((error) => {
             if (generation !== sourceGeneration) return;
             if (error.name === 'NotAllowedError') blocked = true;
@@ -461,6 +479,13 @@
         now = Date.now();
         if (connected) position = targetPosition(room, clockOffset, now);
         refreshPreview();
+        if (live) {
+            if (!video || !connected || playerError || !video.srcObject) { video?.pause(); return; }
+            video.playbackRate = 1;
+            localBuffering = video.readyState < 2;
+            if (video.paused && !blocked) tryPlay();
+            return;
+        }
         if (!video || !media || !connected || playerError) {
             video?.pause();
             return;
@@ -535,6 +560,8 @@
 
     function clearActiveReactions() {
         hitmarkerArmed = false;
+        fingerArmed = false;
+        localFinger = null;
         activeReactions = [];
         reactionAudio?.stop();
         for (const timer of reactionTimers) clearTimeout(timer);
@@ -559,6 +586,10 @@
                 : event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
+            if (event.kind === 'fingertap') {
+                if (event.clientId !== state.clientId && age < 200) reactionSound('fingertap');
+                continue;
+            }
             activeReactions = [...activeReactions.slice(-39), event];
             if (event.kind === 'hitmarker' && !soundMuted && !muted && !captureMuted) reactionAudio?.play(volume);
             const timer = setTimeout(() => {
@@ -576,7 +607,11 @@
     async function react(kind) {
         if (!connected || !reactionsEnabled) return;
         reactionAudio?.unlock();
-        if (kind === 'hitmarker') {
+        if (kind === 'finger') {
+            fingerArmed = !fingerArmed;
+            hitmarkerArmed = false;
+        } else if (kind === 'hitmarker') {
+            fingerArmed = false;
             hitmarkerArmed = !hitmarkerArmed;
             aim = {x: 0.5, y: 0.5};
             await tick();
@@ -598,6 +633,14 @@
         }
     }
 
+    function fingerSlide(id, speed) {
+        const level = reactionsEnabled && connected && !soundMuted && !muted && !captureMuted && !document.hidden ? volume : 0;
+        reactionAudio?.slide(id, level, speed);
+    }
+
+    function fingerTap() { reactionAudio?.unlock(); reactionSound('fingertap'); }
+    function setLocalFinger(finger) { localFinger = finger; }
+
     function placeHitmarker(event) {
         if (!connected || !reactionsEnabled || !hitmarkerArmed) return;
         const rect = event.currentTarget.getBoundingClientRect();
@@ -618,57 +661,8 @@
         aim = {x: Math.max(0, Math.min(1, aim.x + direction[0])), y: Math.max(0, Math.min(1, aim.y + direction[1]))};
     }
 
-    function trackReactionPointer(node) {
-        let point = null;
-        let lastSent = 0;
-        let sent = false;
-        let pointerRoom = null;
-        function sendPoint() {
-            if (pointerRoom !== room?.id) { point = null; sent = false; }
-            if (!connected || !beachBall || !point) return;
-            onCommand({type: 'reaction:pointer', ...point});
-            lastSent = performance.now();
-            sent = true;
-        }
-        function leave() {
-            point = null;
-            if (sent && connected) onCommand({type: 'reaction:pointer', x: null, y: null});
-            sent = false;
-        }
-        function move(event) {
-            if (!beachBall || event.target.closest('.player-controls, button:not(.hitmarker-target), input, a')) return leave();
-            const rect = node.getBoundingClientRect();
-            const inset = parseFloat(getComputedStyle(node).getPropertyValue('--controls-height')) || 71;
-            const arena = ballArena(rect.width, rect.height, inset);
-            const x = (event.clientX - rect.left - arena.x) / (BALL_WIDTH * arena.scale);
-            const y = (event.clientY - rect.top - arena.y) / (BALL_HEIGHT * arena.scale);
-            if (x < 0 || x > 1 || y < 0 || y > 1) return leave();
-            point = {x, y};
-            pointerRoom = room?.id;
-            if (performance.now() - lastSent >= 60) sendPoint();
-        }
-        function release(event) { if (event.pointerType !== 'mouse') leave(); }
-        const heartbeat = setInterval(() => { if (performance.now() - lastSent >= 500) sendPoint(); }, 500);
-        node.addEventListener('pointermove', move);
-        node.addEventListener('pointerdown', move);
-        node.addEventListener('pointerleave', leave);
-        node.addEventListener('pointercancel', leave);
-        window.addEventListener('pointerup', release);
-        window.addEventListener('blur', leave);
-        return {update(enabled) {
-            if (!enabled) leave();
-        }, destroy() {
-            clearInterval(heartbeat);
-            node.removeEventListener('pointermove', move);
-            node.removeEventListener('pointerdown', move);
-            node.removeEventListener('pointerleave', leave);
-            node.removeEventListener('pointercancel', leave);
-            window.removeEventListener('pointerup', release);
-            window.removeEventListener('blur', leave);
-        }};
-    }
-
     function retryPlayback() {
+        if (live) { onRetryDesktop?.(); return; }
         sourceKey = '';
         attach(item?.id, media?.url, media?.baseTime);
     }
@@ -687,7 +681,7 @@
     onMount(() => {
         reactionAudio = createReactionAudio();
         const unlockAudio = () => reactionAudio.unlock();
-        const cancelReaction = event => { if (event.key === 'Escape') hitmarkerArmed = false; };
+        const cancelReaction = event => { if (event.key === 'Escape') { hitmarkerArmed = false; fingerArmed = false; } };
         document.addEventListener('pointerdown', unlockAudio);
         document.addEventListener('keydown', unlockAudio);
         document.addEventListener('keydown', cancelReaction);
@@ -716,11 +710,14 @@
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
          data-controls-visible={controlsVisible}>
-    <div class="video-viewport" use:trackReactionPointer={beachBall} data-renderer={webglActive ? 'webgl' : 'native'}
+    <div class="video-viewport" class:finger-armed={fingerArmed}
+         use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled, connected,
+             roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
+         data-renderer={webglActive ? 'webgl' : 'native'}
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + 28}px`}>
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video bind:this={video} playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
+        <video bind:this={video} playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media || live}
                class:webgl-source={webglActive}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
                on:canplay={sync} on:loadeddata={() => hasFrame = true} on:waiting={() => localBuffering = true}
@@ -728,8 +725,12 @@
                on:pause={() => playing = false} on:ended={() => playing = false}
                on:error={nativePlaybackError}></video>
         <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
-                class:video-visible={crtVisible || (!!media && webglActive)} aria-hidden="true"></canvas>
+                class:video-visible={crtVisible || ((!!media || live) && webglActive)} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
+        {#if reactionsEnabled && connected && reactions.roomId === room?.id && (fingerArmed || reactions.fingers?.length)}
+            <PointingFingers fingers={reactions.fingers || []} local={localFinger} clientId={reactions.clientId}
+                             {clockOffset} onSlide={fingerSlide}/>
+        {/if}
         {#each activeReactions.filter(reaction => reaction.kind === 'metalpipe') as reaction (reaction.id)}
             <MetalPipeReaction {reaction} {clockOffset} onImpact={pipeImpact}/>
         {/each}
@@ -772,7 +773,7 @@
                 <h3>This watch hit a snag.</h3>
                 <p>{item.error || playerError}</p>
                 <div class="button-row">
-                    {#if playerError && media}
+                    {#if playerError && (media || live)}
                         <button class="button secondary small" on:click={retryPlayback}>
                             <Icon name="refresh" size={16}/>
                             Retry playback
@@ -871,7 +872,7 @@
         </div>
     </div>
 </section>
-<Reactions {connected} {beachBall} armed={hitmarkerArmed} enabled={reactionsEnabled} {soundMuted} onReact={react}
+<Reactions {connected} {beachBall} {fingerArmed} armed={hitmarkerArmed} enabled={reactionsEnabled} {soundMuted} onReact={react}
            onEnabledToggle={toggleReactions}
            onSoundToggle={() => { soundMuted = !soundMuted; reactionAudio?.unlock(); }}/>
 <div class="now-playing">

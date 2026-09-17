@@ -6,6 +6,105 @@ import {createBeachBall, ballArena} from '../shared/beach-ball.js';
 import {FLASH_DETONATE_MS, FLASH_LIFETIME_MS} from '../src/lib/flashbang.js';
 import {BIDEN_LIFETIME_MS, bidenSound} from '../src/lib/biden.js';
 
+test('pointing fingers track locally, stream at 60Hz, tap and slide together, and clean up', {timeout: 60000}, async t => {
+    const {instance, url} = await start(t, {maxTranscoders: 0});
+    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--enable-unsafe-swiftshader']});
+    t.after(() => browser.close());
+    const a = await browser.newPage({viewport: {width: 1440, height: 1000}});
+    const b = await browser.newPage({viewport: {width: 1000, height: 900}});
+    const errors = [];
+    const outgoing = [];
+    a.on('websocket', ws => ws.on('framesent', frame => {
+        const message = JSON.parse(frame.payload);
+        if (message.type === 'reaction:pointer') outgoing.push({at: Date.now(), ...message});
+    }));
+    for (const page of [a, b]) {
+        page.setDefaultTimeout(8000);
+        page.on('pageerror', error => errors.push(error.message));
+        await page.addInitScript(() => {
+            window.fingerAudio = {taps: 0, slides: 0, active: 0};
+            const active = new Set();
+            const start = AudioBufferSourceNode.prototype.start;
+            const stop = AudioBufferSourceNode.prototype.stop;
+            AudioBufferSourceNode.prototype.start = function (...args) {
+                if (this.loop) { window.fingerAudio.slides++; active.add(this); window.fingerAudio.active = active.size; }
+                else if (this.buffer?.duration > .104 && this.buffer.duration < .106) window.fingerAudio.taps++;
+                return start.apply(this, args);
+            };
+            AudioBufferSourceNode.prototype.stop = function (...args) {
+                active.delete(this); window.fingerAudio.active = active.size;
+                return stop.apply(this, args);
+            };
+        });
+        await page.goto(url);
+        await page.getByLabel('Username', {exact: true}).fill('admin');
+        await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+        await page.getByRole('button', {name: 'Enter Helltube'}).click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
+    }
+    const finger = page => page.locator('.pointing-fingers');
+    const fingerButton = page => page.getByRole('button', {name: 'Pointing finger', exact: true});
+    await fingerButton(a).click();
+    await a.locator('.video-viewport').scrollIntoViewIfNeeded();
+    const rect = await a.locator('.video-viewport').boundingBox();
+    const at = (x, y) => ({x: rect.x + x * rect.width, y: rect.y + y * rect.height});
+    await a.mouse.move(rect.x - 5, at(0, .3).y);
+    await a.mouse.move(at(.002, .3).x, at(0, .3).y);
+    await a.mouse.move(at(.65, .4).x, at(.65, .4).y, {steps: 12});
+    await until(async () => await finger(b).getAttribute('data-finger-count') === '1');
+    const pivot = outgoing.find(value => value.finger)?.finger.pivot;
+    assert.ok(pivot.x < 0, 'The pivot is just off the entry edge.');
+    assert.ok(Math.abs(Number(await finger(a).getAttribute('data-local-x')) - .65) < .003);
+    const begin = Date.now();
+    await a.waitForTimeout(1600);
+    const stream = outgoing.filter(value => value.at >= begin && value.finger);
+    assert.ok(stream.length >= 76 && stream.length <= 110, `60Hz stationary stream produced ${stream.length} samples in 1.6s`);
+    assert.ok(stream.every(value => value.finger.pivot.x === pivot.x && value.finger.pivot.y === pivot.y));
+    assert.equal(await finger(a).getAttribute('data-finger-count'), '1', 'The sender does not draw a duplicate network echo.');
+    await a.locator('.video-viewport').screenshot({path: 'test-artifacts/pointing-finger.png'});
+    await b.locator('.video-viewport').screenshot({path: 'test-artifacts/pointing-finger-shared.png'});
+    await a.mouse.down();
+    await until(async () => await b.evaluate(() => window.fingerAudio.taps) === 1);
+    assert.equal(await a.evaluate(() => window.fingerAudio.taps), 1, 'Local tap plays once without its echoed sound.');
+    assert.equal(await a.evaluate(() => window.fingerAudio.slides), 0, 'Holding still never slides.');
+    for (let i = 0; i < 12; i++) {
+        await a.mouse.move(at(.65 + i * .015, .4 + i * .008).x, at(.65 + i * .015, .4 + i * .008).y);
+        await a.waitForTimeout(18);
+    }
+    await until(async () => await b.evaluate(() => window.fingerAudio.slides) > 0);
+    assert.ok(await a.evaluate(() => window.fingerAudio.slides) > 0);
+    await until(async () => await a.evaluate(() => window.fingerAudio.active) === 0 && await b.evaluate(() => window.fingerAudio.active) === 0);
+    await a.mouse.up();
+    await until(async () => await finger(a).getAttribute('data-pressed') === 'false');
+    // Mute applies only to this viewer; moving a held finger still streams to everyone.
+    await b.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
+    const mutedTaps = await b.evaluate(() => window.fingerAudio.taps);
+    await a.mouse.click(at(.6, .35).x, at(.6, .35).y);
+    await until(async () => await a.evaluate(() => window.fingerAudio.taps) === 2);
+    await a.waitForTimeout(150);
+    assert.equal(await b.evaluate(() => window.fingerAudio.taps), mutedTaps);
+    await a.keyboard.press('Escape');
+    await until(async () => await finger(b).count() === 0);
+    assert.equal(await fingerButton(a).getAttribute('aria-pressed'), 'false');
+    assert.ok(!instance.reactions.rooms.has('lobby'));
+
+    // Each viewer owns a separate finger; switching reactions off withdraws just that finger.
+    await fingerButton(a).click();
+    await a.mouse.move(at(.4, .25).x, at(.4, .25).y);
+    await fingerButton(b).click();
+    const other = await b.locator('.video-viewport').boundingBox();
+    await b.mouse.move(other.x + other.width * .7, other.y + other.height * .2);
+    await until(async () => await finger(a).getAttribute('data-finger-count') === '2');
+    await b.getByRole('switch', {name: 'Enable reactions on this device'}).click();
+    await until(async () => await finger(a).getAttribute('data-finger-count') === '1');
+    assert.equal(await finger(b).count(), 0);
+    await a.mouse.move(rect.x - 5, rect.y + 10);
+    await until(() => !instance.reactions.rooms.has('lobby'));
+    assert.equal(instance.rooms.get('lobby').playback.revision, 0);
+    assert.deepEqual(errors, []);
+});
+
 test('Biden wanders in sync with local audio controls, reduced motion and no stale replay', {timeout: 60000}, async t => {
     const {instance, url} = await start(t, {maxTranscoders: 0});
     instance.rooms.create('Quiet room');

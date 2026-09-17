@@ -1,6 +1,6 @@
 # Helltube
 
-A Svelte 5 + Node.js watch-together app. Every room has one authoritative playback clock, a collaborative queue, and a shared two-second HLS stream. No full YouTube download is required before playback.
+A Svelte 5 + Node.js watch-together app. Every room has one authoritative playback clock, a collaborative queue, and a shared two-second HLS stream for videos. Desktop shares use low-latency WebRTC. No full YouTube download is required before playback.
 
 ## Run locally
 
@@ -36,11 +36,44 @@ Open **http://127.0.0.1:3000**. To listen on the LAN, set `$env:HOST = '0.0.0.0'
 
 ## Desktop sharing
 
-Open a room, choose **Share desktop**, then **Choose screen to share**. The browser picker lets you select an entire display, a window, or a tab. Audio is optional: enable **Share audio** to include sound, or share video only. The sharing status shows whether audio is included. Chrome/Edge tab audio is an alternative when your browser or operating system cannot capture window/display audio; window sharing can include system-wide sound. No extension is required. Sharing requires HTTPS (or localhost for development), browser screen-capture permission, a compatible WebM/VP8 MediaRecorder (with Opus for audio), and server FFmpeg.
+Open a room, choose **Share desktop**, then **Choose screen to share**. The browser picker lets you select an entire display, a window, or a tab. Audio is optional: enable **Share audio** to include sound, or share video only. The sharing status shows whether audio is included. Chrome/Edge tab audio is an alternative when your browser or operating system cannot capture window/display audio; window sharing can include system-wide sound. No extension is required. Sharing requires HTTPS (or localhost), browser screen-capture permission, and WebRTC. Desktop sharing works without FFmpeg or MediaRecorder.
 
-Sharing starts immediately for everyone, including people joining later. The current video is placed first in the queue at its interrupted position; stopping the share returns to that queue. When audio is included, the sender's player stays muted to prevent feedback without changing saved volume preferences. Live shares cannot be paused, sought, or replayed from history. Use **Stop sharing**, the browser's stop button, or the room's skip button to end the share. Leaving the room, signing out, disconnecting, or losing video capture also stops it; reconnecting requires a fresh screen selection. An audio track ending does not stop the video share. Automatic frontend updates wait until sharing ends.
+Sharing starts for everyone, including people joining later. The current video is placed first in the queue at its interrupted position; stopping the share returns to that queue. The sender sees a muted local preview without changing saved volume preferences. Live shares cannot be paused, sought, or replayed from history. Use **Stop sharing**, the browser's stop button, or the room's skip button to end the share. Leaving the room, signing out, disconnecting, or losing video capture also stops it; reconnecting requires a fresh screen selection. An audio track ending does not stop the video share. Automatic frontend updates wait until sharing ends.
 
-Video and audio travel together over the authenticated room WebSocket and are converted to the existing encrypted HLS stream (up to 720p, with several seconds of buffering). This is view-only sharing, not remote keyboard/mouse control. Temporary segments count toward `MAX_STORAGE_BYTES` and are removed when sharing ends. Shares have a four-hour limit; a stalled sender or overloaded connection is stopped instead of accumulating an unlimited buffer. The existing `/ws` proxy route supports capture with both local and Worker deployments. With a Worker frontend, desktop playlists, segments, and keys play directly from metal using scoped grants, like uploaded video; desktop content never enters the shared Worker cache.
+Desktop video and audio travel from the sharer to metal **once**, over one WebRTC connection. A native [mediasoup forwarding server (SFU)](https://mediasoup.org/documentation/v3/overview/) in the backend forwards the encoded tracks to each viewer. Each browser-to-metal connection is encrypted with DTLS-SRTP; metal terminates that encryption, so this is not end-to-end encryption between participants. Only connection negotiation uses the authenticated room WebSocket, including with a Worker frontend. Capture requests up to 1080p/30fps; the browser negotiates codecs and adapts to its connection to metal. No recording chunks, server transcoding, HLS segments, storage, or shared playback-clock corrections are involved. This is view-only sharing, not remote keyboard/mouse control. Shares have a four-hour limit. Viewers retry failed connections twice, then show an error with a manual retry button.
+
+The sharer publishes one video encoding with a 6 Mbps ceiling and optional Opus audio with a 128 kbps ceiling, plus transport overhead. Joining or reconnecting viewers do not add uploads or encoders on the sharer. Metal's outbound bandwidth grows with the number of viewers; the default limit is 50 remote viewers per share (`DESKTOP_MAX_VIEWERS`). All viewers receive the same encoding, so slower viewers cannot select an independently encoded lower-quality layer. One native worker serves the desktop rooms; this is not a clustered streaming service. Participants connect to metal rather than exchanging peer network addresses.
+
+### Metal media connectivity and TURN
+
+The media listener defaults to **127.0.0.1:44444 over UDP and TCP**, independently of the HTTP `HOST` and `PORT`. This works for local development. For remote viewers, explicitly configure `DESKTOP_LISTEN_IP` to an interface on metal and `DESKTOP_ANNOUNCED_ADDRESS` to the IP address or DNS-only hostname reachable by browsers. A wildcard bind (`0.0.0.0` or `::`) requires an announced address. Set `DESKTOP_PORT` if using another port, and arrange matching firewall/NAT access to that UDP/TCP port. These are deployment settings; bootstrap does not enable a public media listener or change firewall rules.
+
+UDP is preferred, with ICE-TCP fallback on the same port. This is a separate WebRTC listener, not HTTP: nginx's HTTPS proxy and the Cloudflare Worker do not carry its media. An announced public address must route to the configured listener, using the same external port. An IPv4 literal avoids DNS resolution differences between browsers. Restart metal after changing settings, and deploy matching frontend/backend versions together; older peer-to-peer clients must reload.
+
+For Firefox during local development, bind media to your machine's actual LAN address instead of loopback. Firefox's default ICE interface selection can exclude loopback even when the webpage is on localhost. No browser preference changes or viewer microphone permissions are needed with a reachable metal address.
+
+The native worker is installed by `npm install`/`npm ci`. Mediasoup normally downloads a prebuilt binary; if unavailable for the platform it builds one, requiring Python 3.10+ with pip and a supported C++ toolchain. The Ubuntu bootstrap installs those build prerequisites. See [mediasoup installation requirements](https://mediasoup.org/documentation/v3/mediasoup/installation/).
+
+With a reachable metal media listener, `DESKTOP_ICE_SERVERS=[]` works without a third-party discovery service. Optional authenticated TURN helps browsers on networks that block direct access to metal's media port. TURN forwards the browser-to-metal connection; metal still handles fan-out to viewers. STUN alone does not provide this fallback.
+
+Example backend environment, using your own coturn service with REST authentication (`use-auth-secret`, matching `static-auth-secret`, and a configured realm):
+
+```powershell
+$env:DESKTOP_ICE_SERVERS = '[{"urls":"stun:relay.example.net:3478"},{"urls":["turn:relay.example.net:3478?transport=udp","turn:relay.example.net:3478?transport=tcp","turns:relay.example.net:5349?transport=tcp"]}]'
+$env:DESKTOP_TURN_SECRET = '<coturn-static-auth-secret>'
+# Optional: force the browser-to-metal connection through TURN.
+$env:DESKTOP_ICE_TRANSPORT_POLICY = 'relay'
+```
+
+Restart the backend after configuring it. TURN requires a reachable DNS-only hostname, its listening ports plus configured relay port range open in the firewall, and a trusted TLS certificate for `turns:`. Configure UDP first for latency and TCP/TLS fallback for restrictive networks. The backend issues socket-specific, five-hour TURN credentials to authenticated participants; the shared secret never reaches browsers. Providers offering static credentials can instead specify `username` and `credential` on each TURN entry and omit `DESKTOP_TURN_SECRET` (those credentials are sent to participating browsers). On managed Ubuntu installations, the service optionally reads `/etc/helltube/desktop.env` after its main environment file. Put the media listener and optional TURN settings there, protect it with root ownership and mode `600`, and restart the service. Bootstrap preserves this file and does not create it. TURN infrastructure is provisioned separately from the app; see [coturn's configuration reference](https://github.com/coturn/coturn/blob/master/README.turnserver).
+
+### Why desktop delivery differs from video playback
+
+The implementation follows the real-time transport approach described by [Discord's Go Live engineering overview](https://discord.com/blog/how-it-all-goes-live-an-overview-of-discords-streaming-technology): adapt encoding to congestion instead of buffering seconds of video, with a forwarding backend handling viewers. [RustDesk](https://rustdesk.com/docs/en/self-host/) uses signaling to establish direct connections and falls back to a relay. [AnyDesk](https://anydesk.com/en/performance) uses its proprietary DeskRT codec for desktop updates; that native codec is not a browser API. WebRTC provides the browser-compatible capture-track transport, codec negotiation, congestion control, and encryption we need. Mediasoup forwards packets without decoding or re-encoding them; HLS remains the delivery mechanism for queued videos.
+
+`npm run test:desktop` exercises real browser encoding/decoding through the native metal relay with a synthetic screen and tone, including optional audio, late viewers, multiple viewers, reconnects, and Worker signaling with FFmpeg unavailable. It checks that additional viewers share one publisher connection and that media flows through metal's transports. A binary timestamp rendered into captured pixels measures capture-to-decoded-frame delay and enforces a local p95 below one second. This measures the local browser/relay pipeline, not Internet/TURN performance or OS capture latency; validate TURN separately using `DESKTOP_ICE_TRANSPORT_POLICY=relay` across your deployed networks.
+
+The suite also checks HLS → desktop → HLS playback and saved-position recovery (that test requires FFmpeg). For optional Chrome-to-Firefox coverage, install the Playwright Firefox browser (`npx playwright install firefox`), set `DESKTOP_TEST_FIREFOX=true`, and set `DESKTOP_TEST_LISTEN_IP` to your machine's actual LAN IPv4 address (Firefox excludes loopback candidates). Test media listeners use temporary ports on that interface and close when the suite finishes. Set `DESKTOP_TEST_TCP=true` to restrict relay candidates to TCP and test that fallback.
 
 ## Cloudflare Worker frontend + bare-metal backend
 
@@ -50,7 +83,8 @@ Video and audio travel together over the authenticated room WebSocket and are co
 Browser → Worker: frontend, API, WebSocket, remote-media playlists
 Browser → Worker cache: encrypted YouTube, Twitch VOD, and hosted-media segments (90 seconds)
 Worker → bare metal: live authorization before every cached segment
-Browser → bare metal directly: HLS keys, upload bytes, uploaded-video and desktop HLS
+Browser → bare metal directly: HLS keys, upload bytes, uploaded-video HLS
+Sharer → metal SFU → viewers: desktop WebRTC video/audio
 Browser → bare metal on slow Cloudflare delivery: proxied playlists and segments
 ```
 
@@ -407,6 +441,13 @@ Environment variables (set in PowerShell or your service manager; `.env` is not 
 | `YTDLP_COOKIES_FILE` | empty | Optional private Netscape YouTube cookies file; backend-readable path, never the cookie contents (bootstrap configures this via systemd credentials) |
 | `YOUTUBE_PROXY` | empty | Optional HTTP proxy origin used by both yt-dlp and YouTube FFmpeg downloads; bootstrap sets its WireGuard-isolated proxy automatically |
 | `MAX_TRANSCODERS` | `4` | Global concurrent media jobs |
+| `DESKTOP_LISTEN_IP` | `127.0.0.1` | Local interface for the native WebRTC media listener; configure explicitly for remote viewers |
+| `DESKTOP_ANNOUNCED_ADDRESS` | empty | Browser-reachable IP/hostname for metal; required with a wildcard bind, no scheme or port |
+| `DESKTOP_PORT` | `44444` | Shared UDP/TCP media port, separate from HTTP; forward the same external port if behind NAT |
+| `DESKTOP_ICE_SERVERS` | `[]` | Optional browser STUN/TURN entries as a JSON array; TURN helps restricted networks reach metal |
+| `DESKTOP_TURN_SECRET` | empty | coturn REST shared secret used to issue expiring credentials; backend only |
+| `DESKTOP_ICE_TRANSPORT_POLICY` | `all` | `all` allows browser-to-metal connections and TURN fallback; `relay` requires TURN en route to metal |
+| `DESKTOP_MAX_VIEWERS` | `50` | Maximum remote viewers per desktop share; viewers consume metal bandwidth rather than extra sharer uploads |
 | `MAX_UPLOAD_BYTES` | `10737418240` | Maximum individual upload (10 GiB) |
 | `MAX_STORAGE_BYTES` | `32212254720` | Shared upload/media budget (30 GiB; checked every 10s) |
 | `MAX_USER_STORAGE_BYTES` | Half of `MAX_STORAGE_BYTES` (15 GiB by default) | Per-account total declared upload bytes, including completed sources still retained by rooms; reserved atomically before creating files |

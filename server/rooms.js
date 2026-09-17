@@ -247,8 +247,10 @@ export class Rooms extends EventEmitter {
   tick() {
     for (const room of this.rooms.values()) {
       const item = room.current;
-      if (item?.kind === 'desktop' && item.media && this.position(room) < item.media.bufferedUntil - 8) {
-        this.stamp(room, Math.max(0, item.media.bufferedUntil - 4), false);
+      if (item?.kind === 'desktop') {
+        this.persist(room);
+        this.emit('state', room);
+        continue;
       }
       const elapsed = room.playback.paused ? 0 : Math.max(0, (this.now() - room.playback.updatedAt) / 1000);
       const position = sponsorPosition(item, room.playback.position, elapsed);

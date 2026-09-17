@@ -94,6 +94,22 @@ test('brief response delays survive and healthy long-lived sessions retain their
     assert.equal(h.state().joined, true);
 });
 
+test('finger snapshots preserve the local socket identity, ignore other rooms and reset on reconnect', t => {
+    const h = fixture(t);
+    const ws = h.sockets[0];
+    ws.open(); ws.room();
+    ws.receive({type: 'reactions:state', roomId: 'lobby', clientId: 'self', ball: null, fingers: [], serverTime: Date.now()});
+    const finger = {clientId: 'other', x: .4, y: .2, pivot: {x: -.1, y: .2}, pressed: true, taps: 1};
+    ws.receive({type: 'reactions:state', roomId: 'lobby', ball: null, fingers: [finger], serverTime: Date.now()});
+    assert.equal(get(h.client.reactions).clientId, 'self');
+    assert.deepEqual(get(h.client.reactions).fingers, [finger]);
+    ws.receive({type: 'reactions:state', roomId: 'elsewhere', fingers: [], serverTime: Date.now()});
+    assert.deepEqual(get(h.client.reactions).fingers, [finger]);
+    ws.fail();
+    assert.deepEqual(get(h.client.reactions).fingers, []);
+    assert.equal(get(h.client.reactions).clientId, null);
+});
+
 test('hidden tabs and suspended callbacks probe before applying a fresh visible deadline', t => {
     const h = fixture(t);
     const ws = h.sockets[0];

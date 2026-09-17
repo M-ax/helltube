@@ -516,6 +516,7 @@ User=helltube
 Group=helltube
 WorkingDirectory=/opt/helltube/app
 EnvironmentFile=/etc/helltube/helltube.env
+EnvironmentFile=-/etc/helltube/desktop.env
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/var/lib/helltube
 EOF
@@ -681,7 +682,7 @@ main() {
     apt-get update
   fi
   apt-get install -y --no-install-recommends ca-certificates curl xz-utils openssl \
-    git rsync ffmpeg python3 python3-venv nginx certbot python3-certbot-dns-cloudflare util-linux passwd
+    git rsync ffmpeg python3 python3-venv python3-pip build-essential nginx certbot python3-certbot-dns-cloudflare util-linux passwd
   local YOUTUBE_VPN_ENABLED=no
   configure_youtube_vpn "$secrets/youtube-wireguard.conf" "$source_dir/scripts/wireguard.py"
   if [[ $YOUTUBE_VPN_ENABLED == yes ]]; then

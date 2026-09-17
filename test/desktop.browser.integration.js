@@ -2,9 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:net';
 import {randomBytes} from 'node:crypto';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import path from 'node:path';
-import {chromium} from 'playwright';
+import {chromium, firefox} from 'playwright';
 import {start, until} from './helpers.js';
+import {makeItem} from '../server/rooms.js';
+
+const firefoxReceiver = process.env.DESKTOP_TEST_FIREFOX === 'true';
+const tcpOnly = process.env.DESKTOP_TEST_TCP === 'true';
 
 async function join(page, url) {
     await page.goto(url);
@@ -25,9 +31,18 @@ async function availablePort() {
 
 for (const split of [false, true]) {
 for (const withAudio of [false, true]) {
-test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video only'} to a late viewer (${split ? 'Worker + metal' : 'local'})`, {timeout: 90000}, async t => {
-    const backend = await start(t);
+test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video only'} to a late viewer (${split ? 'Worker + metal' : 'local'}${firefoxReceiver && split && !withAudio ? ', Firefox receiver' : ''})`, {timeout: 90000}, async t => {
+    const backend = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', desktopIceServers: '[]',
+        ...(process.env.DESKTOP_TEST_LISTEN_IP ? {desktopListenIp: process.env.DESKTOP_TEST_LISTEN_IP} : {})});
     const {instance} = backend;
+    if (tcpOnly) {
+        const connection = instance.desktop.connection.bind(instance.desktop);
+        t.mock.method(instance.desktop, 'connection', (...args) => {
+            const value = connection(...args);
+            value.transportOptions.iceCandidates = value.transportOptions.iceCandidates.filter(candidate => candidate.protocol === 'tcp');
+            return value;
+        });
+    }
     let url = backend.url;
     if (split) {
         const {unstable_dev} = await import('wrangler');
@@ -46,8 +61,9 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
         });
         t.after(() => worker.stop());
     }
-    assert.ok(instance.capabilities.ffmpeg, 'FFmpeg is required for desktop integration');
-    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--autoplay-policy=no-user-gesture-required']});
+    assert.equal(instance.capabilities.ffmpeg, false, 'Desktop sharing must work without FFmpeg');
+    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--autoplay-policy=no-user-gesture-required',
+        '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows']});
     t.after(() => browser.close());
     const sender = await browser.newPage();
     const errors = [];
@@ -61,8 +77,13 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     await sender.addInitScript(withAudio => {
         window.captureAudio = withAudio;
         window.captureTracks = [];
-        // Substitute only the OS picker. Exercise the real MediaRecorder, socket,
-        // FFmpeg, encrypted HLS, and receiving browser decoder.
+        window.desktopPeers = [];
+        const Peer = window.RTCPeerConnection;
+        window.RTCPeerConnection = class extends Peer {
+            constructor(config) { super(config); window.desktopPeers.push(this); }
+        };
+        // Substitute only the OS picker. Exercise real WebRTC capture encoding,
+        // authenticated signaling (including Worker proxy), and browser decoding.
         navigator.mediaDevices.getDisplayMedia = async options => {
             window.captureOptions = options;
             const canvas = document.createElement('canvas');
@@ -72,6 +93,11 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
             function draw() {
                 context.fillStyle = '#ff0000'; context.fillRect(0, 0, 640, 360);
                 context.fillStyle = '#ffffff'; context.fillRect(frame++ % 500, 250, 40, 40);
+                const timestamp = Date.now() % 2 ** 24;
+                for (let bit = 0; bit < 24; bit++) {
+                    context.fillStyle = timestamp & (1 << bit) ? '#ffffff' : '#000000';
+                    context.fillRect(bit * 20, 0, 20, 20);
+                }
                 window.captureAnimation = requestAnimationFrame(draw);
             }
             draw();
@@ -93,19 +119,33 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
     await sender.getByRole('button', {name: 'Choose screen to share'}).click();
     await sender.getByRole('button', {name: 'Stop sharing', exact: true}).waitFor();
-    await until(() => instance.rooms.get('lobby').current?.media?.bufferedUntil >= 4, 20000);
+    await until(() => instance.rooms.get('lobby').current?.transport === 'mediasoup' && [...instance.desktop.sessions.values()][0]?.ready);
     const item = instance.rooms.get('lobby').current;
-    const job = instance.media.jobs.get(item.id);
-    assert.ok(job);
+    assert.equal(instance.media.jobs.size, 0);
+    assert.equal(item.media, null);
     assert.equal(item.kind, 'desktop');
-    assert.equal(await sender.locator('video').evaluate(video => video.muted), withAudio);
+    assert.equal(await sender.locator('video').evaluate(video => video.muted), true);
     assert.match(await sender.locator('.desktop-sharing-status').textContent(), withAudio ? /Audio included/ : /Video only/);
-    const viewer = await browser.newPage();
+    const receiver = firefoxReceiver && split && !withAudio ? await firefox.launch({headless: true}) : browser;
+    if (receiver !== browser) t.after(() => receiver.close());
+    const viewer = await receiver.newPage();
     watch(viewer);
     viewer.on('pageerror', error => errors.push(error.message));
     await join(viewer, url);
-    await until(() => viewer.locator('video').evaluate(video => video.readyState >= 2 && video.videoWidth > 0 && !video.paused && video.currentTime > 0), 20000);
-    // Room alignment can briefly seek between readiness and pixel sampling.
+    await until(() => viewer.locator('video').evaluate(video => video.readyState >= 2 && video.videoWidth > 0 && !video.paused && video.currentTime > 0), 20000)
+        .catch(async error => {
+            t.diagnostic(await viewer.locator('.video-viewport').innerText());
+            t.diagnostic(JSON.stringify(errors));
+            for (const session of instance.desktop.sessions.values()) for (const peer of session.viewers.values()) {
+                t.diagnostic(JSON.stringify({ice: peer.transport.iceState, dtls: peer.transport.dtlsState,
+                    stats: await peer.transport.getStats(), consumers: await Promise.all([...peer.consumers.values()].map(c => c.getStats()))}));
+            }
+            throw error;
+        });
+    assert.equal(await viewer.locator('video').evaluate(video => video.srcObject instanceof MediaStream && !video.getAttribute('src')), true);
+    assert.equal(await sender.evaluate(() => window.desktopPeers.find(peer => peer.connectionState !== 'closed').getSenders()
+        .find(sender => sender.track?.kind === 'video').getParameters().encodings[0].maxBitrate), 6_000_000);
+    if (tcpOnly) assert.equal([...instance.desktop.sessions.values()][0].publisher.transport.iceSelectedTuple.protocol, 'tcp');
     const pixel = await until(() => viewer.locator('video').evaluate(video => {
         if (video.readyState < 2) return false;
         const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
@@ -118,7 +158,7 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
       const audioPeak = await viewer.locator('video').evaluate(async video => {
         const audio = new AudioContext(); await audio.resume();
         const analyser = audio.createAnalyser(); analyser.fftSize = 2048;
-        const source = audio.createMediaElementSource(video);
+        const source = audio.createMediaStreamSource(video.srcObject);
         source.connect(analyser); analyser.connect(audio.destination);
         const values = new Float32Array(analyser.fftSize);
         let peak = 0;
@@ -132,22 +172,117 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     });
       assert.ok(audioPeak > 0.1, `Captured tone was audible in the receiving browser: ${audioPeak}`);
     }
-    assert.equal(responses.some(response => response.status >= 400), false, JSON.stringify(responses.filter(response => response.status >= 400)));
-    if (split) {
-        const segments = responses.filter(response => response.path.endsWith('.ts'));
-        assert.ok(segments.length > 0);
-        assert.ok(segments.every(response => response.origin === backend.url.replace('127.0.0.1', 'localhost') && response.path.startsWith('/direct/media/')));
-        assert.equal(await viewer.locator('.playback-health').getAttribute('data-delivery'), 'metal');
-    }
+    const latency = await viewer.locator('video').evaluate(async video => {
+        const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+        const context = canvas.getContext('2d', {willReadFrequently: true});
+        const samples = [];
+        for (let i = 0; i < 25; i++) {
+            await new Promise(resolve => setTimeout(resolve, 80));
+            context.drawImage(video, 0, 0, 640, 360);
+            let timestamp = 0;
+            for (let bit = 0; bit < 24; bit++) {
+                if (context.getImageData(bit * 20 + 10, 10, 1, 1).data[0] > 128) timestamp += 2 ** bit;
+            }
+            samples.push((Date.now() - timestamp + 2 ** 24) % 2 ** 24);
+        }
+        return samples.sort((a, b) => a - b);
+    });
+    t.diagnostic(`Metal WebRTC capture-to-decoded-frame latency: median ${latency[12]}ms, p95 ${latency[23]}ms`);
+    assert.ok(latency[23] < 1000, `Local desktop latency must remain subsecond: ${latency}`);
+    assert.deepEqual(responses, [], 'Desktop must not request any HLS media');
     assert.equal(await viewer.getByRole('slider', {name: 'Seek shared video'}).isDisabled(), true);
     assert.equal(await viewer.getByRole('button', {name: 'Pause for everyone'}).isDisabled(), true);
-    await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
+    if (!split && withAudio) {
+        const extra = await browser.newPage();
+        watch(extra);
+        extra.on('pageerror', error => errors.push(error.message));
+        await join(extra, url);
+        await until(() => extra.locator('video').evaluate(video => video.srcObject?.getVideoTracks().length && video.readyState >= 2 && !video.paused));
+        const session = [...instance.desktop.sessions.values()][0];
+        assert.equal(session.viewers.size, 2);
+        const publisherId = session.publisher.transport.id;
+        assert.equal(await sender.evaluate(() => window.desktopPeers.filter(peer => peer.connectionState !== 'closed').length), 1,
+            'Additional viewers must not create additional publisher WebRTC connections');
+        assert.equal(session.producers.size, 2, 'One video and one audio producer feed every viewer');
+        assert.ok([...session.viewers.values()].every(peer => peer.consumers.size === 2));
+        const relayStats = await session.publisher.transport.getStats();
+        assert.ok(relayStats[0].rtpBytesReceived > 0, 'Metal receives the encoded desktop');
+        for (const peer of session.viewers.values()) {
+            const stats = await peer.transport.getStats();
+            assert.ok(stats[0].rtpBytesSent > 0, 'Metal forwards encoded media independently to each viewer');
+        }
+        const previousPeers = [...session.viewers.keys()];
+        await viewer.reload();
+        await until(() => viewer.locator('video').evaluate(video => video.srcObject && video.readyState >= 2 && !video.paused));
+        assert.equal(session.viewers.size, 2);
+        assert.equal([...session.viewers.keys()].filter(id => !previousPeers.includes(id)).length, 1);
+        assert.equal(session.publisher.transport.id, publisherId);
+        assert.equal(await sender.evaluate(() => window.desktopPeers.filter(peer => peer.connectionState !== 'closed').length), 1);
+        await extra.close();
+        await until(() => session.viewers.size === 1);
+        // Simulate the browser's stop-capture notification, not the app button.
+        await sender.evaluate(() => {
+            const video = window.captureTracks.find(track => track.kind === 'video');
+            video.stop(); video.dispatchEvent(new Event('ended'));
+        });
+    } else await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
     await until(() => instance.rooms.get('lobby').current === null && instance.desktop.sessions.size === 0);
     assert.equal(await sender.evaluate(() => window.captureTracks.every(track => track.readyState === 'ended')), true);
     assert.equal(instance.rooms.get('lobby').history.length, 0);
     assert.equal(instance.media.jobs.has(item.id), false);
-    await job.cleanup;
+    const relayDump = await instance.desktop.relay.webRtcServer.dump();
+    assert.deepEqual(relayDump.webRtcTransportIds, [], 'Stopping releases all metal transports');
+    await until(() => viewer.locator('video').evaluate(video => video.srcObject === null));
+    assert.deepEqual(responses, [], 'Multiple viewers and reconnects must also bypass HLS');
     assert.deepEqual(errors, []);
 });
 }
 }
+
+test('desktop WebRTC interrupts HLS and returns both viewers to the saved video position', {timeout: 60000}, async t => {
+    const {instance, url, dir} = await start(t);
+    const sample = path.join(dir, 'desktop-resume.mp4');
+    await promisify(execFile)(instance.media.config.ffmpeg, ['-v', 'error', '-y', '-f', 'lavfi', '-i',
+        'color=c=blue:s=640x360:r=10', '-t', '45', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '20',
+        '-pix_fmt', 'yuv420p', '-movflags', '+faststart', sample]);
+    instance.app.get('/desktop-resume.mp4', (_req, res) => res.sendFile(sample, {dotfiles: 'allow'}));
+    t.mock.method(instance.youtube, 'resolve', async () => ({duration: 45, inputs: [{url: `${url}/desktop-resume.mp4`, headers: {}}]}));
+    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--autoplay-policy=no-user-gesture-required']});
+    t.after(() => browser.close());
+    const sender = await browser.newPage(), viewer = await browser.newPage();
+    const errors = [];
+    for (const page of [sender, viewer]) page.on('pageerror', error => errors.push(error.message));
+    await sender.addInitScript(() => {
+        navigator.mediaDevices.getDisplayMedia = async () => {
+            const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+            const context = canvas.getContext('2d');
+            context.fillStyle = 'red'; context.fillRect(0, 0, 640, 360);
+            const stream = canvas.captureStream(10);
+            const timer = setInterval(() => context.fillRect(0, 0, 640, 360), 100);
+            window.addEventListener('pagehide', () => clearInterval(timer), {once: true});
+            return stream;
+        };
+    });
+    await join(sender, url); await join(viewer, url);
+    const room = instance.rooms.get('lobby');
+    const item = makeItem({kind: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk'}, {title: 'Resume fixture', duration: 45});
+    instance.rooms.add(room, [item]);
+    await until(() => item.media?.bufferedUntil >= 20);
+    instance.rooms.stamp(room, 12, false); instance.rooms.changed(room);
+    for (const page of [sender, viewer]) await until(() => page.locator('video').evaluate(video => video.currentTime >= 12 && !video.paused));
+    await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
+    await sender.getByRole('button', {name: 'Choose screen to share'}).click();
+    await until(() => room.current?.kind === 'desktop');
+    const resumeAt = room.queue[0].resumeAt;
+    assert.ok(resumeAt >= 12);
+    await until(() => viewer.locator('video').evaluate(video => video.srcObject && video.readyState >= 2 && !video.paused));
+    await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
+    await until(() => room.current?.id === item.id);
+    for (const page of [sender, viewer]) {
+        await until(() => page.locator('video').evaluate((video, resume) => video.srcObject === null &&
+            video.readyState >= 2 && !video.paused && video.currentTime >= resume - 0.75, resumeAt));
+        assert.equal(await page.getByRole('button', {name: 'Pause for everyone'}).isDisabled(), false);
+    }
+    assert.equal(room.history.some(item => item.kind === 'desktop'), false);
+    assert.deepEqual(errors, []);
+});

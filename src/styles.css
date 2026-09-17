@@ -1076,6 +1076,9 @@ ul, ol {
     pointer-events: none;
 }
 
+.video-viewport.finger-armed { cursor: none; touch-action: none; user-select: none; }
+.video-viewport.finger-armed .player-controls { cursor: auto; }
+
 .video-canvas.crt-flames {
     z-index: 1;
     background: transparent;

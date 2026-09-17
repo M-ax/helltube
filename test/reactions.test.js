@@ -2,6 +2,80 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Reactions} from '../server/reactions.js';
 import {start, until} from './helpers.js';
+import {fingerPivot, POINTER_TICK_MS} from '../shared/reaction-pointer.js';
+import {setTimeout as sleep} from 'node:timers/promises';
+
+test('finger pivots select the closest physical edge and stay outside the player', () => {
+    for (const [x, y, edge] of [[.01, .4, 'left'], [.99, .4, 'right'], [.6, .01, 'top'], [.6, .99, 'bottom']]) {
+        const pivot = fingerPivot(x, y, 1000, 600);
+        assert.ok(edge === 'left' ? pivot.x < 0 : edge === 'right' ? pivot.x > 1 : edge === 'top' ? pivot.y < 0 : pivot.y > 1);
+    }
+    assert.ok(fingerPivot(.15, .2, 1000, 400).y < 0, 'Edge selection accounts for the player aspect ratio.');
+});
+
+test('fingers validate state, lock the entry pivot, preserve other props, and expire cleanly', () => {
+    let now = 1000;
+    const sent = [];
+    const service = new Reactions({now: () => now, broadcast: (roomId, message) => sent.push(message)});
+    const finger = {x: .6, y: .4, pivot: {x: -.1, y: .3}, pressed: false, taps: 0};
+    for (const invalid of [{...finger, x: NaN}, {...finger, pivot: {x: .5, y: .5}},
+        {...finger, pivot: {x: -5, y: 0}}, {...finger, pressed: 1}, {...finger, taps: -1}]) {
+        assert.throws(() => service.pointer('one', 'a', {x: null, y: null, finger: invalid}), {status: 400});
+    }
+    assert.equal(service.rooms.size, 0);
+    service.pointer('one', 'a', {x: null, y: null, finger}, 'user-a');
+    service.pointer('one', 'b', {x: null, y: null, finger}, 'user-b');
+    service.pointer('one', 'a', {x: null, y: null, finger: {...finger, x: .8, pivot: {x: 1.1, y: .3}, pressed: true, taps: 1}}, 'user-a');
+    const a = service.snapshot('one').fingers.find(value => value.clientId === 'a');
+    assert.deepEqual(a.pivot, finger.pivot);
+    assert.equal(a.x, .8);
+    assert.equal(a.userId, 'user-a');
+    const tap = sent.find(value => value.kind === 'fingertap');
+    assert.equal(tap.clientId, 'a');
+    service.pointer('one', 'a', {x: null, y: null, finger: {...finger, taps: 1}}, 'user-a');
+    assert.equal(sent.filter(value => value.kind === 'fingertap').length, 1, 'Repeated state never repeats a tap.');
+    service.react('one', 'user-a', {kind: 'beachball', enabled: true});
+    service.react('one', 'user-a', {kind: 'beachball', enabled: false});
+    assert.equal(service.snapshot('one').fingers.length, 2);
+    service.leave('one', 'a');
+    assert.equal(sent.at(-1).fingers.length, 1);
+    now += 1501;
+    service.tick();
+    assert.equal(sent.at(-1).fingers.length, 0);
+    assert.equal(service.rooms.size, 0);
+});
+
+test('the existing cursor channel sustains 60Hz, shares fingers, isolates rooms and restores live state', async t => {
+    const {instance, connect} = await start(t, {maxTranscoders: 0});
+    const quiet = instance.rooms.create('Quiet finger room');
+    const a = await connect();
+    const b = await connect();
+    const outsider = await connect();
+    for (const [ws, roomId] of [[a, 'lobby'], [b, 'lobby'], [outsider, quiet.id]]) ws.send(JSON.stringify({type: 'join', roomId}));
+    await until(() => a.messages.some(value => value.type === 'reactions:state'));
+    const clientId = a.messages.find(value => value.type === 'reactions:state').clientId;
+    const revision = instance.rooms.get('lobby').playback.revision;
+    const begin = performance.now();
+    for (let tick = 0; tick < 120; tick++) {
+        a.send(JSON.stringify({type: 'reaction:pointer', x: null, y: null,
+            finger: {x: tick / 120, y: .3, pivot: {x: -.1, y: .3}, pressed: tick >= 60, taps: tick >= 60 ? 1 : 0},
+            clientId: 'forged', userId: 'forged', roomId: quiet.id}));
+        await sleep(Math.max(0, begin + (tick + 1) * POINTER_TICK_MS - performance.now()));
+    }
+    assert.deepEqual(a.messages.filter(value => value.type === 'error'), [], '60Hz bypasses the ordinary 40-command ceiling.');
+    const states = b.messages.filter(value => value.type === 'reactions:state' && value.fingers?.length);
+    assert.ok(states.length >= 95, `Expected roughly 120 shared ticks, got ${states.length}`);
+    assert.equal(states.at(-1).fingers[0].clientId, clientId);
+    assert.equal(states.at(-1).fingers[0].userId, instance.accounts.users[0].id);
+    assert.ok(!outsider.messages.some(value => value.fingers?.length || value.kind === 'fingertap'));
+    const late = await connect();
+    late.send(JSON.stringify({type: 'join', roomId: 'lobby'}));
+    await until(() => late.messages.some(value => value.fingers?.length));
+    assert.ok(!late.messages.some(value => value.kind === 'fingertap'), 'Joining does not replay a tap.');
+    a.send(JSON.stringify({type: 'reaction:pointer', x: null, y: null}));
+    await until(() => !instance.reactions.rooms.has('lobby'));
+    assert.equal(instance.rooms.get('lobby').playback.revision, revision);
+});
 
 test('reaction service validates inputs, expires pointers and cleans up empty rooms', () => {
     let now = 1000;

@@ -9,6 +9,11 @@ export function startupRows(item, pending, connected) {
         rows.push({id: 'idle', label: 'Awaiting video input', state: 'wait'});
         return rows;
     }
+    if (item?.kind === 'desktop') {
+        rows.push({id: 'desktop', label: 'Connecting to shared desktop', state: connected ? 'busy' : 'wait'});
+        if (item.error) rows.push({id: 'error', label: item.error, state: 'fail'});
+        return rows;
+    }
     const preparation = item ? item.preparation : pending;
     const stage = preparation?.stage;
     const error = item ? item.error : pending?.error;

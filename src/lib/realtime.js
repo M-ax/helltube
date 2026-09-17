@@ -8,7 +8,7 @@ const SESSION_CHECK_TIMEOUT = 10000;
 
 export function createRealtime({onMessage, onSessionEnded, windowTarget = window, documentTarget = document,
     WebSocketImpl = WebSocket, now = () => performance.now(), request = api}) {
-    const emptyReactions = () => ({roomId: null, ball: null, serverTime: 0, events: []});
+    const emptyReactions = () => ({roomId: null, clientId: null, ball: null, fingers: [], serverTime: 0, events: []});
     const reactions = writable(emptyReactions());
     const desktopMessages = writable(null);
     const state = writable({
@@ -209,7 +209,8 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
                 const current = get(state);
                 if (!current.joined || message.roomId !== current.selectedRoomId) return;
                 reactions.update(value => message.type === 'reactions:state'
-                    ? {...value, roomId: message.roomId, ball: message.ball, serverTime: message.serverTime}
+                    ? {...value, roomId: message.roomId, clientId: message.clientId || value.clientId,
+                        ball: message.ball, fingers: message.fingers || [], serverTime: message.serverTime}
                     : {...value, roomId: message.roomId,
                         events: [...value.events.filter(event => event.serverTime > message.serverTime - 2000), message].slice(-40)});
             } else if (message.type === 'overlay') {
@@ -300,12 +301,5 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         open();
     }
 
-    function sendCapture(blob) {
-        const current = get(state);
-        if (!current.joined || current.status !== 'connected' || !socket ||
-            socket.readyState !== WebSocketImpl.OPEN || socket.bufferedAmount + blob.size > 4 * 1024 * 1024) return false;
-        try { socket.send(blob); return true; } catch { reconnect(); return false; }
-    }
-
-    return {state, reactions, desktopMessages, sendCapture, connect, disconnect, join, command, retry};
+    return {state, reactions, desktopMessages, connect, disconnect, join, command, retry};
 }

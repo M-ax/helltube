@@ -230,6 +230,7 @@ function playerHarness(resolveMediaUrl, native = false) {
     'room', 'clockOffset', 'element', 'createBufferHealth', 'isProxyLoadFailure', 'qualityReady', `${sourceLifecycle}
     video = element;
     let connected = true;
+    let live = false;
     let item = room.current;
     let media = item.media;
     const qualities = [];

@@ -300,7 +300,7 @@
                     Window sharing may include all system sound. Sharing starts now and returns to the queue when stopped.</p></div>
             {#if $desktopState.status === 'idle'}
                 <button class="button primary desktop-start" aria-describedby="desktop-help"
-                        disabled={unavailable || !!busy || !!desktopUnavailable || room?.current?.kind === 'desktop'}
+                        disabled={!connected || !room || !!busy || !!desktopUnavailable || room?.current?.kind === 'desktop'}
                         on:click={desktop.start}>Choose screen to share</button>
             {/if}
         </div>

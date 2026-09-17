@@ -97,9 +97,10 @@ export class Media {
     }
   }
 
-  start(item, baseTime, input = null) {
+  start(item, baseTime) {
+    if (item.kind === 'desktop') return; // Desktop media is delivered exclusively over WebRTC.
     const id = randomUUID();
-    const job = { id, item, baseTime, input, dir: path.join(this.dir, id), child: null, done: false, cancelled: false,
+    const job = { id, item, baseTime, dir: path.join(this.dir, id), child: null, done: false, cancelled: false,
       key: randomBytes(16), keyDir: path.join(this.keyDir, id), lastProgress: Date.now(), lastBuffered: baseTime, errors: '' };
     this.jobs.set(item.id, job);
     item.status = 'processing';
@@ -180,8 +181,6 @@ export class Media {
       if (baseTime > 0 && item.duration > 0 && baseTime >= item.duration) {
         throw new Error(`Start time must be before the end of the video (${item.duration} seconds).`);
       }
-    } else if (item.kind === 'desktop') {
-      inputs = [{url: 'pipe:0', headers: {}}];
     } else {
       const upload = this.uploads.get(item.source.uploadId);
       job.inputComplete = upload.complete;
@@ -204,11 +203,6 @@ export class Media {
     const inputArgs = (start) => {
       const result = [];
       for (const input of inputs) {
-        if (item.kind === 'desktop') {
-          result.push('-probesize', '1048576', '-analyzeduration', '1000000',
-            '-protocol_whitelist', 'pipe', '-f', 'webm', '-i', 'pipe:0');
-          continue;
-        }
         if (start > 0) result.push('-ss', String(start));
         if (network.proxy) result.push('-http_proxy', network.proxy);
         const headers = Object.entries(input.headers).filter(([key, value]) =>
@@ -275,11 +269,7 @@ export class Media {
     await new Promise((resolve, reject) => {
       const command = /[\\/]/.test(this.config.ffmpeg) ? path.resolve(this.config.ffmpeg) : this.config.ffmpeg;
       job.child = spawn(command, args, { windowsHide: true, env: network.env,
-        ...(job.clearDir ? {cwd: job.clearDir} : {}), stdio: [job.input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
-      if (job.input) {
-        job.child.stdin.on('error', () => {}); // FFmpeg reports input failures on close.
-        job.input.pipe(job.child.stdin);
-      }
+        ...(job.clearDir ? {cwd: job.clearDir} : {}), stdio: ['ignore', 'pipe', 'pipe'] });
       job.child.stdout.on('data', createProgressReader(progress => {
         if (job.cancelled || !reportProgress) return;
         job.item.preparation = { ...job.item.preparation, ...progress };
@@ -383,7 +373,6 @@ export class Media {
   }
 
   dispose(job) {
-    job.input?.destroy();
     if (job.cancelled) return;
     job.cancelled = true;
     job.probeController?.abort();
