@@ -61,7 +61,7 @@ Client sends:
 - `{type:'queue:remove',itemId}`
 - `{type:'queue:remove-playlist',playlistId}` (removes all queued entries in the group, not current playback)
 - `{type:'history:play',itemId}` (select one of five previously played entries)
-- `{type:'reaction',kind:'hitmarker'|'metalpipe'|'flashbang'|'biden'|'heart'|'laugh'|'clap',x,y}` places a transient reaction at normalized player coordinates (0–1). `biden` wanders along the player bottom for 12 seconds; its shared event ID selects the route and soundbite. Movement and sound timing use `serverTime`. Local reaction/sound controls apply, reduced motion keeps the cutout stationary, and missed sound cues never replay after late delivery or tab suspension.
+- `{type:'reaction',kind:'hitmarker'|'metalpipe'|'flashbang'|'biden'|'heart'|'laugh'|'clap',x,y}` places a transient reaction at normalized player coordinates (0–1). `biden` wanders along the player bottom for 12 seconds, walking off the edge at the end; its shared event ID selects the route and soundbite. Movement and sound timing use `serverTime`. Local reaction/sound controls apply, reduced motion keeps the cutout stationary and fades it out, and missed sound cues never replay after late delivery or tab suspension.
 - `{type:'reaction',kind:'beachball',enabled:boolean}` shows or removes the room's shared ball.
 - `{type:'reaction:pointer',x,y}` sends normalized cursor coordinates in the centered 1600×900 ball arena, at most 25 times/second. Send both coordinates as null on leave. Clients send at most once per 60ms, with a 500ms stationary heartbeat.
 

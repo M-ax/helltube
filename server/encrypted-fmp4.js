@@ -2,6 +2,7 @@ import {createCipheriv} from 'node:crypto';
 import {createReadStream, createWriteStream} from 'node:fs';
 import {readFile, rename, rm, writeFile} from 'node:fs/promises';
 import {pipeline} from 'node:stream/promises';
+import {setTimeout as delay} from 'node:timers/promises';
 import path from 'node:path';
 
 // FFmpeg's HLS muxer cannot AES-128 encrypt fMP4. It writes copied packets to a
@@ -57,7 +58,16 @@ export class EncryptedFmp4 {
     if (this.job.cancelled) return;
     const target = path.join(this.job.dir, 'index.m3u8');
     await writeFile(`${target}.tmp`, lines.join('\n'));
-    await rename(`${target}.tmp`, target);
+    // Windows can briefly lock the existing playlist while it is being served.
+    // Keep that valid playlist in place until the atomic replacement succeeds.
+    for (let attempt = 0; ; attempt++) {
+      if (this.job.cancelled) return;
+      try { await rename(`${target}.tmp`, target); break; }
+      catch (error) {
+        if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 6) throw error;
+        await delay(50 * (attempt + 1));
+      }
+    }
     this.contents = contents;
   }
 }

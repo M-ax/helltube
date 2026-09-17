@@ -17,7 +17,7 @@ export function bidenPose(age, startX = .5, variant = 0, reducedMotion = false) 
     const start = Math.max(.15, Math.min(.85, startX));
     const route = [
         [0, start], [1800, .78], [2400, .78], [4600, .3], [5300, .3],
-        [7100, .58], [7700, .58], [9800, .18], [10400, .18], [12000, .44],
+        [7100, .58], [7700, .58], [9800, .18], [10400, .18], [BIDEN_LIFETIME_MS, -.2],
     ];
     const index = route.findIndex(([time]) => time > age);
     const [fromTime, fromX] = route[index < 0 ? route.length - 2 : index - 1];
@@ -35,6 +35,7 @@ export function bidenPose(age, startX = .5, variant = 0, reducedMotion = false) 
         rotation: reducedMotion || !walking ? 0 : [-4, 3, -2, 5][step],
         stretch: reducedMotion || !walking ? 1 : [1, .96, 1.02, .98][step],
         walking: !reducedMotion && walking,
-        opacity: Math.max(0, Math.min(1, age / 180, (BIDEN_LIFETIME_MS - age) / 500)),
+        opacity: age === BIDEN_LIFETIME_MS ? 0 : Math.max(0, Math.min(1, age / 180,
+            reducedMotion ? (BIDEN_LIFETIME_MS - age) / 500 : 1)),
     };
 }

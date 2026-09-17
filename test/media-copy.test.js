@@ -92,3 +92,19 @@ test('cancelling kills both processes and removes both renditions and keys', asy
     await assert.rejects(stat(rendition.keyDir), {code: 'ENOENT'});
   }
 });
+
+test('publication failure keeps its cause after stopping Original and leaves Standard playable', async t => {
+  const logged = t.mock.method(console, 'error', () => {});
+  const {media, job, item, copy, encode, complete} = await fixture(t);
+  const failure = new Error('Playlist publication failed');
+  job.original.publisher = {pending: Promise.resolve(), publish: async () => {throw failure;}};
+  await media.refresh(job);
+  assert.ok(copy.child.killed);
+  await complete(encode);
+  await job.task;
+  assert.equal(job.original.failed, failure);
+  assert.equal(item.status, 'ready');
+  assert.deepEqual(item.media.qualities.map(quality => quality.id), ['standard']);
+  assert.ok(logged.mock.calls.some(call => call.arguments[0] === 'Original HLS publication:' &&
+    call.arguments[1] === failure.message));
+});

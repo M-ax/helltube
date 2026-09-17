@@ -238,7 +238,7 @@ export class Media {
           ...inputArgs(0), '-map', '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
           '-c', 'copy', ...outputArgs(original, keyInfo)], network);
         await original.publisher?.publish();
-      })().catch(error => { original.failed = error; }).finally(() => { original.done = true; });
+      })().catch(error => { original.failed ||= error; }).finally(() => { original.done = true; });
     }
     args.push(...inputArgs(baseTime));
     args.push('-progress', 'pipe:1', '-stats_period', '0.5', '-nostats',
@@ -289,6 +289,7 @@ export class Media {
       try { await rendition.publisher?.publish(); }
       catch (error) {
         rendition.failed = error;
+        console.error('Original HLS publication:', error.message.replace(/https?:\/\/\S+/g, '[source]'));
         rendition.child?.kill();
         continue;
       }
