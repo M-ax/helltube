@@ -26,7 +26,11 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
         const current = transport;
         try {
             const report = await current.getStats();
-            if (!closed && transport === current) onStats(stats.sample(report));
+            // A receiving transport also contains mediasoup's video probator.
+            // Only the real consumer's negotiated SSRC describes the desktop.
+            const consumer = [...consumers.values()].find(value => value.kind === 'video');
+            const ssrc = consumer?.rtpParameters.encodings?.[0]?.ssrc;
+            if (!closed && transport === current) onStats(stats.sample(!stream && ssrc === undefined ? null : report, {ssrc}));
         } catch {
             // Diagnostics are optional and must never interrupt desktop media.
             if (!closed && transport === current) onStats(stats.sample(null));

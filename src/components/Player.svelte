@@ -195,10 +195,17 @@
         const listeners = [];
         let keyboardInput = true;
         let destroyed = false;
+        let fullscreenClickAllowed = false;
 
         function listen(target, type, handler, options = false) {
             target.addEventListener(type, handler, options);
             listeners.push(() => target.removeEventListener(type, handler, options));
+        }
+
+        function canToggleFullscreen(event) {
+            return !hitmarkerArmed && !fingerArmed && !beachBall
+                && event.target.closest('.video-viewport')
+                && !event.target.closest('.player-controls, button, input, a, select, textarea, [role="button"]');
         }
 
         function updateFocus() {
@@ -246,6 +253,15 @@
             updateFocus();
         });
         listen(node, 'focusout', updateFocus);
+        listen(node, 'click', (event) => {
+            // Remember the first click before placing a hit marker clears its selection.
+            if (event.detail === 1) fullscreenClickAllowed = canToggleFullscreen(event);
+        }, true);
+        listen(node, 'dblclick', (event) => {
+            if (!fullscreenClickAllowed || !canToggleFullscreen(event)) return;
+            event.preventDefault();
+            fullscreen();
+        });
         listen(node, 'pointermove', (event) => {
             if (event.pointerType !== 'touch' || pointers.has(event.pointerId)) revealControls();
         });

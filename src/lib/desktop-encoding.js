@@ -1,4 +1,4 @@
-export const desktopVideoEncoding = {maxBitrate: 6_000_000, maxFramerate: 30};
+export const desktopVideoEncoding = {maxBitrate: 6_000_000, maxFramerate: 60};
 
 // WebRTC has no API to force a GPU encoder. Prefer the browser's power-efficiency
 // signal for the negotiated profile; the browser still owns hardware/software
@@ -21,7 +21,7 @@ export async function desktopVideoCodecs(codecs, track, {
                             contentType: [codec.mimeType, ...parameters].join(';'),
                             width: settings.width || 1920, height: settings.height || 1080,
                             bitrate: desktopVideoEncoding.maxBitrate,
-                            framerate: Math.min(settings.frameRate || 30, desktopVideoEncoding.maxFramerate),
+                            framerate: Math.min(settings.frameRate || desktopVideoEncoding.maxFramerate, desktopVideoEncoding.maxFramerate),
                         }});
                         results.set(codec, info);
                     } catch { /* Older browsers may not support WebRTC queries. */ }

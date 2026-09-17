@@ -127,7 +127,7 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
                 window.captureAnimation = requestAnimationFrame(draw);
             }
             draw();
-            const stream = canvas.captureStream(30);
+            const stream = canvas.captureStream(options.video.frameRate.ideal);
             if (window.captureAudio) {
                 window.captureContext = new AudioContext();
                 await window.captureContext.resume();
@@ -160,6 +160,33 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     const receiver = firefoxReceiver && split && !withAudio ? await firefox.launch({headless: true}) : browser;
     if (receiver !== browser) t.after(() => receiver.close());
     const viewer = await receiver.newPage();
+    await viewer.addInitScript(() => {
+        window.desktopVideoReports = [];
+        const getStats = RTCPeerConnection.prototype.getStats;
+        RTCPeerConnection.prototype.getStats = async function (...args) {
+            const report = await getStats.apply(this, args);
+            window.desktopVideoReports.push([...report.values()].filter(entry => entry.type === 'inbound-rtp' && entry.kind === 'video')
+                .map(({id, ssrc, trackIdentifier, bytesReceived, framesDecoded, framesPerSecond}) =>
+                    ({id, ssrc, trackIdentifier, bytesReceived, framesDecoded, framesPerSecond})));
+            window.desktopVideoReports = window.desktopVideoReports.slice(-3);
+            if (window.desktopStatsMode) return new Map([...report].map(([id, entry]) => {
+                if (entry.type !== 'inbound-rtp' || entry.kind !== 'video') return [id, entry];
+                const value = {...entry};
+                if (window.desktopStatsMode === 'wide') {
+                    value.bytesReceived += Math.floor(value.timestamp * 1250);
+                    value.framesPerSecond = 120;
+                    value.frameWidth = 3840; value.frameHeight = 2160;
+                    value.jitter = 9.999;
+                    value.framesDropped += 9999;
+                } else if (window.desktopStatsMode === 'missing') {
+                    for (const key of ['bytesReceived', 'framesPerSecond', 'framesDecoded', 'frameWidth', 'frameHeight',
+                        'jitter', 'framesDropped', 'packetsReceived', 'packetsLost']) delete value[key];
+                }
+                return [id, value];
+            }));
+            return report;
+        };
+    });
     watch(viewer);
     viewer.on('pageerror', error => errors.push(error.message));
     await join(viewer, url);
@@ -174,8 +201,11 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
             throw error;
         });
     assert.equal(await viewer.locator('video').evaluate(video => video.srcObject instanceof MediaStream && !video.getAttribute('src')), true);
-    assert.equal(await sender.evaluate(() => window.desktopPeers.find(peer => peer.connectionState !== 'closed').getSenders()
-        .find(sender => sender.track?.kind === 'video').getParameters().encodings[0].maxBitrate), 6_000_000);
+    assert.deepEqual(await sender.evaluate(() => {
+        const {maxBitrate, maxFramerate} = window.desktopPeers.find(peer => peer.connectionState !== 'closed').getSenders()
+            .find(sender => sender.track?.kind === 'video').getParameters().encodings[0];
+        return {maxBitrate, maxFramerate, captureFrameRate: window.captureOptions.video.frameRate};
+    }), {maxBitrate: 6_000_000, maxFramerate: 60, captureFrameRate: {ideal: 60, max: 60}});
     const encoding = await sender.evaluate(async () => {
         const peer = window.desktopPeers.find(peer => peer.connectionState !== 'closed');
         const stats = await peer.getSenders().find(sender => sender.track?.kind === 'video').getStats();
@@ -188,6 +218,15 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     const viewerStats = viewer.getByLabel('Desktop stream statistics');
     await until(async () => /(?:kbps|Mbps) sent/.test(await senderStats.innerText()));
     await until(async () => /(?:kbps|Mbps) received/.test(await viewerStats.innerText()));
+    await until(async () => {
+        const text = await viewerStats.innerText();
+        return Number(text.match(/([\d.]+) (?:kbps|Mbps) received/)?.[1]) > 0 &&
+            Number(text.match(/([\d.]+) fps/)?.[1]) > 0;
+    }).catch(async error => {
+        t.diagnostic(await viewerStats.innerText());
+        t.diagnostic(JSON.stringify(await viewer.evaluate(() => window.desktopVideoReports)));
+        throw error;
+    });
     const senderStatus = await senderStats.innerText();
     assert.match(senderStatus, /Encoder active/);
     assert.match(senderStatus, /640×360/);
@@ -200,6 +239,24 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     }
     assert.match(await viewerStats.innerText(), /Receiving desktop/);
     assert.doesNotMatch(await viewerStats.innerText(), /Encoder load/);
+    assert.match(await viewerStats.innerText(), /640×360/);
+    if (!split && !withAudio) {
+        await viewerStats.locator('[data-metric="packetLoss"]').waitFor();
+        const bounds = () => viewerStats.evaluate(row => [...row.children].map(slot => {
+            const {x, y, width, height} = slot.getBoundingClientRect();
+            return {metric: slot.dataset.metric, x, y, width, height};
+        }));
+        const initial = await bounds();
+        await viewer.evaluate(() => window.desktopStatsMode = 'wide');
+        await until(async () => (await viewerStats.locator('[data-metric="fps"]').innerText()) === '120.0 fps');
+        assert.deepEqual(await bounds(), initial, 'Wider values cannot resize slots or move neighboring labels');
+        await viewer.evaluate(() => window.desktopStatsMode = 'missing');
+        await until(async () => (await viewerStats.locator('[data-metric="fps"]').innerText()) === '—');
+        assert.equal(await viewerStats.locator('[data-metric="bitrate"]').innerText(), '—');
+        assert.deepEqual(await bounds(), initial, 'Temporarily missing values retain their slots');
+        await viewer.evaluate(() => window.desktopStatsMode = null);
+        await until(async () => Number((await viewerStats.locator('[data-metric="bitrate"]').innerText()).match(/[\d.]+/)?.[0]) > 0);
+    }
     assert.equal(await sender.getByLabel('Playback buffer health').count(), 0);
     assert.equal(await viewer.getByLabel('Playback buffer health').count(), 0);
     t.diagnostic(`Codec scenario ${codecScenario}: ${expectedCodec}, ${JSON.stringify(encoding)}`);

@@ -57,6 +57,21 @@ test('viewers report receive metrics without inventing encoder statistics', () =
     assert.equal(next.limitation, null);
 });
 
+test('receiver statistics select the negotiated desktop SSRC instead of the relay probator', () => {
+    const stats = createDesktopStats({outbound: false});
+    const probe = {id: 'probator', ssrc: 1234, type: 'inbound-rtp', kind: 'video',
+        timestamp: 1000, bytesReceived: 500000, framesDecoded: 0};
+    const video = {type: 'inbound-rtp', bytesReceived: 100, framesDecoded: 10, framesPerSecond: 25};
+    const first = new Map([[probe.id, probe], ...report(video)]);
+    assert.equal(stats.sample(first, {ssrc: 1}).fps, 25);
+    const second = new Map([[probe.id, {...probe, timestamp: 2000, bytesReceived: 900000}],
+        ...report({...video, timestamp: 2000, bytesReceived: 125100, framesDecoded: 35})]);
+    const next = stats.sample(second, {ssrc: 1});
+    assert.equal(next.bitrate, 1_000_000);
+    assert.equal(next.fps, 25);
+    assert.equal(stats.sample(second, {ssrc: 2}), null, 'A missing desktop stream must not fall back to the probator');
+});
+
 test('missing optional fields stay unavailable while measured zero values remain visible', () => {
     const stats = createDesktopStats();
     const video = {totalEncodeTime: undefined, framesEncoded: undefined, framesPerSecond: 0};

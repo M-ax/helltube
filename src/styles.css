@@ -1620,7 +1620,7 @@ ul, ol {
     padding: 3px 6px;
     border: 1px solid #493d48;
     border-radius: 5px;
-    background: #211b24;
+    background: transparent;
     color: #e5dce3;
     font: 10px var(--mono);
     cursor: pointer;

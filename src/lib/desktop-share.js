@@ -1,8 +1,10 @@
 import {get, writable} from 'svelte/store';
 import {createDesktopPeer} from './desktop-peer.js';
+import {desktopVideoEncoding} from './desktop-encoding.js';
 
 export const desktopCaptureOptions = {
-    video: {width: {ideal: 1920, max: 1920}, height: {ideal: 1080, max: 1080}, frameRate: {ideal: 30, max: 30}},
+    video: {width: {ideal: 1920, max: 1920}, height: {ideal: 1080, max: 1080},
+        frameRate: {ideal: desktopVideoEncoding.maxFramerate, max: desktopVideoEncoding.maxFramerate}},
     audio: {suppressLocalAudioPlayback: false, restrictOwnAudio: true},
     systemAudio: 'include', windowAudio: 'system', selfBrowserSurface: 'exclude',
     surfaceSwitching: 'include', monitorTypeSurfaces: 'include',

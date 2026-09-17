@@ -337,7 +337,7 @@ test('transport publishes one encoding per track with a fixed upload ceiling and
     await h.peer.start();
     assert.deepEqual(h.produced.map(options => options.track), tracks);
     assert.ok(h.produced.every(options => options.stopTracks === false));
-    assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 6_000_000, maxFramerate: 30}]);
+    assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 6_000_000, maxFramerate: 60}]);
     assert.deepEqual(h.commands.map(message => message.action), ['connect', 'produce', 'produce', 'ready']);
     assert.ok(h.commands.every(message => message.itemId === 'desktop' && message.peerId === 'peer' && message.requestId === 'capture'));
 });

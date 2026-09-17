@@ -5,10 +5,11 @@ const nonnegative = value => Number.isFinite(value) && value >= 0 ? value : null
 export function createDesktopStats({outbound = true} = {}) {
     let previous = null;
     return {
-        sample(report) {
+        sample(report, {ssrc = null} = {}) {
             const entries = [...(report?.values() || [])];
             const byId = new Map(entries.map(entry => [entry.id, entry]));
             const video = entries.find(entry => entry.type === (outbound ? 'outbound-rtp' : 'inbound-rtp') &&
+                (ssrc === null || entry.ssrc === ssrc) &&
                 !entry.isRemote && (entry.kind || entry.mediaType) === 'video' &&
                 !/\/(rtx|red|ulpfec|flexfec-03)$/i.test(byId.get(entry.codecId)?.mimeType || ''));
             if (!video) { previous = null; return null; }
