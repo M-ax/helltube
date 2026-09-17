@@ -61,3 +61,90 @@ test('HTTP fetching pins DNS, preserves ranges, revalidates redirects and limits
   await assert.rejects(remote.open(`${base}/private`), /public Internet/);
   await assert.rejects(remote.open(`${base}/loop`), /redirected too many/);
 });
+
+async function pageFixture(t, page) {
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({path: req.url, method: req.method, range: req.headers.range});
+    if (req.url.startsWith('/file')) {
+      res.writeHead(206, {'Content-Type': 'video/mp4', 'Content-Range': 'bytes 2-5/10',
+        'Content-Length': 4, 'Accept-Ranges': 'bytes'}).end('2345');
+    } else if (req.url === '/redirect') {
+      res.writeHead(302, {Location: '/pages/watch.mp4'}).end();
+    } else {
+      const html = page(req);
+      res.writeHead(req.url.includes('partial') && req.headers.range ? 206 : 200,
+        {'Content-Type': 'text/html; charset=utf-8'}).end(html);
+    }
+  }).listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const remote = new RemoteMedia();
+  t.mock.method(remote, 'resolve', async value => {
+    const url = remoteURL(value);
+    assert.equal(url.hostname, 'media.test');
+    return {url, addresses: [{address: '127.0.0.1', family: 4}]};
+  });
+  return {remote, requests, base: `http://media.test:${server.address().port}`};
+}
+
+test('HTML watch pages resolve signed native video sources and preserve the original range', async t => {
+  const {remote, requests, base} = await pageFixture(t, () => `<!doctype html>
+    <!-- <video src="http://127.0.0.1/secret"> -->
+    <script>const decoy = '<video src="http://127.0.0.1/private">';</script>
+    <video data-src="wrong" src="../file.mp4?signature=keep%2Bthis&amp;expires=tomorrow&#38;part=1&#x26;ok=yes"></video>`);
+  const response = await remote.open(`${base}/redirect`, {range: 'bytes=2-5'});
+  const chunks = [];
+  for await (const chunk of response) chunks.push(chunk);
+  assert.equal(Buffer.concat(chunks).toString(), '2345');
+  assert.equal(response.headers['content-type'], 'video/mp4');
+  assert.equal(response.headers['content-range'], 'bytes 2-5/10');
+  assert.equal(requests.at(-1).path, '/file.mp4?signature=keep%2Bthis&expires=tomorrow&part=1&ok=yes');
+  assert.equal(requests.at(-1).range, 'bytes=2-5');
+});
+
+test('nested sources, HEAD and partial HTML retain the final media request semantics', async t => {
+  const {remote, requests, base} = await pageFixture(t, () => `<source src="/ignore.mp4">
+    <audio controls><source TYPE='audio/mpeg' SRC='/file.mp3?x=1&amp;y=2'></audio>`);
+  for (const method of ['HEAD', 'GET']) {
+    const response = await remote.open(`${base}/partial`, {method, range: 'bytes=2-5'});
+    const chunks = [];
+    for await (const chunk of response) chunks.push(chunk);
+    assert.equal(response.statusCode, 206);
+    assert.equal(Buffer.concat(chunks).toString(), method === 'HEAD' ? '' : '2345');
+    assert.deepEqual(requests.at(-1), {path: '/file.mp3?x=1&y=2', method, range: 'bytes=2-5'});
+  }
+  assert.ok(requests.some(req => req.path === '/partial' && req.method === 'GET' && !req.range));
+});
+
+test('embedded sources cannot reach private addresses, credentials or non-HTTP protocols', async t => {
+  let source;
+  const {remote, requests, base} = await pageFixture(t, () => `<video src="${source}"></video>`);
+  for (source of ['http://127.0.0.1/secret', 'http://169.254.169.254/latest', 'file:///etc/passwd',
+    'http://user:password@media.test/file.mp4', 'http&#58;//127.0.0.1/secret', '//localhost/secret']) {
+    await assert.rejects(remote.open(`${base}/watch`), /public HTTP or HTTPS/);
+  }
+  assert.equal(requests.length, 6, 'Only the submitted public page was fetched.');
+});
+
+test('non-media pages, oversized HTML and page loops fail with bounded, actionable errors', async t => {
+  let html = '<html><a href="/file.mp4">download</a></html>';
+  const {remote, requests, base} = await pageFixture(t, () => html);
+  await assert.rejects(remote.open(`${base}/watch`), /no direct video or audio source/);
+  html = ' '.repeat(256 * 1024) + '<video src="/file.mp4">';
+  await assert.rejects(remote.open(`${base}/watch`), /page is too large/);
+  html = '<video src="/watch">';
+  const before = requests.length;
+  await assert.rejects(remote.open(`${base}/watch`), /too many pages/);
+  assert.equal(requests.length - before, 6);
+});
+
+test('each range resolves the page again so expiring media URLs are not saved as the source', async t => {
+  let token = 0;
+  const {remote, requests, base} = await pageFixture(t, () => `<video src=/file.mp4?token=${++token}></video>`);
+  for (let i = 0; i < 2; i++) {
+    const response = await remote.open(`${base}/watch`, {range: 'bytes=2-5'});
+    for await (const _chunk of response) { /* Consume the tiny fixture. */ }
+  }
+  assert.deepEqual(requests.filter(req => req.path.startsWith('/file')).map(req => req.path), ['/file.mp4?token=1', '/file.mp4?token=2']);
+});

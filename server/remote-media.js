@@ -37,6 +37,44 @@ export function remoteURL(value) {
   return url;
 }
 
+const maxPageBytes = 256 * 1024;
+
+function decodeAttribute(value) {
+  const named = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' };
+  return value.replace(/&(#x[0-9a-f]+|#\d+|amp|quot|apos|lt|gt);/gi, (entity, name) => {
+    if (!name.startsWith('#')) return named[name.toLowerCase()];
+    const code = name[1].toLowerCase() === 'x' ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+  });
+}
+
+async function pageMediaURL(response, pageURL) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response) {
+    size += chunk.length;
+    if (size > maxPageBytes) throw httpError(400, 'Hosted media page is too large. Use a direct video or audio file URL.');
+    chunks.push(chunk);
+  }
+  // Read static native media tags only; never execute page scripts or trust arbitrary links.
+  const html = Buffer.concat(chunks).toString('utf8')
+    .replace(/<!--[\s\S]*?-->|<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+  let inMedia = false;
+  for (const tag of html.matchAll(/<(\/?)(video|audio|source)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi)) {
+    const [, closing, name, attributes] = tag;
+    if (name.toLowerCase() !== 'source') inMedia = !closing;
+    if (closing || !inMedia) continue;
+    for (const attribute of attributes.matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+      if (attribute[1].toLowerCase() !== 'src') continue;
+      const value = decodeAttribute(attribute[2] ?? attribute[3] ?? attribute[4] ?? '').trim();
+      if (!value) break;
+      try { return remoteURL(new URL(value, pageURL).href).href; }
+      catch { throw httpError(400, 'Hosted page media must use a public HTTP or HTTPS file URL.'); }
+    }
+  }
+  throw httpError(400, 'Hosted page has no direct video or audio source. Use a directly downloadable media URL.');
+}
+
 export class RemoteMedia {
   constructor({ lookup: lookupHost = lookup } = {}) { this.lookup = lookupHost; }
 
@@ -66,16 +104,16 @@ export class RemoteMedia {
     return [makeItem({ kind: 'http', url: url.href, startAt }, { title: title.slice(0, 200), startAt, addedBy: user.displayName })];
   }
 
-  async open(value, { method = 'GET', range, signal } = {}, redirects = 0) {
+  async open(value, { method = 'GET', range, signal } = {}, redirects = 0, pageRequest = false) {
     const { url, addresses } = await this.resolve(value);
     signal?.throwIfAborted();
     const response = await new Promise((resolve, reject) => {
       const request = (url.protocol === 'https:' ? https : http).request(url, {
-        method, signal, agent: false,
+        method: pageRequest ? 'GET' : method, signal, agent: false,
         // Pin the validated addresses for this connection to prevent DNS rebinding.
         lookup: (_host, options, callback) => options.all
           ? callback(null, addresses) : callback(null, addresses[0].address, addresses[0].family),
-        headers: { 'Accept-Encoding': 'identity', ...(range ? { Range: range } : {}) },
+        headers: { 'Accept-Encoding': 'identity', ...(range && !pageRequest ? { Range: range } : {}) },
       }, resolve);
       request.setTimeout(120000, () => request.destroy(new Error('Media request timed out.')));
       request.on('error', () => reject(httpError(502, 'Could not fetch the hosted media file.')));
@@ -87,11 +125,27 @@ export class RemoteMedia {
       let next;
       try { next = new URL(response.headers.location, url).href; }
       catch { throw httpError(400, 'Hosted media returned an invalid redirect.'); }
-      return this.open(next, { method, range, signal }, redirects + 1);
+      return this.open(next, { method, range, signal }, redirects + 1, pageRequest);
     }
     if (![200, 206, 416].includes(response.statusCode)) {
       response.destroy();
       throw httpError(502, `The hosted media server returned HTTP ${response.statusCode}. Use a public, directly downloadable file.`);
+    }
+    if (/^(text\/html|application\/xhtml\+xml)(?:\s*;|$)/i.test(response.headers['content-type'] || '')) {
+      if (redirects >= 5) {
+        response.destroy();
+        throw httpError(400, 'Hosted media redirected through too many pages. Use a direct media URL.');
+      }
+      // HEAD and ranged HTML cannot supply a complete page. Fetch it without altering the final file request.
+      if (!pageRequest && (method === 'HEAD' || response.statusCode !== 200)) {
+        response.destroy();
+        return this.open(url.href, { method, range, signal }, redirects + 1, true);
+      }
+      let source;
+      try { source = await pageMediaURL(response, url); }
+      finally { response.destroy(); }
+      // Preserve the original page in item state, refreshing expiring media URLs on each new range request.
+      return this.open(source, { method, range, signal }, redirects + 1);
     }
     return response;
   }

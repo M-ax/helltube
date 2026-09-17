@@ -13,7 +13,7 @@ import { remoteURL } from '../server/remote-media.js';
 
 const exec = promisify(execFile);
 
-test('Twitch VOD HLS and HTTP media files share playable, seekable encrypted playback', { timeout: 60000 }, async t => {
+test('Twitch VOD HLS and hosted watch pages share playable, seekable encrypted playback', { timeout: 60000 }, async t => {
   const { instance, api, connect, url, cookie, dir } = await start(t, { youtubeProxy: 'http://127.0.0.1:1' });
   await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
     '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
@@ -26,6 +26,8 @@ test('Twitch VOD HLS and HTTP media files share playable, seekable encrypted pla
     ranges.push(req.headers.range);
     res.sendFile(path.join(dir, path.basename(req.params.file)), { dotfiles: 'allow' });
   });
+  instance.app.get('/watch/remote.mp4', (_req, res) => res.type('html').send(
+    '<!doctype html><video src="../remote-fixture/remote.mp4?signature=keep&amp;expires=tomorrow"></video>'));
   t.mock.method(instance.remote, 'resolve', async value => {
     const target = remoteURL(value);
     assert.equal(target.hostname, 'media.test');
@@ -40,7 +42,7 @@ test('Twitch VOD HLS and HTTP media files share playable, seekable encrypted pla
   await until(() => room.members.size);
   const add = source => api('/api/rooms/lobby/media', { method: 'POST', body: { url: source } });
   assert.equal((await add('https://twitch.tv/videos/12345')).status, 201);
-  const hosted = `${url.replace('127.0.0.1', 'media.test')}/remote-fixture/remote.mp4?signature=keep`;
+  const hosted = `${url.replace('127.0.0.1', 'media.test')}/watch/remote.mp4`;
   assert.equal((await add(hosted)).status, 201);
   for (const item of [room.current, room.queue[0]]) {
     await until(() => {
@@ -53,6 +55,7 @@ test('Twitch VOD HLS and HTTP media files share playable, seekable encrypted pla
       '-headers', `Cookie: ${cookie}\r\n`, '-i', url + item.media.url, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
   }
   assert.ok(ranges.some(range => range?.startsWith('bytes=')), 'The upstream receives range requests for an MP4 with its index at EOF.');
+  assert.equal(room.queue[0].source.url, hosted, 'Persist the watch page, not its expiring signed media URL.');
   instance.rooms.advance(room);
   const item = room.current;
   const previous = item.media.url;
