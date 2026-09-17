@@ -720,10 +720,12 @@ main() {
     --exclude=cookies.txt --exclude=youtube-cookies.txt --exclude=youtube-wireguard.conf --exclude='*.conf' "$source_dir/" /opt/helltube/app/
   chown -R helltube:helltube /opt/helltube/app
   chmod -R u+rwX,go+rX /opt/helltube/app
+  local source_commit
+  source_commit=${HELLTUBE_COMMIT:-$(git -c safe.directory="$source_dir" -C "$source_dir" rev-parse --verify HEAD 2>/dev/null || true)}
   (
     cd /opt/helltube/app
     runuser -u helltube -- env HOME=/var/lib/helltube "$NPM_BIN" ci --include=dev --no-audit --no-fund
-    runuser -u helltube -- env HOME=/var/lib/helltube "$NPM_BIN" run build
+    runuser -u helltube -- env HOME=/var/lib/helltube HELLTUBE_COMMIT="$source_commit" "$NPM_BIN" run build
   )
   chown -R root:root /opt/helltube/app
   chmod -R u+rwX,go+rX,go-w /opt/helltube/app

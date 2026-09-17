@@ -795,6 +795,14 @@ ul, ol {
     text-align: left;
 }
 
+.deployment-label {
+    margin: 0 -13px;
+    padding: 0 13px 10px;
+    background: #1c1b1e;
+    color: var(--muted);
+    font: 9px var(--mono);
+}
+
 .profile-button > span:last-child {
     min-width: 0;
     display: flex;

@@ -1,0 +1,86 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { watchDeployment } from '../src/lib/deployment-updates.js';
+
+const current = '11111111-1111-4111-8111-111111111111';
+const newer = '22222222-2222-4222-8222-222222222222';
+const flush = () => new Promise(resolve => setImmediate(resolve));
+
+function fixture(t, fetchVersion) {
+    const windowTarget = new EventTarget();
+    const documentTarget = new EventTarget();
+    documentTarget.visibilityState = 'visible';
+    let reloads = 0;
+    const stop = watchDeployment({ buildId: current, fetchVersion, windowTarget, documentTarget,
+        reload: () => reloads++ });
+    t.after(stop);
+    return { windowTarget, documentTarget, stop, reloads: () => reloads };
+}
+
+test('deployment watcher bypasses cache, stays on the same build and reloads once on a newer build', async t => {
+    let buildId = current;
+    const state = fixture(t, async (url, options) => {
+        assert.match(url, /^\/version.json\?check=/);
+        assert.equal(options.cache, 'no-store');
+        return Response.json({ buildId });
+    });
+    await flush();
+    assert.equal(state.reloads(), 0);
+    buildId = newer;
+    state.documentTarget.dispatchEvent(new Event('visibilitychange'));
+    await flush();
+    assert.equal(state.reloads(), 1);
+    state.windowTarget.dispatchEvent(new Event('online'));
+    await flush();
+    assert.equal(state.reloads(), 1);
+});
+
+test('deployment interruptions, SPA fallback and malformed versions do not reload, and recovery retries', async t => {
+    const responses = [() => { throw new Error('offline'); },
+        () => new Response('Unavailable', { status: 503 }),
+        () => new Response('<html>fallback</html>', { headers: { 'Content-Type': 'text/html' } }),
+        () => Response.json({ buildId: null }), () => Response.json({ buildId: newer })];
+    const state = fixture(t, async () => responses.shift()());
+    await flush();
+    for (let i = 0; i < 3; i++) {
+        state.windowTarget.dispatchEvent(new Event('online'));
+        await flush();
+        assert.equal(state.reloads(), 0);
+    }
+    state.windowTarget.dispatchEvent(new Event('online'));
+    await flush();
+    assert.equal(state.reloads(), 1);
+});
+
+test('deployment checks do not overlap and disposal ignores an in-flight response', async t => {
+    let resolve;
+    let calls = 0;
+    let signal;
+    const state = fixture(t, (_url, options) => {
+        calls++;
+        signal = options.signal;
+        return new Promise(done => { resolve = done; });
+    });
+    state.windowTarget.dispatchEvent(new Event('online'));
+    assert.equal(calls, 1);
+    state.stop();
+    assert.equal(signal.aborted, true);
+    resolve(Response.json({ buildId: newer }));
+    await flush();
+    state.windowTarget.dispatchEvent(new Event('online'));
+    assert.equal(calls, 1);
+    assert.equal(state.reloads(), 0);
+});
+
+test('connected tabs check every thirty seconds without needing focus or reconnect events', async t => {
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    let calls = 0;
+    const state = fixture(t, async () => { calls++; return Response.json({ buildId: calls === 1 ? current : newer }); });
+    await flush();
+    t.mock.timers.tick(29999);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(calls, 2);
+    assert.equal(state.reloads(), 1);
+});

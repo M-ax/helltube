@@ -290,7 +290,9 @@ export async function createApp(overrides = {}) {
   app.use(['/media', '/direct'], (_req, _res, next) => next(httpError(404, 'Media endpoint not found.')));
   app.use('/api', (_req, _res, next) => next(httpError(404, 'API endpoint not found.')));
   const dist = path.resolve(fileURLToPath(new URL('../dist', import.meta.url)));
-  app.use(express.static(dist));
+  app.use(express.static(dist, { setHeaders(res, file) {
+    if (['index.html', 'version.json'].includes(path.basename(file))) res.set('Cache-Control', 'no-store');
+  } }));
   app.get('/', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   app.use((error, _req, res, _next) => {
     if (res.headersSent) return res.destroy();

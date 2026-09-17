@@ -28,6 +28,10 @@ npm run build
 npm start
 ```
 
+The sidebar shows the frontend's build commit below the account controls (short hash, with the full hash on hover). Builds read Git `HEAD`; when building a source archive without Git metadata, set `HELLTUBE_COMMIT` to the full commit hash. The Ubuntu bootstrap passes the source checkout's commit automatically. In a split deployment, this identifies the Worker frontend release.
+
+Production browsers check the frontend's uncached `version.json` every 30 seconds and when returning to a tab or coming online. A changed build automatically reloads the page; the existing session and selected room are restored. Each build has a unique ID, including rebuilds of the same commit. Deploy the complete `dist` together. With a Worker frontend, backend-only updates do not trigger a frontend reload. Browsers must load this update once before they can detect subsequent deployments.
+
 Open **http://127.0.0.1:3000**. To listen on the LAN, set `$env:HOST = '0.0.0.0'` before starting. Use a TLS reverse proxy for Internet access and forward WebSocket upgrades. Set `SECURE_COOKIES=true` and `ALLOWED_ORIGINS` to your exact public origin. Do not expose this application using its seeded password.
 
 ## Cloudflare Worker frontend + bare-metal backend

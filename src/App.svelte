@@ -13,6 +13,9 @@
     import {initials} from './lib/format.js';
     import {createRealtime} from './lib/realtime.js';
     import {createUploadManager} from './lib/uploads.js';
+    import {watchDeployment} from './lib/deployment-updates.js';
+
+    const deployedCommit = __DEPLOYED_COMMIT__;
 
     let user = null;
     let capabilities = {};
@@ -263,9 +266,13 @@
     }
 
     onMount(() => {
+        const stopWatching = import.meta.env.PROD ? watchDeployment({buildId: __BUILD_ID__}) : () => {};
         void checkSession();
         window.addEventListener('helltube:session-ended', sessionEnded);
-        return () => window.removeEventListener('helltube:session-ended', sessionEnded);
+        return () => {
+            stopWatching();
+            window.removeEventListener('helltube:session-ended', sessionEnded);
+        };
     });
     onDestroy(() => {
         resetPreferences();
@@ -369,6 +376,9 @@
                         <Icon name="logout" size={18}/>
                     </button>
                 </div>
+                <p class="deployment-label" title={deployedCommit ? `Deployed commit: ${deployedCommit}` : 'Commit unavailable for this build'}>
+                    {deployedCommit ? `Commit ${deployedCommit.slice(0, 7)}` : 'Commit unavailable'}
+                </p>
             </div>
         </aside>
 

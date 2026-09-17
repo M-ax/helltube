@@ -349,13 +349,26 @@ test('static assets receive shared security headers, while asset failures are se
   const response = await h.request('/room/lobby?invite=one');
   assert.equal(received.url, `${frontend}/room/lobby?invite=one`);
   assert.equal(await response.text(), '<html lang="en">app</html>');
-  assert.equal(response.headers.get('Cache-Control'), 'public, max-age=60');
+  privateResponse(response);
   secured(response);
   assert.equal(h.calls.length, 0);
   const failed = await harness({ assets: { fetch() { throw new Error('private asset failure'); } } }).request('/');
   assert.equal(failed.status, 502);
   privateResponse(failed);
   secured(failed);
+});
+
+test('deployment manifest is uncached while fingerprinted frontend assets retain caching', async () => {
+  const h = harness({ assets: { async fetch(request) {
+    const manifest = new URL(request.url).pathname === '/version.json';
+    return new Response(manifest ? '{"buildId":"release"}' : 'app()', { headers: {
+      'Content-Type': manifest ? 'application/json' : 'application/javascript',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    } });
+  } } });
+  privateResponse(await h.request('/version.json?check=123'));
+  assert.equal((await h.request('/assets/app-hash.js')).headers.get('Cache-Control'), 'public, max-age=31536000, immutable');
+  assert.equal(h.calls.length, 0, 'Frontend versions must not be proxied to the backend.');
 });
 
 test('invalid origin or missing secret fails closed with generic secure no-store errors', async () => {

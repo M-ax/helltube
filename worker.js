@@ -91,7 +91,9 @@ export function createWorker({ fetch: fetchOrigin = (request, options) => global
         security = securityHeaders(origin);
         if (!destination.proxy) {
           failureCode = 'assets-fetch-failed';
-          return responseHeaders(await env.ASSETS.fetch(request), security, false);
+          const response = await env.ASSETS.fetch(request);
+          const fresh = url.pathname === '/version.json' || response.headers.get('Content-Type')?.includes('text/html');
+          return responseHeaders(response, security, fresh);
         }
         if (!origin) return failure(502, security, 'origin-missing');
         const secret = env.EDGE_PROXY_SECRET;
