@@ -70,6 +70,32 @@ test('Twitch and hosted media use authorized encrypted edge delivery and direct 
   }
 });
 
+test('original quality uses its own authorized delivery, key and fallback grant', async t => {
+  const {instance, api, job, direct, url, cookie} = await fixture(t);
+  const standard = await job('twitch');
+  const original = await job('twitch');
+  instance.media.jobs.delete(original.item.id);
+  original.item = standard.item;
+  standard.original = original;
+  const access = (await api(`/api/media/${original.id}/access`)).data;
+  assert.equal(access.url, `/media/${original.id}/index.m3u8`);
+  const playlist = await direct(access.fallbackUrl);
+  assert.equal(playlist.status, 200);
+  const contents = await playlist.text();
+  const keyUrl = contents.match(/URI="([^"]+)"/)[1];
+  assert.deepEqual(Buffer.from(await (await direct(keyUrl)).arrayBuffer()), original.key);
+  assert.equal((await direct(keyUrl.replace(original.id, standard.id))).status, 401);
+  const segmentUrl = contents.split('\n').find(line => line.startsWith('https://'));
+  assert.equal((await direct(segmentUrl)).status, 200);
+  const edge = `/api/edge/media/${original.id}/segment-000000.ts`;
+  assert.equal((await api(edge, {headers: {'X-Helltube-Edge': secret}})).data.cacheable, true);
+  assert.equal((await fetch(url + access.url)).status, 401);
+  assert.equal((await fetch(url + access.url, {headers: {Cookie: cookie}})).status, 200);
+  original.failed = new Error('Copy failed');
+  assert.equal((await api(`/api/media/${original.id}/access`)).status, 404);
+  assert.equal((await api(`/api/media/${standard.id}/access`)).status, 200);
+});
+
 test('direct grants are resource-scoped, survive restart, and enforce live session expiry/revocation', async t => {
   const { instance, cookie } = await start(t, { maxTranscoders: 0 });
   const auth = instance.accounts.authenticate(cookie);

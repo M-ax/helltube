@@ -57,6 +57,12 @@ test('real WebSockets share reactions, isolate rooms, restore ball on join and r
     assert.deepEqual(a.messages.find(message => message.id === pipe.id), pipe);
     assert.ok(Number.isFinite(pipe.serverTime), 'Both clients anchor impact to the same server timestamp.');
     assert.ok(!outsider.messages.some(message => message.kind === 'metalpipe'));
+    send(a, {type: 'reaction', kind: 'flashbang', x: .4, y: .65});
+    await until(() => b.messages.some(message => message.type === 'reaction' && message.kind === 'flashbang'));
+    const flash = b.messages.find(message => message.kind === 'flashbang');
+    assert.deepEqual(a.messages.find(message => message.id === flash.id), flash);
+    assert.ok(Number.isFinite(flash.serverTime));
+    assert.ok(!outsider.messages.some(message => message.kind === 'flashbang'));
     send(a, {type: 'reaction', kind: 'beachball', enabled: true});
     await until(() => b.messages.some(message => message.type === 'reactions:state' && message.ball));
     const first = b.messages.find(message => message.type === 'reactions:state' && message.ball);

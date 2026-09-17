@@ -3,6 +3,7 @@ import { makeItem } from './rooms.js';
 import { runJSON } from './youtube.js';
 import { twitchURL } from '../shared/media-source.js';
 import { parseStartTime, youtubeTimeArgument } from '../shared/youtube-time.js';
+import { hlsCopyQuality } from './hls-copy.js';
 
 export class Twitch {
   constructor(config) {
@@ -53,7 +54,8 @@ export class Twitch {
   async resolve(url) {
     const data = await this.extract(url);
     this.checkVod(data);
-    const inputs = (data.requested_formats || [data]).map(format => {
+    const formats = data.requested_formats || [data];
+    const inputs = formats.map(format => {
       const source = new URL(format.url);
       if (source.protocol !== 'https:' || source.username || source.password || source.port ||
         !['ttvnw.net', 'twitch.tv', 'twitchcdn.net', 'cloudfront.net'].some(host => source.hostname === host || source.hostname.endsWith(`.${host}`))) {
@@ -61,7 +63,8 @@ export class Twitch {
       }
       return { url: source.href, headers: format.http_headers || data.http_headers || {} };
     });
-    return { inputs, duration: Number(data.duration) > 0 ? Number(data.duration) : null };
+    return { inputs, duration: Number(data.duration) > 0 ? Number(data.duration) : null,
+      copyQuality: hlsCopyQuality(formats) };
   }
 
   close() { for (const controller of this.pending) controller.abort(); }

@@ -1,4 +1,6 @@
 <script>
+    import FlashbangGrenade from './FlashbangGrenade.svelte';
+
     export let connected = false;
     export let beachBall = false;
     export let armed = false;
@@ -37,6 +39,10 @@
                 title="Drop a pipe · loud clang on impact">
             <span class="metal-pipe-icon" aria-hidden="true"><span class="metal-pipe-body"></span></span>Metal pipe
         </button>
+        <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('flashbang')}
+                title="Throw a CS:GO flashbang · bounces, rings, and fades from white">
+            <span class="flashbang-icon" aria-hidden="true"><FlashbangGrenade/></span>Flashbang
+        </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('heart')}><span aria-hidden="true">❤️</span>Love</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('laugh')}><span aria-hidden="true">😂</span>Laugh</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('clap')}><span aria-hidden="true">👏</span>Applause</button>
@@ -46,3 +52,7 @@
         : beachBall ? 'Move your cursor into the ball to bump it. Everyone can play.'
         : 'React to the moment, or bring out a ball for the room.'}</p>
 </section>
+
+<style>
+    .flashbang-icon { display: inline-flex; width: 14px; height: 26px; transform: rotate(25deg); }
+</style>

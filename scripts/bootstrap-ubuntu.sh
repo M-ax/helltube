@@ -274,6 +274,12 @@ install_update_units() {
   systemctl daemon-reload
   if [[ $AUTO_UPDATE_ENABLED == yes ]]; then
     systemctl enable --now helltube-update.timer helltube-update.path
+    local unit
+    for unit in helltube-update.timer helltube-update.path; do
+      # Checking both names together succeeds when only one unit is active.
+      systemctl is-enabled --quiet "$unit" || die "$unit was not enabled; automatic updates are incomplete."
+      systemctl is-active --quiet "$unit" || die "$unit is not active; inspect journalctl -u $unit."
+    done
   else
     systemctl disable --now helltube-update.timer helltube-update.path
   fi
@@ -823,7 +829,7 @@ main() {
   reset_update_state /opt/helltube/update-state
   install_update_units
   printf '\nDeployment ready at https://%s\n' "$hostname"
-  printf 'Automatic backend updates: %s (helltube-update.timer); Worker deployment remains separate.\n' "$AUTO_UPDATE_ENABLED"
+  printf 'Automatic backend updates: %s (helltube-update.timer + helltube-update.path); Worker deployment remains separate.\n' "$AUTO_UPDATE_ENABLED"
   printf 'Initial admin password: /etc/helltube/.secrets/admin-password (root only; existing passwords are not reset).\n'
   printf 'Cloudflare credentials: /etc/helltube/.secrets/cloudflare.ini (root only).\n'
   if [[ $YOUTUBE_COOKIES_ENABLED == yes ]]; then

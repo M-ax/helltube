@@ -7,6 +7,7 @@ import { api } from '../src/lib/api.js';
 import { createDeliveryClient, DeliveryError, isSameOriginUrl, uploadTransferUrl } from '../src/lib/delivery.js';
 import { targetPosition } from '../src/lib/format.js';
 import { createBufferHealth, isProxyLoadFailure } from '../src/lib/buffer-health.js';
+import { qualityReady } from '../src/lib/media-quality.js';
 
 const appOrigin = 'https://app.example';
 const directOrigin = 'https://delivery.example';
@@ -199,7 +200,7 @@ const playerSource = await readFile(new URL('../src/components/Player.svelte', i
 const playerAst = parse(playerSource);
 const sourceLifecycle = playerAst.instance.content.body.filter(node => node.type === 'VariableDeclaration' ||
   (node.type === 'FunctionDeclaration' && ['cleanupSource', 'attach', 'retryPlayback', 'switchToMetal',
-    'reportBufferHealth', 'nativePlaybackError'].includes(node.id.name)))
+    'reportBufferHealth', 'nativePlaybackError', 'useStandardQuality'].includes(node.id.name)))
   .map(node => playerSource.slice(node.start, node.end)).join('\n');
 
 function playerHarness(resolveMediaUrl, native = false) {
@@ -226,20 +227,34 @@ function playerHarness(resolveMediaUrl, native = false) {
     return preview;
   };
   const create = new Function('delivery', 'Hls', 'targetPosition', 'createSeekPreview', 'isSameOriginUrl',
-    'room', 'clockOffset', 'element', 'createBufferHealth', 'isProxyLoadFailure', `${sourceLifecycle}
+    'room', 'clockOffset', 'element', 'createBufferHealth', 'isProxyLoadFailure', 'qualityReady', `${sourceLifecycle}
     video = element;
     let connected = true;
     let item = room.current;
     let media = item.media;
+    const qualities = [];
     return {attach, cleanupSource, retryPlayback, switchToMetal, nativePlaybackError,
-      state: () => ({playerError, localBuffering, previewPosition, mediaAccess, fallbackNotice})};`);
+      qualities, state: () => ({playerError, localBuffering, previewPosition, mediaAccess, fallbackNotice, qualityPreference})};`);
   return { ...create({ resolveMediaAccess: async (...args) => {
     const access = await resolveMediaUrl(...args);
     return typeof access === 'string' ? {url: access, fallbackUrl: null, route: 'metal'} : access;
   } }, Hls, targetPosition, createSeekPreview,
-    value => isSameOriginUrl(value, appOrigin), room, 0, video, createBufferHealth, isProxyLoadFailure),
+    value => isSameOriginUrl(value, appOrigin), room, 0, video, createBufferHealth, isProxyLoadFailure, qualityReady),
     instances, previews, video, room };
 }
+
+test('original playback errors select the ready standard quality in HLS.js and native players', async () => {
+  for (const native of [false, true]) {
+    const player = playerHarness(async () => directMediaUrl, native);
+    player.room.current.media.id = 'original';
+    player.qualities.push({id: 'standard', baseTime: 5, bufferedUntil: 50, complete: true});
+    await player.attach(player.room.current.id, mediaPath, 5);
+    if (native) player.nativePlaybackError();
+    else player.instances[0].events.get('error')('error', {fatal: true, type: 'media'});
+    assert.equal(player.state().qualityPreference, 'standard');
+    assert.equal(player.state().playerError, '');
+  }
+});
 
 test('player generation guards discard stale responses and errors after source changes, removal, or destruction', async t => {
   for (const native of [false, true]) {

@@ -147,6 +147,56 @@ test('Twitch VOD HLS and hosted watch pages share playable, seekable encrypted p
   assert.equal((await fetch(`${url}/internal/remote/${instance.media.jobs.get(item.id).id}?key=wrong`)).status, 403);
 });
 
+test('compatible HLS keeps original frames while preparing an independently encrypted standard quality', {timeout: 45000}, async t => {
+  const {instance, connect, url, cookie, dir} = await start(t);
+  const source = path.join(dir, 'quality.m3u8');
+  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=60', '-f', 'lavfi', '-i', 'sine=frequency=440',
+    '-t', '6', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '120', '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+    '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'vod', source]);
+  instance.app.get('/quality/:file', (req, res) => res.sendFile(req.params.file, {root: dir, dotfiles: 'allow'}));
+  t.mock.method(instance.twitch, 'resolve', async () => ({duration: 6, copyQuality: {label: 'Original (180p)'},
+    inputs: [{url: `${url}/quality/quality.m3u8`, headers: {}}]}));
+  const ws = await connect();
+  ws.send(JSON.stringify({type: 'join', roomId: 'lobby'}));
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size);
+  const item = makeItem({kind: 'twitch', url: 'https://twitch.tv/videos/12345'}, {duration: 6});
+  instance.rooms.add(room, [item]);
+  await until(() => {
+    assert.notEqual(item.status, 'error', item.error);
+    return instance.media.jobs.get(item.id)?.done;
+  }, 20000);
+  assert.deepEqual(item.media.qualities.map(quality => quality.id), ['original', 'standard']);
+  const keys = [];
+  for (const quality of item.media.qualities) {
+    const playlist = await fetch(url + quality.url, {headers: {Cookie: cookie}});
+    const encrypted = await encryptedHLS(instance, url, cookie, {...item, media: quality}, await playlist.text());
+    keys.push(encrypted.key);
+    await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-allowed_extensions', 'ALL',
+      '-headers', `Cookie: ${cookie}\r\n`, '-i', url + quality.url, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
+  }
+  assert.notDeepEqual(...keys);
+  const frames = async (input, headers = []) => {
+    const result = await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-allowed_extensions', 'ALL',
+      ...headers, '-i', input, '-map', '0:v:0', '-f', 'framemd5', '-']);
+    return result.stdout.split(/\r?\n/).filter(line => line && !line.startsWith('#')).map(line => line.split(',').at(-1).trim());
+  };
+  const originalFrames = await frames(url + item.media.qualities[0].url, ['-headers', `Cookie: ${cookie}\r\n`]);
+  assert.deepEqual(originalFrames, await frames(source), 'Every decoded frame is unchanged by encryption-only processing.');
+  assert.equal(originalFrames.length, 360, 'Original preserves 60 fps.');
+  const standardFrames = await frames(url + item.media.qualities[1].url, ['-headers', `Cookie: ${cookie}\r\n`]);
+  assert.ok(standardFrames.length >= 179 && standardFrames.length <= 182, 'Standard retains the existing 30 fps encoding.');
+  const job = instance.media.jobs.get(item.id);
+  instance.rooms.control(room, {action: 'seek', position: item.duration, revision: room.playback.revision});
+  assert.equal(instance.media.jobs.get(item.id), job, 'Seeking to the prepared end retains the playable renditions.');
+  await instance.media.cleanup();
+  await stat(job.original.dir);
+  instance.media.dispose(job);
+  await job.cleanup;
+  for (const rendition of [job, job.original]) await assert.rejects(stat(rendition.keyDir), {code: 'ENOENT'});
+});
+
 test('HTTP audio is playable and a hosted manifest cannot trigger nested requests', { timeout: 30000 }, async t => {
   const { instance, connect, url, dir } = await start(t);
   const audio = path.join(dir, 'audio.mp3');
@@ -173,7 +223,7 @@ test('HTTP audio is playable and a hosted manifest cannot trigger nested request
 });
 
 async function encryptedHLS(instance, url, cookie, item, contents) {
-  const job = instance.media.jobs.get(item.id);
+  const job = instance.media.allJobs().find(job => item.media.url === `/media/${job.id}/index.m3u8`);
   assert.ok(Buffer.isBuffer(job.key));
   assert.equal(job.key.length, 16);
   const keyURI = `/direct/media/${job.id}/key.bin`;
@@ -199,7 +249,7 @@ async function encryptedHLS(instance, url, cookie, item, contents) {
     for (const file of [keyFile, keyInfoFile]) assert.equal((await stat(file)).mode & 0o777, 0o600);
   }
   assert.equal(Object.hasOwn(item, 'key'), false);
-  assert.deepEqual(Object.keys(item.media).sort(), ['baseTime', 'bufferedUntil', 'complete', 'url']);
+  assert.ok(Object.keys(item.media).every(key => ['baseTime', 'bufferedUntil', 'complete', 'url', 'id', 'label', 'qualities'].includes(key)));
   for (const secret of [JSON.stringify(key), key.toString('hex'), key.toString('base64'), keyFile]) {
     assert.equal(JSON.stringify(item).includes(secret), false, 'Serialized items must not contain key material or private paths.');
   }

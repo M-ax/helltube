@@ -6,7 +6,9 @@
     import SeekJoystick from './SeekJoystick.svelte';
     import Reactions from './Reactions.svelte';
     import MetalPipeReaction from './MetalPipeReaction.svelte';
+    import FlashbangReaction from './FlashbangReaction.svelte';
     import {PIPE_LIFETIME_MS} from '../lib/metal-pipe.js';
+    import {FLASH_LIFETIME_MS} from '../lib/flashbang.js';
     import {createReactionAudio} from '../lib/reaction-audio.js';
     import {ballArena, BALL_WIDTH, BALL_HEIGHT} from '../../shared/beach-ball.js';
     import {targetPosition, driftCorrection, time, bufferDuration} from '../lib/format.js';
@@ -16,6 +18,7 @@
     import {createBufferHealth, isProxyLoadFailure} from '../lib/buffer-health.js';
     import {createVideoRenderer} from '../lib/video-renderer.js';
     import {createSeekPreview} from '../lib/seek-preview.js';
+    import {availableQualities, qualityReady, selectQuality} from '../lib/media-quality.js';
 
     export let username = 'guest';
     export let room = null;
@@ -60,6 +63,7 @@
     let bufferReport = null;
     let metalItemId = null;
     let fallbackNotice = '';
+    let qualityPreference = 'original';
     let initialAlign = true;
     let alignedRevision = -1;
     let playPending = false;
@@ -83,7 +87,8 @@
     const VOLUME_CURVE = 100;
 
     $: item = room?.current;
-    $: media = item?.media;
+    $: qualities = availableQualities(item?.media);
+    $: media = selectQuality(item?.media, qualityPreference, position);
     $: crtVisible = !media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error');
     $: if (renderer) renderer.setCrtActive(crtVisible);
     $: duration = item?.duration;
@@ -100,6 +105,7 @@
     $: updateReactionRoom(connected ? room?.id : null);
     $: if (renderer) renderer.setBeachBallState(beachBall ? reactions.ball : null, (Date.now() + clockOffset - reactions.serverTime) / 1000);
     $: receiveReactions(reactions, connected, room?.id, reactionsEnabled);
+    $: if (soundMuted || muted || volume <= 0) reactionAudio?.stop();
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
     $: volumePosition = Math.round(Math.log1p(volume * (VOLUME_CURVE - 1)) / Math.log(VOLUME_CURVE) * 100) / 100;
@@ -142,6 +148,17 @@
     function toggleMute() {
         muted = !muted;
         onPreferencesChange?.({muted}, {key: preferenceKey, commit: true});
+    }
+
+    function changeQuality(event) {
+        qualityPreference = event.currentTarget.value;
+        revealControls();
+    }
+
+    function useStandardQuality() {
+        if (media?.id !== 'original' || !qualities.some(quality => quality.id === 'standard' && qualityReady(quality, position))) return false;
+        qualityPreference = 'standard';
+        return true;
     }
 
     function scheduleControlsHide(eligible, held) {
@@ -348,6 +365,7 @@
                 if (generation !== sourceGeneration) return;
                 if (isProxyLoadFailure(data, source) && switchToMetal('Cloudflare request failed')) return;
                 if (!data.fatal) return;
+                if (useStandardQuality()) return;
                 if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
                     recovered = true;
                     instance.recoverMediaError();
@@ -395,6 +413,7 @@
     function nativePlaybackError() {
         if (hls || !media) return;
         if (video.error?.code === 2 && switchToMetal('Cloudflare request failed')) return;
+        if (useStandardQuality()) return;
         playerError = 'The video stream could not be played. Retry playback or use another browser.';
     }
 
@@ -499,6 +518,7 @@
     function clearActiveReactions() {
         hitmarkerArmed = false;
         activeReactions = [];
+        reactionAudio?.stop();
         for (const timer of reactionTimers) clearTimeout(timer);
         reactionTimers.clear();
     }
@@ -517,7 +537,8 @@
             if (seenReactions.has(event.id)) continue;
             seenReactions.add(event.id);
             if (!enabled) continue;
-            const lifetime = event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
+            const lifetime = event.kind === 'flashbang' ? FLASH_LIFETIME_MS
+                : event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
             activeReactions = [...activeReactions.slice(-39), event];
@@ -551,6 +572,12 @@
 
     function pipeImpact() {
         if (reactionsEnabled && connected && !soundMuted && !muted && !document.hidden) reactionAudio?.play(volume, 'metalpipe');
+    }
+
+    function flashbangSound(kind, level = 1) {
+        if (reactionsEnabled && connected && !soundMuted && !muted && !document.hidden) {
+            return reactionAudio?.play(volume * level, kind);
+        }
     }
 
     function placeHitmarker(event) {
@@ -688,8 +715,11 @@
         {#each activeReactions.filter(reaction => reaction.kind === 'metalpipe') as reaction (reaction.id)}
             <MetalPipeReaction {reaction} {clockOffset} onImpact={pipeImpact}/>
         {/each}
+        {#each activeReactions.filter(reaction => reaction.kind === 'flashbang') as reaction (reaction.id)}
+            <FlashbangReaction {reaction} {clockOffset} onSound={flashbangSound}/>
+        {/each}
         <div class="reaction-overlay" aria-hidden="true">
-            {#each activeReactions.filter(reaction => reaction.kind !== 'metalpipe') as reaction (reaction.id)}
+            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang'].includes(reaction.kind)) as reaction (reaction.id)}
                 <span class="player-reaction" class:hitmarker={reaction.kind === 'hitmarker'}
                       data-reaction={reaction.kind} data-reaction-id={reaction.id}
                       style={`left: ${reaction.x * 100}%; top: ${reaction.y * 100}%`}>
@@ -795,6 +825,14 @@
                     {/key}
                 </div>
                 <div class="local-controls"><span class="shared-label"><Icon name="users" size={13}/>Shared controls</span>
+                    {#if media}
+                        <select class="quality-select" aria-label="Video quality on this device" title="Quality is just for you"
+                                value={media.id || 'standard'} on:change={changeQuality}>
+                            {#each qualities as quality (quality.id)}
+                                <option value={quality.id} disabled={!qualityReady(quality, position)}>{quality.label}</option>
+                            {/each}
+                        </select>
+                    {/if}
                     <button class="icon-button" aria-label={muted ? 'Unmute on this device' : 'Mute on this device'}
                             title="Volume is just for you" on:click={toggleMute}>
                         <Icon name={muted || volume === 0 ? 'mute' : 'volume'} size={19}/>

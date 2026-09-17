@@ -158,7 +158,7 @@ export async function createApp(overrides = {}) {
     identify(req, res, next);
   };
   const mediaJob = (jobId, auth) => {
-    const job = [...media.jobs.values()].find(value => value.id === jobId && !value.cancelled);
+    const job = media.allJobs().find(value => value.id === jobId && !value.cancelled && !value.failed);
     if (!job) throw httpError(404, 'Media not found.');
     const allowed = [...rooms.rooms.values()].some(room => [...room.members.values()].some(user => user.id === auth.user.id) &&
       [room.current, ...room.queue, ...room.history].some(item => item?.id === job.item.id));

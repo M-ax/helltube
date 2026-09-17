@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
 import {start, until} from './helpers.js';
 import {createBeachBall, ballArena} from '../shared/beach-ball.js';
+import {FLASH_DETONATE_MS, FLASH_LIFETIME_MS} from '../src/lib/flashbang.js';
 
 test('two browsers share positioned reactions, audio, cursor physics and late-join state', {timeout: 60000}, async t => {
     const {instance, url} = await start(t, {maxTranscoders: 0});
@@ -48,7 +49,7 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
         await join(page);
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
-        await until(async () => await page.evaluate(() => window.decodedSounds === 2));
+        await until(async () => await page.evaluate(() => window.decodedSounds === 4));
     }
     const geometry = await a.locator('.reactions-panel').evaluate(panel => ({
         outside: !panel.closest('.player-shell'),
@@ -150,5 +151,114 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
     await b.screenshot({path: 'test-artifacts/reactions-mobile.png', fullPage: true});
     await ballB.click();
     await until(async () => await ballA.getAttribute('aria-pressed') === 'false');
+    assert.deepEqual(errors, []);
+});
+
+test('flashbang bounces and rings in sync, fades over the player, and obeys local controls', {timeout: 60000}, async t => {
+    const {instance, url} = await start(t, {maxTranscoders: 0});
+    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--enable-unsafe-swiftshader']});
+    t.after(() => browser.close());
+    const a = await browser.newPage({viewport: {width: 1440, height: 1000}});
+    const b = await browser.newPage({viewport: {width: 900, height: 800}});
+    const errors = [];
+    for (const page of [a, b]) {
+        page.setDefaultTimeout(8000);
+        page.on('pageerror', error => errors.push(error.message));
+        await page.addInitScript(() => {
+            window.flashSounds = [];
+            window.flashStops = 0;
+            window.decodedSounds = 0;
+            const start = AudioBufferSourceNode.prototype.start;
+            const stop = AudioBufferSourceNode.prototype.stop;
+            AudioBufferSourceNode.prototype.start = function (...args) {
+                const grenade = document.querySelector('.flying-flashbang');
+                const viewport = document.querySelector('.video-viewport');
+                window.flashSounds.push({kind: this.buffer.duration < .5 ? 'bounce' : 'ring', at: Date.now(),
+                    bottom: grenade?.getBoundingClientRect().bottom, floor: viewport?.getBoundingClientRect().bottom,
+                    whiteout: Number(document.querySelector('.flashbang-whiteout')?.style.opacity)});
+                return start.apply(this, args);
+            };
+            AudioBufferSourceNode.prototype.stop = function (...args) {
+                window.flashStops++;
+                return stop.apply(this, args);
+            };
+            const decode = BaseAudioContext.prototype.decodeAudioData;
+            BaseAudioContext.prototype.decodeAudioData = function (...args) {
+                return decode.apply(this, args).then(buffer => { window.decodedSounds++; return buffer; });
+            };
+        });
+        await page.goto(url);
+        await page.getByLabel('Username', {exact: true}).fill('admin');
+        await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+        await page.getByRole('button', {name: 'Enter Helltube'}).click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
+        await until(async () => await page.evaluate(() => window.decodedSounds === 4));
+    }
+    const throwFlash = a.getByRole('button', {name: 'Flashbang', exact: true});
+    const flash = page => page.locator('[data-reaction="flashbang"]');
+    const opacity = page => page.locator('.flashbang-whiteout').evaluate(node => Number(node.style.opacity));
+    await throwFlash.click();
+    await flash(b).waitFor();
+    const id = await flash(a).getAttribute('data-reaction-id');
+    assert.equal(await flash(b).getAttribute('data-reaction-id'), id);
+    assert.equal(await opacity(a), 0);
+    assert.equal(await a.evaluate(() => window.flashSounds.length), 0, 'The throw is silent until floor contact.');
+    await until(async () => await a.evaluate(() => window.flashSounds.length) === 4
+        && await b.evaluate(() => window.flashSounds.length) === 4);
+    const sounds = await Promise.all([a, b].map(page => page.evaluate(() => window.flashSounds)));
+    for (const events of sounds) {
+        assert.deepEqual(events.map(event => event.kind), ['bounce', 'bounce', 'bounce', 'ring']);
+        for (const event of events.slice(0, 3)) {
+            assert.ok(Math.abs(event.bottom - event.floor) < 1, 'Each collision sounds while the grenade touches the floor.');
+            assert.equal(event.whiteout, 0);
+        }
+        assert.equal(events[3].whiteout, 1, 'Ringing starts on the whiteout frame.');
+    }
+    for (let index = 0; index < 4; index++) {
+        assert.ok(Math.abs(sounds[0][index].at - sounds[1][index].at) < 150, 'Both viewers share the same effect timing.');
+    }
+    assert.equal(await a.locator('.flashbang-reaction').evaluate(node => getComputedStyle(node).pointerEvents), 'none');
+    await a.screenshot({path: 'test-artifacts/flashbang-whiteout.png', fullPage: true});
+    await until(async () => await opacity(a) < .7);
+    assert.ok(await opacity(a) > 0);
+    await a.screenshot({path: 'test-artifacts/flashbang-fade.png', fullPage: true});
+    await until(async () => await flash(a).count() === 0 && await flash(b).count() === 0);
+
+    await b.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
+    await throwFlash.click();
+    await until(async () => await a.evaluate(() => window.flashSounds.length) === 8);
+    assert.equal(await b.evaluate(() => window.flashSounds.length), 4, 'Reaction mute silences bounces and ringing locally.');
+    assert.ok(await opacity(b) > .9, 'Muting sound keeps the shared whiteout visible.');
+    await a.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
+    assert.ok(await a.evaluate(() => window.flashStops) >= 1, 'Muting stops ringing that is already playing.');
+    await a.getByRole('switch', {name: 'Enable reactions on this device'}).click();
+    assert.equal(await flash(a).count(), 0, 'Turning reactions off immediately clears the whiteout.');
+    await until(async () => await flash(b).count() === 0);
+    await b.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
+    await b.getByRole('button', {name: 'Flashbang', exact: true}).click();
+    await flash(b).waitFor();
+    assert.equal(await flash(a).count(), 0, 'Disabled reactions ignore incoming flashbangs.');
+    await a.getByRole('switch', {name: 'Enable reactions on this device'}).click();
+    assert.equal(await flash(a).count(), 0, 'Enabling reactions never replays an ignored flashbang.');
+    await b.getByRole('switch', {name: 'Enable reactions on this device'}).click();
+    assert.equal(await flash(b).count(), 0);
+
+    // An old network event must resume its fade without replaying collisions or the bang.
+    await a.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
+    const before = await a.evaluate(() => window.flashSounds.length);
+    instance.reactions.broadcast('lobby', {type: 'reaction', roomId: 'lobby', id: 'late-flash', kind: 'flashbang',
+        userId: instance.accounts.users[0].id, x: .5, y: .65,
+        serverTime: Date.now() - FLASH_DETONATE_MS - 1500});
+    await flash(a).waitFor();
+    assert.ok(await opacity(a) > 0 && await opacity(a) < .8);
+    assert.equal(await a.evaluate(() => window.flashSounds.length), before);
+    await until(async () => await flash(a).count() === 0);
+    instance.reactions.broadcast('lobby', {type: 'reaction', roomId: 'lobby', id: 'expired-flash', kind: 'flashbang',
+        userId: instance.accounts.users[0].id, x: .5, y: .65,
+        serverTime: Date.now() - FLASH_LIFETIME_MS - 1000});
+    await a.getByRole('heading', {name: 'Reactions', exact: true}).click();
+    assert.equal(await flash(a).count(), 0);
+    assert.equal(instance.rooms.get('lobby').playback.revision, 0);
     assert.deepEqual(errors, []);
 });

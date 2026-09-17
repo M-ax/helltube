@@ -3,6 +3,8 @@ export function createReactionAudio() {
     const sounds = {
         hitmarker: {url: '/sounds/mw2-hitmarker.mp3', gain: 0.65},
         metalpipe: {url: '/sounds/metal-pipe.mp3', gain: 1},
+        flashbangBounce: {url: '/sounds/csgo-flashbang-bounce.mp3', gain: .7},
+        flashbangRing: {url: '/sounds/csgo-flashbang-ring.mp3', gain: .5},
     };
     let destroyed = false;
     const sources = new Set();
@@ -43,6 +45,7 @@ export function createReactionAudio() {
             sources.add(source);
             source.onended = () => { sources.delete(source); source.disconnect(); gain.disconnect(); };
             source.start();
+            return () => { if (sources.has(source)) source.stop(); };
         },
         destroy() {
             destroyed = true;

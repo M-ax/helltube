@@ -8,6 +8,7 @@ import { makeItem } from './rooms.js';
 import { parseStartTime, youtubeTimeArgument } from '../shared/youtube-time.js';
 import { youtubeNetwork } from './youtube-network.js';
 import { SponsorBlock, normalizeSponsors } from './sponsorblock.js';
+import { hlsCopyQuality } from './hls-copy.js';
 
 function videoId(url) {
   return url.hostname === 'youtu.be' ? url.pathname.slice(1)
@@ -132,7 +133,7 @@ export class YouTube {
       return { url: source.href, headers: format.http_headers || data.http_headers || {} };
     });
     const duration = Number(data.duration) || null;
-    return { inputs, duration, sponsorSegments: normalizeSponsors(segments, duration) };
+    return { inputs, duration, copyQuality: hlsCopyQuality(formats), sponsorSegments: normalizeSponsors(segments, duration) };
   }
 
   close() {

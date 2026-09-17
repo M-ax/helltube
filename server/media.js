@@ -52,8 +52,14 @@ export class Media {
     this.rooms.on('prepare', () => this.schedule());
     this.rooms.on('seek', (room, position) => {
       const job = this.jobs.get(room.current.id);
-      if (job && position >= job.baseTime && (position < (room.current.media?.bufferedUntil || 0) - 1 ||
-        (position === job.baseTime && !job.done))) return;
+      const qualities = room.current.media?.qualities || [room.current.media].filter(Boolean);
+      const prepared = qualities.find(quality => position >= quality.baseTime &&
+        (quality.complete ? position <= quality.bufferedUntil : position < quality.bufferedUntil - 1));
+      if (job && prepared) {
+        room.current.media = {...prepared, qualities};
+        return;
+      }
+      if (job && position === job.baseTime && !job.done) return;
       if (job) this.dispose(job);
       room.current.status = 'queued';
       room.current.error = null;
@@ -116,7 +122,11 @@ export class Media {
     });
   }
 
-  async run(job) {
+  allJobs() {
+    return [...this.jobs.values()].flatMap(job => job.original ? [job, job.original] : [job]);
+  }
+
+  async prepareEncryption(job) {
     await mkdir(job.dir, { recursive: true });
     await mkdir(job.keyDir, { recursive: true, mode: 0o700 });
     await chmod(job.keyDir, 0o700);
@@ -126,11 +136,17 @@ export class Media {
     await writeFile(keyInfoFile, `/direct/media/${job.id}/key.bin\n${keyFile}\n`, { flag: 'wx', mode: 0o600 });
     await chmod(keyFile, 0o600);
     await chmod(keyInfoFile, 0o600);
+    return keyInfoFile;
+  }
+
+  async run(job) {
+    const keyInfoFile = await this.prepareEncryption(job);
     const { item } = job;
     let { baseTime } = job;
     const network = youtubeNetwork(item.kind === 'youtube' ? this.config : {});
     const args = ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y'];
     let inputs;
+    let copyQuality;
     if (item.kind === 'youtube' || item.kind === 'twitch') {
       const resolved = await this[item.kind].resolve(item.source.url);
       if (job.cancelled) return;
@@ -147,6 +163,7 @@ export class Media {
         throw new Error(`Start time must be before the end of the video (${item.duration} seconds).`);
       }
       inputs = resolved.inputs;
+      copyQuality = resolved.copyQuality;
     } else if (item.kind === 'http') {
       inputs = [{ url: `http://127.0.0.1:${this.port}/internal/remote/${job.id}?key=${this.sourceSecret}`, headers: {} }];
       if (job.cancelled) return;
@@ -181,30 +198,64 @@ export class Media {
     item.preparation = { stage: 'transcoding', baseTime, seconds: 0 };
     const inputFormats = item.kind === 'http' ? HOSTED_INPUT_FORMATS : FILE_INPUT_FORMATS +
       (item.kind === 'youtube' || item.kind === 'twitch' ? ',hls' : '');
-    for (const input of inputs) {
-      if (baseTime > 0) args.push('-ss', String(baseTime));
-      if (network.proxy) args.push('-http_proxy', network.proxy);
-      const headers = Object.entries(input.headers).filter(([key, value]) =>
-        /^[a-zA-Z-]+$/.test(key) && !/[\r\n]/.test(String(value))).map(([k, v]) => `${k}: ${v}\r\n`).join('');
-      if (headers) args.push('-headers', headers);
-      args.push('-rw_timeout', '120000000', '-protocol_whitelist', `http,https,tcp,tls,crypto${network.proxy ? ',httpproxy' : ''}`,
-        '-format_whitelist', inputFormats, '-i', input.url);
+    const inputArgs = (start) => {
+      const result = [];
+      for (const input of inputs) {
+        if (start > 0) result.push('-ss', String(start));
+        if (network.proxy) result.push('-http_proxy', network.proxy);
+        const headers = Object.entries(input.headers).filter(([key, value]) =>
+          /^[a-zA-Z-]+$/.test(key) && !/[\r\n]/.test(String(value))).map(([k, v]) => `${k}: ${v}\r\n`).join('');
+        if (headers) result.push('-headers', headers);
+        result.push('-rw_timeout', '120000000', '-protocol_whitelist', `http,https,tcp,tls,crypto${network.proxy ? ',httpproxy' : ''}`,
+          '-format_whitelist', inputFormats, '-i', input.url);
+      }
+      return result;
+    };
+    const outputArgs = (rendition, keyInfo) => ['-avoid_negative_ts', 'make_zero',
+      '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'event', '-hls_list_size', '0',
+      '-hls_key_info_file', keyInfo,
+      '-hls_flags', 'independent_segments+temp_file+periodic_rekey',
+      '-hls_segment_filename', path.join(rendition.dir, 'segment-%06d.ts'), path.join(rendition.dir, 'index.m3u8')];
+    let originalTask = Promise.resolve();
+    if (copyQuality && inputs.length === 1) {
+      const id = randomUUID();
+      // Copy from the beginning: an input seek can retain keyframe preroll and shift the
+      // room timeline. The parallel encoder still prepares far seeks immediately.
+      job.original = {id, item, baseTime: 0, dir: path.join(this.dir, id), keyDir: path.join(this.keyDir, id),
+        key: randomBytes(16), label: copyQuality.label, lastProgress: Date.now(), lastBuffered: 0, errors: ''};
+      const original = job.original;
+      originalTask = (async () => {
+        const keyInfo = await this.prepareEncryption(original);
+        if (job.cancelled) return;
+        await this.convert(original, ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y',
+          ...inputArgs(0), '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', ...outputArgs(original, keyInfo)], network);
+      })().catch(error => { original.failed = error; }).finally(() => { original.done = true; });
     }
+    args.push(...inputArgs(baseTime));
     args.push('-progress', 'pipe:1', '-stats_period', '0.5', '-nostats',
       '-map', item.kind === 'http' ? '0:v:0?' : '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
       '-vf', 'scale=w=min(1280\\,iw):h=min(720\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '3000k', '-bufsize', '6000k',
       '-threads', '2', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
-      '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-avoid_negative_ts', 'make_zero',
-      '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'event', '-hls_list_size', '0',
-      '-hls_key_info_file', keyInfoFile,
-      '-hls_flags', 'independent_segments+temp_file+periodic_rekey', '-hls_segment_filename', path.join(job.dir, 'segment-%06d.ts'),
-      path.join(job.dir, 'index.m3u8'));
+      '-c:a', 'aac', '-b:a', '128k', '-ac', '2', ...outputArgs(job, keyInfoFile));
+    await Promise.all([
+      this.convert(job, args, network, true).catch(error => { job.failed = error; }).finally(() => { job.encodingDone = true; }),
+      originalTask,
+    ]);
+    if (!job.cancelled) {
+      await this.refresh(job);
+      if (!item.media?.complete) throw job.failed || new Error('The source did not produce a playable video.');
+      job.done = true;
+      item.duration = item.media.bufferedUntil;
+    }
+  }
+
+  async convert(job, args, network, reportProgress = false) {
     await new Promise((resolve, reject) => {
       job.child = spawn(this.config.ffmpeg, args, { windowsHide: true, env: network.env, stdio: ['ignore', 'pipe', 'pipe'] });
       job.child.stdout.on('data', createProgressReader(progress => {
-        if (job.cancelled) return;
-        item.preparation = { ...item.preparation, ...progress };
+        if (job.cancelled || !reportProgress) return;
+        job.item.preparation = { ...job.item.preparation, ...progress };
       }));
       job.child.stderr.on('data', data => { job.errors = (job.errors + data).slice(-12000); });
       job.child.on('error', error => reject(new Error(`Could not start FFmpeg: ${error.code || error.message}`)));
@@ -217,31 +268,40 @@ export class Media {
         resolve();
       });
     });
-    if (!job.cancelled) {
-      await this.refresh(job);
-      if (!item.media?.complete) throw new Error('The source did not produce a playable video.');
-      job.done = true;
-      item.duration = item.media.bufferedUntil;
-    }
   }
 
   async refresh(job) {
     if (job.cancelled || job.item.status === 'error') return;
-    let contents;
-    try { contents = await readFile(path.join(job.dir, 'index.m3u8'), 'utf8'); }
-    catch (error) { if (error.code === 'ENOENT') return; throw error; }
-    if (job.cancelled) return;
-    const progress = playlistProgress(contents, job.baseTime);
-    if (progress.segments > 0) {
-      job.item.media = { url: `/media/${job.id}/index.m3u8`, baseTime: job.baseTime,
-        bufferedUntil: progress.bufferedUntil, complete: progress.complete };
-      job.item.status = 'ready';
-      job.item.preparation = { ...job.item.preparation, stage: progress.complete ? 'ready' : 'buffering' };
-      if (progress.bufferedUntil > job.lastBuffered) {
-        job.lastBuffered = progress.bufferedUntil;
-        job.lastProgress = Date.now();
+    const qualities = [];
+    for (const rendition of [job.original, job].filter(Boolean)) {
+      if (rendition.failed) continue;
+      let contents;
+      try { contents = await readFile(path.join(rendition.dir, 'index.m3u8'), 'utf8'); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      const progress = playlistProgress(contents, rendition.baseTime);
+      if (progress.bufferedUntil > rendition.lastBuffered) {
+        rendition.lastBuffered = progress.bufferedUntil;
+        rendition.lastProgress = Date.now();
       }
+      if (!progress.segments || progress.bufferedUntil <= job.baseTime) continue;
+      qualities.push({id: rendition === job ? 'standard' : 'original',
+        label: rendition === job ? 'Standard (up to 720p)' : rendition.label,
+        url: `/media/${rendition.id}/index.m3u8`, baseTime: rendition.baseTime,
+        bufferedUntil: progress.bufferedUntil, complete: progress.complete});
     }
+    if (job.cancelled) return;
+    if (!qualities.length) {
+      job.item.media = null;
+      return;
+    }
+    const room = [...this.rooms.rooms.values()].find(room => room.current?.id === job.item.id);
+    const position = room ? this.rooms.position(room) : job.baseTime;
+    // The room follows the furthest prepared rendition; each viewer selects its own.
+    const selected = qualities.filter(quality => quality.baseTime <= position)
+      .reduce((best, quality) => !best || quality.bufferedUntil > best.bufferedUntil ? quality : best, null) || qualities[0];
+    job.item.media = {...selected, qualities};
+    job.item.status = 'ready';
+    job.item.preparation = { ...job.item.preparation, stage: selected.complete ? 'ready' : 'buffering' };
   }
 
   async poll() {
@@ -250,14 +310,14 @@ export class Media {
     try {
       await Promise.all([...this.jobs.values()].filter(j => !j.done).map(async job => {
         await this.refresh(job);
-        if (job.item.kind !== 'upload' && Date.now() - job.lastProgress > 180000) {
-          job.child?.kill();
+        for (const rendition of [job, job.original].filter(Boolean)) {
+          if (job.item.kind !== 'upload' && Date.now() - rendition.lastProgress > 180000) rendition.child?.kill();
         }
       }));
       if (Date.now() - this.lastQuotaCheck > 10000) {
         this.lastQuotaCheck = Date.now();
         let bytes = [...this.uploads.uploads.values()].reduce((n, u) => n + u.received, 0);
-        for (const job of this.jobs.values()) {
+        for (const job of this.allJobs()) {
           const files = await readdir(job.dir).catch(() => []);
           for (const file of files) bytes += (await stat(path.join(job.dir, file)).catch(() => ({ size: 0 }))).size;
         }
@@ -277,7 +337,7 @@ export class Media {
     this.schedule();
     await Promise.all(this.cleanups);
     for (const entry of await readdir(this.dir)) {
-      if (this.retiring.has(entry) || [...this.jobs.values()].some(job => job.id === entry)) continue;
+      if (this.retiring.has(entry) || this.allJobs().some(job => job.id === entry)) continue;
       await rm(path.join(this.dir, entry), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
     for (const entry of await readdir(path.dirname(this.dir))) {
@@ -291,18 +351,29 @@ export class Media {
     job.cancelled = true;
     job.probeController?.abort();
     job.child?.kill();
+    if (job.original) {
+      job.original.cancelled = true;
+      job.original.child?.kill();
+      this.retiring.add(job.original.id);
+    }
     if (this.jobs.get(job.item.id) === job) this.jobs.delete(job.item.id);
     job.item.media = null;
     job.item.preparation = null;
     job.item.status = 'queued';
     job.cleanup = Promise.resolve(job.task).then(async () => {
-      job.key.fill(0);
-      await Promise.all([job.dir, job.keyDir].map(dir => rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })));
+      for (const rendition of [job, job.original].filter(Boolean)) {
+        rendition.key.fill(0);
+        await Promise.all([rendition.dir, rendition.keyDir].map(dir => rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })));
+      }
     })
       .catch(error => console.error('Media cleanup:', error.message));
     this.retiring.add(job.id);
     this.cleanups.add(job.cleanup);
-    void job.cleanup.finally(() => { this.cleanups.delete(job.cleanup); this.retiring.delete(job.id); });
+    void job.cleanup.finally(() => {
+      this.cleanups.delete(job.cleanup);
+      this.retiring.delete(job.id);
+      this.retiring.delete(job.original?.id);
+    });
   }
 
   async close() {

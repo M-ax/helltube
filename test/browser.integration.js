@@ -10,6 +10,60 @@ import { createApp } from '../server/app.js';
 import { targetPosition } from '../src/lib/format.js';
 import { makeItem } from '../server/rooms.js';
 
+test('quality selection switches encrypted renditions locally and keeps the shared clock', {timeout: 45000}, async t => {
+  const {instance, url, dir} = await start(t);
+  const sample = path.join(dir, 'quality.m3u8');
+  await promisify(execFile)(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=1440x810:rate=30', '-t', '12', '-c:v', 'libx264',
+    '-preset', 'ultrafast', '-g', '60', '-pix_fmt', 'yuv420p', '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'vod', sample]);
+  instance.app.get('/quality/:file', (req, res) => res.sendFile(req.params.file, {root: dir, dotfiles: 'allow'}));
+  t.mock.method(instance.twitch, 'resolve', async () => ({duration: 12, copyQuality: {label: 'Original (810p)'},
+    inputs: [{url: `${url}/quality/quality.m3u8`, headers: {}}]}));
+  const browser = await chromium.launch({channel: 'chrome', headless: true});
+  t.after(() => browser.close());
+  const pages = [await browser.newPage({viewport: {width: 1440, height: 1000}}), await browser.newPage()];
+  const errors = [];
+  for (const page of pages) {
+    page.setDefaultTimeout(10000);
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(url);
+    await page.getByLabel('Username', {exact: true}).fill('admin');
+    await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+    await page.getByRole('button', {name: 'Enter Helltube'}).click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('button', {name: 'Your files', exact: true}).waitFor();
+  }
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size === 2);
+  const item = makeItem({kind: 'twitch', url: 'https://twitch.tv/videos/12345', startAt: 3}, {duration: 12, startAt: 3});
+  instance.rooms.add(room, [item]);
+  instance.rooms.control(room, {action: 'pause', revision: room.playback.revision});
+  await until(() => instance.media.jobs.get(item.id)?.done, 15000);
+  const revision = room.playback.revision;
+  const target = instance.rooms.position(room);
+  const quality = pages[0].getByRole('combobox', {name: 'Video quality on this device'});
+  const aligned = async (page, width, baseTime) => page.locator('video').evaluate((video, expected) =>
+    video.readyState >= 2 && video.videoWidth === expected.width &&
+    Math.abs(video.currentTime + expected.baseTime - expected.target) < 0.3, {width, baseTime, target});
+  await until(async () => (await Promise.all(pages.map(page => aligned(page, 1440, 0)))).every(Boolean));
+  assert.equal(await quality.inputValue(), 'original');
+  await quality.selectOption('standard');
+  await until(() => aligned(pages[0], 1280, 3));
+  assert.equal(await pages[1].getByRole('combobox', {name: 'Video quality on this device'}).inputValue(), 'original');
+  assert.equal(await aligned(pages[1], 1440, 0), true);
+  assert.equal(room.playback.revision, revision, 'Quality changes never send shared playback commands.');
+  await pages[0].screenshot({path: 'test-artifacts/quality-desktop.png'});
+  await pages[0].setViewportSize({width: 375, height: 850});
+  await quality.selectOption('original');
+  await until(() => aligned(pages[0], 1440, 0));
+  assert.ok(await quality.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.left >= 0 && rect.right <= window.innerWidth;
+  }));
+  await pages[0].screenshot({path: 'test-artifacts/quality-mobile.png'});
+  assert.deepEqual(errors, []);
+});
+
 test('deployment hashes show mismatch indicators and recover without reloading the frontend', { timeout: 30000 }, async t => {
   const version = JSON.parse(await readFile('dist/version.json', 'utf8'));
   assert.ok(version.commit);

@@ -697,17 +697,26 @@ update_install_cases() (
     [[ $8 == "/etc/systemd/system/${7##*/}" && -s $7 ]] || die 'Wrong updater unit destination.'
     printf 'install %s\n' "${7##*/}" >> "$WORK_DIR/actions"
   }
-  systemctl() { printf '%s\n' "$*" >> "$WORK_DIR/actions"; }
+  local failed_check=''
+  systemctl() {
+    printf '%s\n' "$*" >> "$WORK_DIR/actions"
+    [[ $* != "$failed_check" ]]
+  }
   for AUTO_UPDATE_ENABLED in yes no; do
     : > "$WORK_DIR/actions"
     install_update_units
     expected=$'install helltube-update.service\ninstall helltube-update.timer\ninstall helltube-update.path\ndaemon-reload\n'
     if [[ $AUTO_UPDATE_ENABLED == yes ]]; then
-      expected+='enable --now helltube-update.timer helltube-update.path'
+      expected+=$'enable --now helltube-update.timer helltube-update.path\nis-enabled --quiet helltube-update.timer\nis-active --quiet helltube-update.timer\nis-enabled --quiet helltube-update.path\nis-active --quiet helltube-update.path'
     else
       expected+='disable --now helltube-update.timer helltube-update.path'
     fi
     [[ $(< "$WORK_DIR/actions") == "$expected" ]] || die 'Updater units must install/reload before changing the timer/path state.'
+  done
+  AUTO_UPDATE_ENABLED=yes
+  for failed_check in 'is-enabled --quiet helltube-update.timer' 'is-active --quiet helltube-update.timer' \
+    'is-enabled --quiet helltube-update.path' 'is-active --quiet helltube-update.path'; do
+    if (install_update_units) >/dev/null 2>&1; then die "Reported success despite failed $failed_check."; fi
   done
   AUTO_UPDATE_ENABLED=invalid
   : > "$WORK_DIR/actions"
@@ -716,6 +725,7 @@ update_install_cases() (
 )
 update_install_cases
 printf 'PASS: unit installation enables/disables the timer and path together; never starts or stops the updater service\n'
+printf 'PASS: enabled installations require each timer/path unit to be both enabled and active\n'
 
 python3 - "$(declare -f main)" <<'PY'
 import sys

@@ -129,6 +129,8 @@ python3 test/wireguard.test.py
 sudo python3 test/update.test.py
 # Linux with systemd and Tinyproxy installed (validates units; does not start them):
 bash test/bootstrap-units.test.sh
+# Linux/root with running systemd: isolated fresh-install Worker callback test
+sudo env HELLTUBE_SYSTEMD_TEST=1 node --test test/deployment-callback.integration.js
 # Optional root-only Linux network test; uses synthetic peers in private namespaces:
 sudo python3 test/wireguard.integration.py --run
 ```
@@ -145,6 +147,8 @@ sudo bash scripts/bootstrap-ubuntu.sh
 ```
 
 The timer and `helltube-update.path` watcher are enabled only after the bootstrap's deployment health checks succeed. The path watcher wakes the same updater when metal saves a new Worker commit announcement to `/var/lib/helltube/worker-deployment.json`. Announcements are deduplicated and only wake it when the commits differ. The updater still fetches trusted `main` itself; announcements cannot select another branch or execute commands. Its first successful update establishes the Git revision baseline, so expect one build/restart even if your manual checkout was already current. Later checks do nothing when `main` has not changed. A successful manual bootstrap resets that baseline.
+
+With automatic updates enabled, bootstrap verifies that **each** of the timer and path units is enabled and active before reporting success. An older installation with only the timer will eventually update, but will not react immediately to Worker announcements; rerun the trusted bootstrap to install the missing watcher. Automatic application updates do not install systemd units. The callback integration check above runs the bootstrap's unit installer against temporary runtime units and a fresh test backend, exercising the real Worker handler, authenticated callback, first announcement-file creation, subsequent atomic replacements, deduplication, and disabled/re-enabled updates. Its updater only touches a test marker; production services, data and secrets are not used.
 
 For each new commit, the updater:
 
@@ -306,7 +310,9 @@ A normal proxied backend response is not assigned a Worker error code: signed-ou
 
 ### Encryption, caching, and privacy limits
 
-FFmpeg encrypts MPEG-TS HLS using **AES-128**, with a random 16-byte key per job and a sequence-derived IV per segment. Far seeks/restarts create a new job and key. Keys and FFmpeg key-info files are kept separately from public segment directories and cleaned up with their jobs. Standard `hls.js` and native HLS decrypt during playback; no custom player crypto is required.
+FFmpeg encrypts MPEG-TS HLS using **AES-128**, with a random 16-byte key per rendition and a sequence-derived IV per segment. Far seeks/restarts create new jobs and keys. Keys and FFmpeg key-info files are kept separately from public segment directories and cleaned up with their jobs. Standard `hls.js` and native HLS decrypt during playback; no custom player crypto is required.
+
+Compatible muxed HLS from YouTube/Twitch (known H.264 video and AAC-LC audio, or video only) also produces an **Original** rendition using FFmpeg stream copy and encryption, preserving the source resolution, frame rate, and encoded media. The existing **Standard (up to 720p)** H.264/AAC conversion runs concurrently. Missing or incompatible codec metadata and separate video/audio inputs retain normal conversion. Each rendition has independent encryption keys and authorized delivery URLs; a failed rendition does not stop the other. The quality selector changes only your device, defaults to Original when ready, and keeps the room position when switching. Browser playback failures on Original fall back to Standard when it is ready. Original is copied from the beginning to preserve accurate timestamps; after a far seek it becomes selectable once copying reaches that position, while Standard prepares from the seek point. Both renditions count toward storage limits and are stopped and cleaned up together.
 
 Only successful, complete encrypted **YouTube, Twitch VOD, and hosted-media** segments enter the shared cache. The Worker checks the live session, room membership, job, and file with the backend **before every hit**. It never caches playlists, API responses, keys, errors, ranges, or uploaded video. Browser-facing media responses are `no-store`; the short public TTL exists only on the private internal cache copy. Do not add CDN cache rules that override these headers. When the authorization server is unavailable, cached content is not served.
 
