@@ -48,6 +48,7 @@ test('every extraction uses the explicit proxy and removes inherited proxy bypas
   });
   await youtube.items('https://youtu.be/jNQXAC9IVRw', { displayName: 'Viewer' });
   await youtube.items('https://youtube.com/playlist?list=PL1234567890123', { displayName: 'Viewer' });
+  t.mock.method(youtube.sponsorBlock, 'segments', async () => []);
   await youtube.resolve('https://youtu.be/jNQXAC9IVRw');
   assert.equal(recorded.length, 3);
   for (const args of recorded) assert.equal(args[args.indexOf('--proxy') + 1], proxy);

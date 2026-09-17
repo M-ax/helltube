@@ -11,6 +11,7 @@ import { Rooms } from './rooms.js';
 import { Reactions } from './reactions.js';
 import { Uploads, chunkSize } from './uploads.js';
 import { YouTube } from './youtube.js';
+import { sponsorPlaylist } from './sponsorblock.js';
 import { Twitch } from './twitch.js';
 import { RemoteMedia } from './remote-media.js';
 import { sourceKind } from '../shared/media-source.js';
@@ -289,10 +290,12 @@ export async function createApp(overrides = {}) {
     }
     res.set('Cache-Control', 'no-store');
     res.type(req.params.file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
-    if (req.params.file === 'index.m3u8' && config.bareMetalOrigin) {
+    if (req.params.file === 'index.m3u8') {
       let contents;
       try { contents = await readFile(path.join(job.dir, 'index.m3u8'), 'utf8'); }
       catch (error) { if (error.code === 'ENOENT') throw httpError(404, 'Media not found.'); throw error; }
+      contents = sponsorPlaylist(contents, job.item, job.baseTime);
+      if (!config.bareMetalOrigin) return res.send(contents);
       const scope = `media:${job.id}`;
       const keyUrl = directUrl(`/direct/media/${job.id}/key.bin`, req.auth, scope);
       contents = contents.replace(/URI="[^"]*"/g, `URI="${keyUrl}"`);

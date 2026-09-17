@@ -4,6 +4,7 @@ import { chmod, mkdir, open, readFile, readdir, stat, rm, writeFile } from 'node
 import path from 'node:path';
 import { youtubeNetwork } from './youtube-network.js';
 import { FILE_INPUT_FORMATS, HOSTED_INPUT_FORMATS, probeCommand, probeDuration } from './media-metadata.js';
+import { sponsorPosition } from '../shared/sponsorblock.js';
 
 export function playlistProgress(contents, baseTime = 0) {
   const durations = [...contents.matchAll(/^#EXTINF:([\d.]+)/gm)].map(m => Number(m[1]));
@@ -122,13 +123,23 @@ export class Media {
     await writeFile(keyInfoFile, `/direct/media/${job.id}/key.bin\n${keyFile}\n`, { flag: 'wx', mode: 0o600 });
     await chmod(keyFile, 0o600);
     await chmod(keyInfoFile, 0o600);
-    const { item, baseTime } = job;
+    const { item } = job;
+    let { baseTime } = job;
     const network = youtubeNetwork(item.kind === 'youtube' ? this.config : {});
     const args = ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y'];
     let inputs;
     if (item.kind === 'youtube' || item.kind === 'twitch') {
       const resolved = await this[item.kind].resolve(item.source.url);
+      if (job.cancelled) return;
       if (resolved.duration) item.duration = resolved.duration;
+      if (item.kind === 'youtube') {
+        item.sponsorSegments = resolved.sponsorSegments || [];
+        const start = sponsorPosition(item, baseTime);
+        if (start !== baseTime) {
+          baseTime = job.baseTime = job.lastBuffered = item.source.startAt = start;
+          if (item.duration > 0 && start >= item.duration) { job.done = true; return; }
+        }
+      }
       if (baseTime > 0 && item.duration > 0 && baseTime >= item.duration) {
         throw new Error(`Start time must be before the end of the video (${item.duration} seconds).`);
       }

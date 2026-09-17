@@ -1,3 +1,5 @@
+import { sponsorPosition } from '../../shared/sponsorblock.js';
+
 export function time(seconds) {
     if (!Number.isFinite(seconds)) return '—';
     const value = Math.max(0, Math.floor(seconds));
@@ -21,7 +23,7 @@ export function targetPosition(room, clockOffset = 0, now = Date.now()) {
     if (!room?.playback) return 0;
     const {position, paused, updatedAt} = room.playback;
     const elapsed = paused ? 0 : Math.max(0, (now + clockOffset - updatedAt) / 1000);
-    const target = Math.max(0, position + elapsed);
+    const target = Math.max(0, sponsorPosition(room.current, position, elapsed));
     return Number.isFinite(room.current?.duration) && room.current.duration > 0
         ? Math.min(target, room.current.duration)
         : target;

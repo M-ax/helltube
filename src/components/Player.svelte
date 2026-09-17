@@ -10,6 +10,7 @@
     import {ballArena, BALL_WIDTH, BALL_HEIGHT} from '../../shared/beach-ball.js';
     import {targetPosition, driftCorrection, time} from '../lib/format.js';
     import {sourceLabels, sourceIcons} from '../../shared/media-source.js';
+    import {sponsorPosition} from '../../shared/sponsorblock.js';
     import {delivery, isSameOriginUrl} from '../lib/delivery.js';
     import {createBufferHealth, isProxyLoadFailure} from '../lib/buffer-health.js';
     import {createVideoRenderer} from '../lib/video-renderer.js';
@@ -432,7 +433,8 @@
             return;
         }
         const correction = driftCorrection(target, video.currentTime);
-        if (initialAlign || alignedRevision !== room.playback.revision || correction.seek !== null) {
+        const actual = video.currentTime + (media.baseTime || 0);
+        if (initialAlign || alignedRevision !== room.playback.revision || correction.seek !== null || sponsorPosition(item, actual) > actual) {
             try {
                 video.currentTime = target;
                 initialAlign = false;
@@ -811,6 +813,9 @@
                                   size={15}/>{sourceLabels[item.kind] || 'Video'}</span>
                 {#if duration}<span>{time(duration)}</span>{/if}<span
                         class:status-error={item.status === 'error'}>{item.status}</span>{:else}<span>Everyone in the room can add videos and control playback.</span>{/if}
+            {#if item?.kind === 'youtube' && item.sponsorSegments?.length}
+                <a href="https://sponsor.ajay.app/" target="_blank" rel="noreferrer" title="Sponsor segments are skipped for everyone in the room">SponsorBlock</a>
+            {/if}
         </div>
     </div>
     <span class="sync-badge" class:disconnected={!connected}

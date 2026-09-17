@@ -9,6 +9,115 @@ import { start, until } from './helpers.js';
 import { createApp } from '../server/app.js';
 import { targetPosition } from '../src/lib/format.js';
 
+test('SponsorBlock fetches post-ad HLS first and skips a long sponsor window for two viewers', { timeout: 60000 }, async t => {
+  const { instance, url, dir, api } = await start(t, { youtubeProxy: '' });
+  const sample = path.join(dir, 'sponsor-fixture.mp4');
+  await promisify(execFile)(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+    '-t', '64', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '60', '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+    '-movflags', '+faststart', sample]);
+  instance.app.get('/sponsor-fixture.mp4', (_req, res) => res.sendFile(sample, { dotfiles: 'allow' }));
+  instance.capabilities.youtube = true;
+  t.mock.method(instance.youtube, 'extract', async () => ({ id: 'jNQXAC9IVRw', title: 'Sponsor fixture',
+    duration: 64, url: 'https://fixture.googlevideo.com/video' }));
+  let lookups = 0;
+  instance.youtube.sponsorBlock.fetch = async () => {
+    lookups++;
+    return Response.json([{ videoID: 'jNQXAC9IVRw', segments: [
+      { category: 'sponsor', actionType: 'skip', segment: [6.5, 48.5], videoDuration: 64 },
+    ] }]);
+  };
+  const resolve = instance.youtube.resolve.bind(instance.youtube);
+  t.mock.method(instance.youtube, 'resolve', async value => ({ ...await resolve(value),
+    inputs: [{ url: `${url}/sponsor-fixture.mp4`, headers: {} }] }));
+  const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--enable-unsafe-swiftshader'] });
+  t.after(() => browser.close());
+  const pages = [await browser.newPage(), await browser.newPage()];
+  const requests = pages.map(() => []);
+  const errors = [];
+  for (const [index, page] of pages.entries()) {
+    // Exercise a growing EVENT playlist whose first response ends inside the ad.
+    let firstPlaylist = true;
+    await page.route('**/media/*/index.m3u8', async route => {
+      if (!firstPlaylist) return route.continue();
+      firstPlaylist = false;
+      await until(() => instance.rooms.get('lobby').current?.media?.complete, 15000);
+      const response = await route.fetch();
+      const text = await response.text();
+      const last = 'segment-000012.ts\n';
+      await route.fulfill({ response, body: text.slice(0, text.indexOf(last) + last.length) });
+    });
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('request', request => {
+      const match = /segment-(\d+)\.ts/.exec(request.url());
+      if (match) requests[index].push(Number(match[1]));
+    });
+    await page.goto(url);
+    await page.getByLabel('Username', { exact: true }).fill('admin');
+    await page.getByLabel('Password', { exact: true }).fill('garbageTime_');
+    await page.getByRole('button', { name: 'Enter Helltube' }).click();
+    await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+    await page.getByRole('button', { name: 'Your files', exact: true }).waitFor();
+  }
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size === 2);
+  assert.equal((await api('/api/rooms/lobby/youtube', { method: 'POST', body: {
+    url: 'https://youtu.be/jNQXAC9IVRw?t=2',
+  } })).status, 201);
+  instance.rooms.control(room, { action: 'pause', revision: room.playback.revision });
+  await until(() => {
+    assert.notEqual(room.current?.status, 'error', room.current?.error);
+    return room.current?.media?.complete;
+  }, 20000);
+  const media = room.current.media;
+  assert.equal(media.baseTime, 2);
+  assert.deepEqual(room.current.sponsorSegments, [[6.5, 48.5]]);
+  assert.equal(lookups, 1, 'One server lookup serves both viewers.');
+  await until(() => requests.every(list => list.includes(23)), 15000).catch(async error => {
+    t.diagnostic(JSON.stringify({ requests, errors, media, playback: room.playback,
+      players: await Promise.all(pages.map(page => page.locator('video').first().evaluate(video => ({
+        time: video.currentTime, ready: video.readyState, paused: video.paused,
+        buffered: Array.from({ length: video.buffered.length }, (_, i) => [video.buffered.start(i), video.buffered.end(i)]),
+        error: video.error?.message,
+      })))),
+    }));
+    throw error;
+  });
+  assert.equal(room.playback.paused, true, 'Post-ad data is prefetched before playback reaches the ad.');
+  for (const list of requests) {
+    assert.ok(list.includes(2), 'The leading boundary fragment contains ordinary content.');
+    assert.ok(!list.some(sn => sn >= 3 && sn <= 22), `Wholly blocked fragments were requested: ${list}`);
+  }
+  for (const page of pages) await page.getByRole('link', { name: 'SponsorBlock', exact: true }).waitFor();
+  instance.rooms.control(room, { action: 'seek', position: 6, revision: room.playback.revision });
+  instance.rooms.control(room, { action: 'play', revision: room.playback.revision });
+  await until(async () => {
+    const positions = await Promise.all(pages.map(page => page.locator('video').first().evaluate(video =>
+      ({ position: video.currentTime + 2, paused: video.paused, ready: video.readyState }))));
+    return positions.every(value => !value.paused && value.ready >= 3 && value.position >= 48.5 &&
+      Math.abs(value.position - instance.rooms.position(room)) < 0.8);
+  }, 10000);
+  assert.equal(room.current.media.url, media.url, 'Skipping already generated content keeps the shared HLS job.');
+  assert.ok(instance.rooms.position(room) < 58, 'Playback did not wait out the sponsor window.');
+  for (const list of requests) assert.ok(!list.some(sn => sn >= 3 && sn <= 22));
+
+  instance.rooms.control(room, { action: 'pause', revision: room.playback.revision });
+  assert.equal((await api('/api/rooms/lobby/youtube', { method: 'POST', body: {
+    url: 'https://youtu.be/jNQXAC9IVRw?t=7',
+  } })).status, 201);
+  await until(() => room.queue[0]?.media?.complete, 15000);
+  const next = room.queue[0];
+  assert.equal(next.media.baseTime, 48.5, 'Preparation starts after an ad containing the chosen start.');
+  const nextUrl = next.media.url;
+  instance.rooms.control(room, { action: 'skip', revision: room.playback.revision });
+  await until(async () => (await Promise.all(pages.map(page => page.locator('video').first().evaluate(video =>
+    video.readyState >= 3 && !video.paused && video.currentTime < 5)))).every(Boolean), 10000);
+  assert.equal(room.current.id, next.id);
+  assert.equal(room.current.media.url, nextUrl, 'Queue advancement retains the prepared post-ad job.');
+  assert.equal(lookups, 1, 'Reusing a video also reuses the SponsorBlock cache.');
+  assert.deepEqual(errors, []);
+});
+
 test('uploads survive a metal restart without reselecting files and defer frontend deployment reloads', { timeout: 60000 }, async t => {
   let restarted;
   let browser;

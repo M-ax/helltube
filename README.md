@@ -336,6 +336,10 @@ Twitch uses the installed yt-dlp, without the YouTube cookies or YouTube VPN con
 
 ## Streaming and synchronization
 
+YouTube playback automatically skips paid sponsor segments using the [SponsorBlock API](https://wiki.sponsor.ajay.app/w/API_Docs). Only the `sponsor` category with the `skip` action is enabled; intros, outros and other categories are retained. The backend makes a hash-prefix lookup while resolving the video, caches results across rooms, and merges overlapping windows. Missing segments, timeouts and API failures leave playback usable. Skips use the shared room clock, including chosen start times, seeks and replay.
+
+HLS fragments wholly inside a sponsor window are marked `EXT-X-GAP`, removing them from normal downloads so the player buffers content after the ad first. Boundary fragments containing ordinary content remain eligible. Original timestamps, segment numbers and encryption IVs are preserved on both Worker and direct delivery. This prioritizes browser downloads; FFmpeg still prepares the source sequentially. If the skip destination is not prepared yet, the server restarts preparation there and resumes the room when ready. Sponsor timing data is provided by [SponsorBlock](https://sponsor.ajay.app/).
+
 `yt-dlp` extracts metadata and signed audio/video source URLs. FFmpeg reads those remote sources directly and emits H.264/AAC HLS event playlists in two-second segments, up to 720p. Each room uses one media job per item, not one downloader per viewer. Atomic segment/manifest publishing prevents clients reading partially written chunks.
 
 The server broadcasts room state every **750ms** and immediately after controls. Clients estimate server-clock offset using ping round trips and correct drift every **250ms**: gentle speed correction for small errors and a seek for errors over one second. Explicit room controls are separate from local video events, preventing feedback loops. Revisions reject stale controls. The server freezes its clock on source starvation and resumes after at least four seconds are ready. An individual slow viewer catches up locally rather than pausing everyone.

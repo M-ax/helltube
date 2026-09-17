@@ -7,6 +7,7 @@ import { httpError } from './config.js';
 import { makeItem } from './rooms.js';
 import { parseStartTime, youtubeTimeArgument } from '../shared/youtube-time.js';
 import { youtubeNetwork } from './youtube-network.js';
+import { SponsorBlock, normalizeSponsors } from './sponsorblock.js';
 
 function videoId(url) {
   return url.hostname === 'youtu.be' ? url.pathname.slice(1)
@@ -57,6 +58,7 @@ export class YouTube {
   constructor(config) {
     this.config = config;
     this.pending = new Set();
+    this.sponsorBlock = new SponsorBlock();
     this.baseArgs = ['--ignore-config', '--no-warnings', '--socket-timeout', '20', '--js-runtimes', 'node'];
   }
 
@@ -116,7 +118,10 @@ export class YouTube {
   }
 
   async resolve(url) {
-    const data = await this.extract(['--no-playlist', '-f', 'bv*[height<=1080]+ba/b[height<=1080]/best', '--dump-single-json', '--', url]);
+    const [data, segments] = await Promise.all([
+      this.extract(['--no-playlist', '-f', 'bv*[height<=1080]+ba/b[height<=1080]/best', '--dump-single-json', '--', url]),
+      this.sponsorBlock.segments(videoId(new URL(url))),
+    ]);
     if (data.is_live) throw new Error('Live broadcasts are not supported; use a video or completed livestream.');
     const formats = data.requested_formats || [data];
     const inputs = formats.map(format => {
@@ -126,10 +131,12 @@ export class YouTube {
       }
       return { url: source.href, headers: format.http_headers || data.http_headers || {} };
     });
-    return { inputs, duration: Number(data.duration) || null };
+    const duration = Number(data.duration) || null;
+    return { inputs, duration, sponsorSegments: normalizeSponsors(segments, duration) };
   }
 
   close() {
     for (const controller of this.pending) controller.abort();
+    this.sponsorBlock.close();
   }
 }

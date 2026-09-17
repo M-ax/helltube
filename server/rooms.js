@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { httpError, text } from './config.js';
+import { sponsorPosition } from '../shared/sponsorblock.js';
 
 export function makeItem(source, extra = {}) {
   return { id: randomUUID(), title: 'Untitled video', duration: null, thumbnail: null,
@@ -99,7 +100,8 @@ export class Rooms extends EventEmitter {
   }
 
   position(room) {
-    return room.playback.position + (room.playback.paused ? 0 : (this.now() - room.playback.updatedAt) / 1000);
+    return sponsorPosition(room.current, room.playback.position,
+      room.playback.paused ? 0 : Math.max(0, (this.now() - room.playback.updatedAt) / 1000));
   }
 
   stamp(room, position = this.position(room), paused = room.playback.paused) {
@@ -126,7 +128,7 @@ export class Rooms extends EventEmitter {
     if (starting) {
       draft.current = draft.queue.shift();
       draft.resumeWhenReady = true;
-      this.stamp(draft, draft.current.startAt || 0, true);
+      this.stamp(draft, sponsorPosition(draft.current, draft.current.startAt || 0), true);
     }
     const save = () => { persistItems(); this.persist(draft); };
     if (this.store) this.store.transaction(save);
@@ -144,7 +146,7 @@ export class Rooms extends EventEmitter {
     if (room.current) room.history = [room.current, ...room.history.filter(i => i.id !== room.current.id)].slice(0, 5);
     room.current = room.queue.shift() || null;
     room.resumeWhenReady = !!room.current;
-    this.stamp(room, room.current?.startAt || 0, true);
+    this.stamp(room, sponsorPosition(room.current, room.current?.startAt || 0), true);
     if (room.current && (room.current.source.startAt || 0) !== room.playback.position) {
       this.emit('seek', room, room.playback.position);
     }
@@ -159,7 +161,7 @@ export class Rooms extends EventEmitter {
     if (room.current) room.queue.unshift(room.current);
     room.current = item;
     room.resumeWhenReady = true;
-    this.stamp(room, item.startAt || 0, true);
+    this.stamp(room, sponsorPosition(item, item.startAt || 0), true);
     this.emit('seek', room, room.playback.position);
     this.changed(room);
     this.emit('rooms');
@@ -181,10 +183,11 @@ export class Rooms extends EventEmitter {
       room.resumeWhenReady = false;
       this.stamp(room, this.position(room), true);
     } else if (action === 'seek') {
-      const position = message.position;
+      let position = message.position;
       if (!Number.isFinite(position) || position < 0 || (room.current.duration && position > room.current.duration)) {
         throw httpError(400, 'Invalid seek position.');
       }
+      position = sponsorPosition(room.current, position);
       const media = room.current.media;
       const outside = !media || position < media.baseTime || position > media.bufferedUntil - 1;
       if (outside && room.current.kind === 'upload' && !room.current.source.complete) {
@@ -232,7 +235,27 @@ export class Rooms extends EventEmitter {
   tick() {
     for (const room of this.rooms.values()) {
       const item = room.current;
-      const position = this.position(room);
+      const elapsed = room.playback.paused ? 0 : Math.max(0, (this.now() - room.playback.updatedAt) / 1000);
+      const position = sponsorPosition(item, room.playback.position, elapsed);
+      const linearPosition = room.playback.position + elapsed;
+      const skipped = position > linearPosition;
+      const sponsorEnd = item?.kind === 'youtube' && item.sponsorSegments?.at(-1)?.[1];
+      if (item?.duration > 0 && sponsorEnd >= item.duration && position >= item.duration &&
+        (!room.playback.paused || room.resumeWhenReady)) {
+        this.advance(room);
+        continue;
+      }
+      if (skipped) {
+        const media = item.media;
+        const outside = !media || position < media.baseTime || position > media.bufferedUntil - 1;
+        const resume = !room.playback.paused || room.resumeWhenReady;
+        room.resumeWhenReady = resume;
+        this.stamp(room, position, outside || !resume);
+        if (outside) {
+          this.emit('seek', room, position);
+          this.emit('prepare', room);
+        }
+      }
       if (item?.media?.complete && !room.playback.paused && position >= (item.duration || item.media.bufferedUntil)) {
         this.advance(room);
         continue;

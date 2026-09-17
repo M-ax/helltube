@@ -102,6 +102,7 @@ test('each concurrent extraction gets a private writable copy and preserves the 
 
 test('cookies reach both queue metadata and playback URL extraction', async t => {
   const f = await fixture(t);
+  t.mock.method(f.youtube.sponsorBlock, 'segments', async () => []);
   f.youtube.baseArgs.push('--require-cookies');
   const url = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
   const [item] = await f.youtube.items(url, { displayName: 'Viewer' });

@@ -175,6 +175,23 @@ test('YouTube fallback playlists and segments bypass the edge with live, scoped 
   assert.equal((await direct(segment)).status, 401);
 });
 
+test('SponsorBlock gaps reach both edge and direct HLS without changing grants or encryption', async t => {
+  const { api, job, direct, url, cookie } = await fixture(t);
+  const youtube = await job('youtube');
+  youtube.baseTime = 40;
+  youtube.item.sponsorSegments = [[40, 42]];
+  const access = (await api(`/api/media/${youtube.id}/access`)).data;
+  for (const response of [
+    await fetch(url + access.url, { headers: { Cookie: cookie, 'X-Helltube-Edge': secret } }),
+    await direct(access.fallbackUrl),
+  ]) {
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /#EXTINF:2.0,\n#EXT-X-GAP\n/);
+    assert.match(text, /METHOD=AES-128,URI="https:\/\/metal\.example\.net\/direct\/media\/[^\"]+key\.bin\?grant=/);
+  }
+});
+
 test('all proxied media kinds receive metal fallback access while uploads start on metal', async t => {
   const {api, job} = await fixture(t);
   for (const kind of ['youtube', 'twitch', 'http', 'upload']) {
