@@ -617,18 +617,28 @@ ul, ol {
     gap: 5px;
 }
 
-.room-navigation-row { display: flex; align-items: center; gap: 2px; }
+.room-navigation-row { display: flex; align-items: center; }
 .room-navigation-row .room-button { flex: 1; min-width: 0; }
 .room-edit {
     flex-shrink: 0;
+    width: 0;
+    min-width: 0;
+    margin-left: 0;
+    padding: 0;
+    overflow: hidden;
     opacity: 0;
     transform: translateX(6px);
-    transition: opacity 140ms ease-out, transform 140ms ease-out;
+    transition: width 140ms ease-out, margin-left 140ms ease-out,
+        opacity 140ms ease-out, transform 140ms ease-out;
     pointer-events: none;
 }
 
+.room-edit > svg { flex-shrink: 0; }
+
 .room-navigation-row:hover .room-edit,
 .room-navigation-row:focus-within .room-edit {
+    width: 32px;
+    margin-left: 2px;
     opacity: 1;
     transform: translateX(0);
     pointer-events: auto;
@@ -636,6 +646,8 @@ ul, ol {
 
 @media (hover: none) {
     .room-edit {
+        width: 32px;
+        margin-left: 2px;
         opacity: 1;
         transform: none;
         pointer-events: auto;
