@@ -13,7 +13,7 @@
         pacing: 'Paced by the server',
         waiting: 'Waiting for preparation',
         paused: 'Paused on this device',
-        retrying: 'Reconnecting upload',
+        retrying: 'Reconnecting automatically',
         'needs-file': 'Reselect file to resume',
         complete: 'Upload complete',
         error: 'Upload needs attention',
@@ -102,12 +102,15 @@
                             The server reports a slow upload. Playback may wait for more data.
                         </p>
                     {/if}
-                    {#if item.error}<p class="form-error"
+                    {#if item.state === 'retrying'}<p class="inline-note" role="status">Waiting for the server. This upload
+                        will resume automatically; keep this tab open.</p>
+                    {:else if item.error}<p class="form-error"
                                        role={item.state === 'error' ? 'alert' : 'status'}>{item.error}</p>{/if}
                 </li>
             {/each}
         </ul>
-        <p class="field-help transfer-footnote">Transfer speed excludes server-requested waits. Keep this tab open, or
-            reselect the original file later to resume.</p>
+        <p class="field-help transfer-footnote">Uploads resume automatically after server restarts while this tab stays open.
+            Automatic app updates wait until your files finish. Closing or manually reloading the tab requires
+            reselecting the original file.</p>
     </section>
 {/if}

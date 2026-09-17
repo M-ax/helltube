@@ -6,7 +6,93 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 import { start, until } from './helpers.js';
+import { createApp } from '../server/app.js';
 import { targetPosition } from '../src/lib/format.js';
+
+test('uploads survive a metal restart without reselecting files and defer frontend deployment reloads', { timeout: 60000 }, async t => {
+  let restarted;
+  let browser;
+  const allowResume = Promise.withResolvers();
+  t.after(async () => { allowResume.resolve(); await browser?.close(); await restarted?.close(); });
+  const { instance, url, dir } = await start(t, { maxTranscoders: 0 });
+  instance.media.config.bareMetalOrigin = url;
+  const sample = path.join(dir, 'restart-upload.mp4');
+  await promisify(execFile)(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-t', '15',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', sample]);
+  const original = await readFile(sample);
+  assert.ok(original.length > 524288 * 2);
+  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const page = await browser.newPage();
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const version = JSON.parse(await readFile(path.resolve('dist/version.json'), 'utf8'));
+  let newDeployment = false;
+  let versionChecks = 0;
+  let navigations = 0;
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations++; });
+  await page.route('**/version.json?*', route => {
+    versionChecks++;
+    return route.fulfill({ json: { buildId: newDeployment ? '22222222-2222-4222-8222-222222222222' : version.buildId } });
+  });
+  let saved;
+  let interrupted = false;
+  const offsets = [];
+  await page.route('**/direct/uploads/**', async route => {
+    if (route.request().method() !== 'PUT') return route.continue();
+    offsets.push(Number(new URL(route.request().url()).searchParams.get('offset')));
+    if (!interrupted) {
+      interrupted = true;
+      const response = await route.fetch();
+      assert.equal(response.status(), 200);
+      saved = await response.json();
+      return route.abort('failed'); // The backend saved the chunk, but deployment lost its response.
+    }
+    await allowResume.promise;
+    await route.continue();
+  });
+  await page.goto(url);
+  await page.getByLabel('Username', { exact: true }).fill('admin');
+  await page.getByLabel('Password', { exact: true }).fill('garbageTime_');
+  await page.getByRole('button', { name: 'Enter Helltube' }).click();
+  await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+  await page.getByRole('button', { name: 'Your files', exact: true }).click();
+  await page.getByLabel('Select a local video to upload', { exact: true }).setInputFiles(sample);
+  await until(() => saved, 10000);
+  assert.equal(saved.received, 524288);
+  const uploadId = instance.rooms.get('lobby').current.source.uploadId;
+  await instance.close();
+  await page.getByText('Reconnecting automatically', { exact: false }).waitFor();
+  const before = versionChecks;
+  newDeployment = true;
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await until(() => versionChecks > before);
+  assert.equal(navigations, 1, 'A changed frontend must not discard the selected upload file.');
+  restarted = await createApp({ dataDir: dir, port: 0, maxTranscoders: 0, bareMetalOrigin: url });
+  await restarted.listen(Number(new URL(url).port));
+  assert.equal(restarted.uploads.get(uploadId).received, saved.received);
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await until(() => offsets.length > 1, 10000).catch(async error => {
+    t.diagnostic(await page.locator('.uploads-panel').innerText());
+    t.diagnostic(JSON.stringify({ navigations, errors, received: restarted.uploads.get(uploadId).received }));
+    throw error;
+  });
+  assert.deepEqual(offsets, [0, saved.received], 'Recovery rechecks the durable offset before the next PUT.');
+  assert.equal(navigations, 1);
+  allowResume.resolve();
+  await page.getByText('Upload complete', { exact: false }).waitFor();
+  const upload = restarted.uploads.get(uploadId);
+  assert.equal(upload.complete, true);
+  assert.deepEqual(await readFile(upload.file), original, 'No duplicate or missing bytes after restart.');
+  assert.equal(restarted.rooms.get('lobby').queue.length, 0, 'Recovery must not create another queue entry.');
+  const reloaded = page.waitForEvent('framenavigated', frame => frame === page.mainFrame());
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await reloaded;
+  newDeployment = false;
+  assert.equal(navigations, 2, 'The deferred deployment reload runs after the upload finishes.');
+  assert.deepEqual(errors, []);
+});
 
 async function assertCanvasFrame(page) {
   await until(async () => await page.locator('video').evaluate(video => !video.seeking && video.readyState >= 2));

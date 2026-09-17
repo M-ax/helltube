@@ -7,6 +7,175 @@ import { until } from './helpers.js';
 
 const localDeliveryConfig = async () => ({ bareMetalOrigin: '' });
 
+test('deployment outages outlast the retry limit and resume at the durable offset with a fresh grant', async t => {
+  const file = new File(['abcdefghij'], 'clip.mp4');
+  const origin = 'https://metal.example';
+  let received = 0;
+  let outage = false;
+  let lostResponse = false;
+  let statusCalls = 0;
+  let grant = 'before';
+  const waits = [];
+  const puts = [];
+  const manager = createUploadManager('viewer', {
+    metadata: async () => 10,
+    getDeliveryConfig: async () => ({ bareMetalOrigin: origin }),
+    wait: async delay => {
+      waits.push(delay);
+      assert.equal(get(manager.transfers)[0].state, 'retrying');
+      assert.equal(manager.hasPendingFiles(), true);
+      if (waits.length === 10) { outage = false; received = 2; grant = 'after'; }
+    },
+    request: async (url, options = {}) => {
+      if (url === '/api/uploads') return { uploads: [] };
+      if (options.method === 'POST') return { uploadId: 'saved', chunkSize: 4 };
+      if (outage) {
+        assert.equal(url, '/api/uploads/saved', 'Recovery must check persisted status before sending bytes.');
+        const error = statusCalls++ % 2 ? new TypeError('Failed to fetch') : Object.assign(new Error('Deploying'), { status: 503 });
+        throw error;
+      }
+      if (options.method === 'PUT') {
+        const offset = Number(new URL(url).searchParams.get('offset'));
+        assert.equal(offset, received);
+        const chunk = await options.body.text();
+        assert.equal(chunk, (await file.text()).slice(offset, offset + 4));
+        puts.push({ url, offset, chunk });
+        received += chunk.length;
+        if (!lostResponse) { lostResponse = true; outage = true; throw new TypeError('Response lost during restart'); }
+      }
+      return { received, complete: received === file.size, active: true,
+        transferUrl: `${origin}/direct/uploads/saved?grant=${grant}` };
+    },
+  });
+  t.after(() => manager.dispose());
+  await manager.ready;
+  await manager.add(file, { id: 'room', name: 'Room' });
+  await until(() => ['complete', 'error'].includes(get(manager.transfers)[0].state));
+  assert.equal(get(manager.transfers)[0].state, 'complete');
+  assert.deepEqual(puts.map(put => put.offset), [0, 2, 6]);
+  assert.ok(puts.slice(1).every(put => put.url.includes('grant=after')));
+  assert.deepEqual(waits, [1000, 2000, 4000, 8000, 15000, 15000, 15000, 15000, 15000, 15000]);
+  assert.equal(get(manager.transfers)[0].file, null);
+  assert.equal(get(manager.transfers)[0].error, '');
+  assert.equal(manager.hasPendingFiles(), false);
+});
+
+test('a lost final acknowledgement completes from status without resending bytes', async t => {
+  let received = 0;
+  let puts = 0;
+  const manager = createUploadManager('viewer', {
+    metadata: async () => 10, getDeliveryConfig: localDeliveryConfig, wait: async () => {},
+    request: async (url, options = {}) => {
+      if (url === '/api/uploads') return { uploads: [] };
+      if (options.method === 'POST') return { uploadId: 'saved', chunkSize: 4 };
+      if (options.method === 'PUT') { received = 4; puts++; throw new TypeError('Restart'); }
+      return { received, complete: received === 4, active: true };
+    },
+  });
+  t.after(() => manager.dispose());
+  await manager.add(new File(['data'], 'clip.mp4'), { id: 'room', name: 'Room' });
+  await until(() => get(manager.transfers)[0].state === 'complete');
+  assert.equal(puts, 1);
+  assert.equal(manager.hasPendingFiles(), false);
+});
+
+test('stalled status requests and chunks time out and recover without concurrent PUTs', async t => {
+  for (const stage of ['status', 'PUT']) await t.test(stage, async t => {
+    let stalled = false;
+    let aborted = false;
+    let received = 0;
+    let activePuts = 0;
+    const manager = createUploadManager('viewer', {
+      metadata: async () => 10, getDeliveryConfig: localDeliveryConfig, wait: async () => {},
+      statusTimeoutMs: 20, chunkTimeoutMs: 20,
+      request: async (url, options = {}) => {
+        if (url === '/api/uploads') return { uploads: [] };
+        if (options.method === 'POST') return { uploadId: 'saved', chunkSize: 2 };
+        const putting = options.method === 'PUT';
+        if (putting) { activePuts++; assert.equal(activePuts, 1); }
+        try {
+          if (!stalled && putting === (stage === 'PUT')) {
+            stalled = true;
+            await new Promise((_, reject) => options.signal.addEventListener('abort', () => {
+              aborted = true; reject(options.signal.reason);
+            }, { once: true }));
+          }
+          if (putting) received += options.body.size;
+          return { received, complete: received === 4, active: true };
+        } finally { if (putting) activePuts--; }
+      },
+    });
+    t.after(() => manager.dispose());
+    await manager.add(new File(['data'], 'clip.mp4'), { id: 'room', name: 'Room' });
+    await until(() => get(manager.transfers)[0].state === 'complete');
+    assert.equal(aborted, true);
+    assert.equal(activePuts, 0);
+  });
+});
+
+test('reconnect and online wake recovery waits; pause, cancellation and disposal stay respected', async t => {
+  for (const action of ['reconnect', 'online', 'pause', 'cancel', 'dispose']) await t.test(action, async t => {
+    const windowTarget = new EventTarget();
+    const waiting = Promise.withResolvers();
+    let offline = true;
+    let puts = 0;
+    const manager = createUploadManager('viewer', {
+      windowTarget, metadata: async () => 10, getDeliveryConfig: localDeliveryConfig,
+      wait: (_delay, signal) => new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        waiting.resolve();
+      }),
+      request: async (url, options = {}) => {
+        if (url === '/api/uploads') return { uploads: [] };
+        if (options.method === 'POST') return { uploadId: 'saved', chunkSize: 4 };
+        if (options.method === 'DELETE') return {};
+        if (offline) throw new TypeError('Failed to fetch');
+        if (options.method === 'PUT') puts++;
+        return { received: puts ? 4 : 0, complete: !!puts, active: true };
+      },
+    });
+    t.after(() => manager.dispose());
+    await manager.add(new File(['data'], 'clip.mp4'), { id: 'room', name: 'Room' });
+    await waiting.promise;
+    assert.equal(manager.hasPendingFiles(), true);
+    offline = false;
+    if (action === 'online') windowTarget.dispatchEvent(new Event('online'));
+    else await manager[action]('saved');
+    if (['online', 'reconnect'].includes(action)) await until(() => get(manager.transfers)[0].state === 'complete');
+    else {
+      manager.reconnect();
+      windowTarget.dispatchEvent(new Event('online'));
+      await tick();
+      assert.equal(puts, 0);
+      if (action === 'pause') {
+        assert.equal(get(manager.transfers)[0].state, 'paused');
+        assert.equal(manager.hasPendingFiles(), true);
+      } else assert.equal(manager.hasPendingFiles(), false);
+    }
+  });
+});
+
+test('permanent failures and invalid offsets stop automatic recovery while retaining the file', async t => {
+  for (const failure of [401, 403, 404, 413, 'offset', 'complete']) await t.test(String(failure), async t => {
+    let waits = 0;
+    const manager = createUploadManager('viewer', {
+      metadata: async () => 10, getDeliveryConfig: localDeliveryConfig, wait: async () => waits++,
+      request: async (url, options = {}) => {
+        if (url === '/api/uploads') return { uploads: [] };
+        if (options.method === 'POST') return { uploadId: 'saved', chunkSize: 4 };
+        if (typeof failure === 'number') throw Object.assign(new Error('Unavailable'), { status: failure });
+        return { received: failure === 'offset' ? 10 : 2, complete: failure === 'complete' };
+      },
+    });
+    t.after(() => manager.dispose());
+    await manager.add(new File(['data'], 'clip.mp4'), { id: 'room', name: 'Room' });
+    await until(() => get(manager.transfers)[0].state === 'error');
+    manager.reconnect();
+    assert.equal(waits, 0);
+    assert.equal(manager.hasPendingFiles(), true);
+  });
+});
+
 test('upload manager restores from the server without browser storage and resumes the acknowledged offset', async t => {
   const requests = [];
   const file = new File(['partrest'], 'clip.mp4', { lastModified: 123 });

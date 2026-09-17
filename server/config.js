@@ -5,6 +5,7 @@ export const config = {
   host: process.env.HOST || '127.0.0.1',
   dataDir: path.resolve(process.env.DATA_DIR || 'data'),
   ffmpeg: process.env.FFMPEG_PATH || 'ffmpeg',
+  ffprobe: process.env.FFPROBE_PATH || '',
   ytdlp: process.env.YTDLP_PATH || 'yt-dlp',
   ytdlpCookiesFile: process.env.YTDLP_COOKIES_FILE || '',
   youtubeProxy: process.env.YOUTUBE_PROXY || '',

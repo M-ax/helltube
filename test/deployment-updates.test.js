@@ -6,13 +6,13 @@ const current = '11111111-1111-4111-8111-111111111111';
 const newer = '22222222-2222-4222-8222-222222222222';
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture(t, fetchVersion) {
+function fixture(t, fetchVersion, options = {}) {
     const windowTarget = new EventTarget();
     const documentTarget = new EventTarget();
     documentTarget.visibilityState = 'visible';
     let reloads = 0;
     const stop = watchDeployment({ buildId: current, fetchVersion, windowTarget, documentTarget,
-        reload: () => reloads++ });
+        reload: () => reloads++, ...options });
     t.after(stop);
     return { windowTarget, documentTarget, stop, reloads: () => reloads };
 }
@@ -83,4 +83,32 @@ test('connected tabs check every thirty seconds without needing focus or reconne
     await flush();
     assert.equal(calls, 2);
     assert.equal(state.reloads(), 1);
+});
+
+test('new deployments wait for retained upload files before automatically reloading', async t => {
+    let pendingFiles = true;
+    const state = fixture(t, async () => Response.json({ buildId: newer }), { canReload: () => !pendingFiles });
+    await flush();
+    for (const event of ['online', 'online']) {
+        state.windowTarget.dispatchEvent(new Event(event));
+        await flush();
+    }
+    assert.equal(state.reloads(), 0, 'A deployment must not discard the tab’s File objects.');
+    pendingFiles = false;
+    state.documentTarget.dispatchEvent(new Event('visibilitychange'));
+    await flush();
+    assert.equal(state.reloads(), 1);
+    state.windowTarget.dispatchEvent(new Event('online'));
+    await flush();
+    assert.equal(state.reloads(), 1);
+});
+
+test('upload protection is checked after a pending version request finishes', async t => {
+    let pendingFiles = false;
+    const response = Promise.withResolvers();
+    const state = fixture(t, () => response.promise, { canReload: () => !pendingFiles });
+    pendingFiles = true;
+    response.resolve(Response.json({ buildId: newer }));
+    await flush();
+    assert.equal(state.reloads(), 0);
 });

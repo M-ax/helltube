@@ -57,10 +57,14 @@ export function createUploadManager(userId, {
     wait = sleep,
     now = () => performance.now(),
     metadata = readVideoMetadata,
+    statusTimeoutMs = 15000,
+    chunkTimeoutMs = 120000,
+    windowTarget = typeof window === 'undefined' ? null : window,
     onError = () => {}
 } = {}) {
     const transfers = writable([]);
     const workers = new Map();
+    const retryWaiters = new Map();
     const pending = new Set();
     let disposed = false;
     const restoreController = new AbortController();
@@ -80,8 +84,9 @@ export function createUploadManager(userId, {
     const find = (id) => get(transfers).find((item) => item.id === id);
 
     function checkStatus(status, size) {
-        if (!Number.isSafeInteger(status.received) || status.received < 0 || status.received > size) {
-            throw new Error('The server returned an invalid upload offset. Pause and try resuming the file.');
+        if (!Number.isSafeInteger(status?.received) || status.received < 0 || status.received > size ||
+            (status.complete && status.received !== size)) {
+            throw new DeliveryError('The server returned an invalid upload offset. Pause and try resuming the file.');
         }
         return status;
     }
@@ -89,8 +94,44 @@ export function createUploadManager(userId, {
     function showStatus(id, status) {
         patch(id, {
             received: status.received, complete: status.complete, delayMs: status.delayMs,
-            bufferSeconds: status.bufferSeconds, slow: status.slow, active: status.active,
+            bufferSeconds: status.bufferSeconds, slow: status.slow, active: status.active, error: '',
         });
+    }
+
+    async function timedRequest(url, options, timeoutMs) {
+        const timeout = new AbortController();
+        const signal = AbortSignal.any([options.signal, timeout.signal]);
+        const timer = setTimeout(() => timeout.abort(new DOMException('The upload request timed out.', 'TimeoutError')), timeoutMs);
+        try {
+            const result = await request(url, {...options, signal});
+            signal.throwIfAborted();
+            return result;
+        } catch (error) {
+            if (timeout.signal.aborted && !options.signal.aborted) throw timeout.signal.reason;
+            throw error;
+        } finally { clearTimeout(timer); }
+    }
+
+    async function waitToRetry(id, delay, signal) {
+        const wake = new AbortController();
+        retryWaiters.set(id, wake);
+        try {
+            await wait(delay, AbortSignal.any([signal, wake.signal]));
+        } catch (error) {
+            if (signal.aborted || !wake.signal.aborted) throw error;
+        } finally {
+            if (retryWaiters.get(id) === wake) retryWaiters.delete(id);
+        }
+    }
+
+    function reconnect() {
+        // Wake only recovery waits; paused transfers and in-flight chunks stay untouched.
+        for (const wake of retryWaiters.values()) wake.abort();
+    }
+    windowTarget?.addEventListener('online', reconnect);
+
+    function hasPendingFiles() {
+        return !disposed && (pending.size > 0 || get(transfers).some(item => item.file && item.state !== 'complete'));
     }
 
     async function run(id) {
@@ -106,7 +147,7 @@ export function createUploadManager(userId, {
         try {
             while (!signal.aborted) {
                 try {
-                    if (!status) status = checkStatus(await request(`/api/uploads/${encodeURIComponent(id)}`, {signal}), item.size);
+                    if (!status) status = checkStatus(await timedRequest(`/api/uploads/${encodeURIComponent(id)}`, {signal}, statusTimeoutMs), item.size);
                     signal.throwIfAborted();
                     showStatus(id, status);
                     if (status.complete) {
@@ -131,9 +172,9 @@ export function createUploadManager(userId, {
                     patch(id, {state: 'uploading'});
                     // Only the PUT round trip is measured. Server-imposed waits never reduce the measured transfer rate.
                     const started = now();
-                    status = checkStatus(await request(`${destination}${destination.includes('?') ? '&' : '?'}offset=${offset}`, {
+                    status = checkStatus(await timedRequest(`${destination}${destination.includes('?') ? '&' : '?'}offset=${offset}`, {
                         method: 'PUT', body: chunk, signal,
-                    }), item.size);
+                    }, chunkTimeoutMs), item.size);
                     const elapsed = Math.max(1, now() - started);
                     signal.throwIfAborted();
                     if (status.received <= offset && !status.complete) {
@@ -147,10 +188,15 @@ export function createUploadManager(userId, {
                     if (signal.aborted) throw error;
                     if (error instanceof DeliveryError) throw error;
                     if (error.status && error.status < 500 && ![408, 409, 429].includes(error.status)) throw error;
-                    if (++retries > 5) throw error;
+                    // Deployments and network outages can last minutes. Keep the File and
+                    // retry until the backend returns; never replay a chunk before checking its offset.
+                    const interrupted = error instanceof TypeError || error.name === 'TimeoutError' ||
+                        [408, 429].includes(error.status) || (error.status >= 500 && error.status !== 507);
+                    retries = Math.min(retries + 1, 6);
+                    if (!interrupted && retries > 5) throw error;
                     patch(id, {state: 'retrying', error: error.message, rate: 0});
                     status = null;
-                    await wait(Math.min(15000, 1000 * 2 ** (retries - 1)), signal);
+                    await waitToRetry(id, Math.min(15000, 1000 * 2 ** (retries - 1)), signal);
                 }
             }
         } catch (error) {
@@ -257,11 +303,12 @@ export function createUploadManager(userId, {
 
     function dispose() {
         disposed = true;
+        windowTarget?.removeEventListener('online', reconnect);
         restoreController.abort();
         for (const controller of [...workers.values(), ...pending]) controller.abort();
         workers.clear();
         pending.clear();
     }
 
-    return {transfers, add, addMany, pause, resume, cancel, dismiss, dispose, ready};
+    return {transfers, add, addMany, pause, resume, cancel, dismiss, dispose, ready, reconnect, hasPendingFiles};
 }

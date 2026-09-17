@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createDecipheriv } from 'node:crypto';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { start, until } from './helpers.js';
 import { makeItem } from '../server/rooms.js';
@@ -12,6 +12,82 @@ import { WebSocket } from 'ws';
 import { remoteURL } from '../server/remote-media.js';
 
 const exec = promisify(execFile);
+
+test('tail-indexed MP4 duration reaches viewers before conversion and enables a full-timeline seek', { timeout: 40000 }, async t => {
+  const {instance, api, connect, url, cookie, dir} = await start(t);
+  const original = path.join(dir, 'original.mp4');
+  const file = path.join(dir, 'tail-index.mp4');
+  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', original]);
+  const data = await readFile(original);
+  let moov = 0;
+  while (data.toString('ascii', moov + 4, moov + 8) !== 'moov') {
+    const size = data.readUInt32BE(moov);
+    assert.ok(size >= 8 && moov + size < data.length);
+    moov += size;
+  }
+  // A sparse free box puts the index far from the media without moving any sample offsets.
+  const padding = 32 * 1024 * 1024;
+  const free = Buffer.alloc(8);
+  free.writeUInt32BE(padding);
+  free.write('free', 4, 'ascii');
+  const handle = await open(file, 'w');
+  try {
+    await handle.write(data.subarray(0, moov), 0, moov, 0);
+    await handle.write(free, 0, free.length, moov);
+    await handle.truncate(data.length + padding);
+    await handle.write(data.subarray(moov), 0, data.length - moov, moov + padding);
+  } finally { await handle.close(); }
+  const gate = Promise.withResolvers();
+  t.after(() => gate.resolve());
+  let item;
+  let probedBytes = 0;
+  const probeRanges = [];
+  instance.app.get('/metadata-file.mp4', async (req, res) => {
+    if (item?.duration) await gate.promise;
+    else {
+      probeRanges.push(req.headers.range);
+      const write = res.write;
+      res.write = function (chunk, ...args) {
+        probedBytes += Buffer.byteLength(chunk);
+        return write.call(this, chunk, ...args);
+      };
+    }
+    if (!res.destroyed) res.sendFile(file, {dotfiles: 'allow'});
+  });
+  instance.app.get('/metadata-watch.mp4', (_req, res) => res.type('html').send('<video src="/metadata-file.mp4?token=fixture&amp;part=1"></video>'));
+  t.mock.method(instance.remote, 'resolve', async value => {
+    const target = remoteURL(value);
+    assert.equal(target.hostname, 'media.test');
+    return {url: target, addresses: [{address: '127.0.0.1', family: 4}]};
+  });
+  const ws = await connect();
+  ws.send(JSON.stringify({type: 'join', roomId: 'lobby'}));
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size);
+  const source = `${url.replace('127.0.0.1', 'media.test')}/metadata-watch.mp4`;
+  assert.equal((await api('/api/rooms/lobby/media', {method: 'POST', body: {url: source}})).status, 201);
+  item = room.current;
+  const revision = room.playback.revision;
+  await until(() => ws.messages.some(message => message.type === 'state' && message.room.current?.duration === 8));
+  assert.equal(item.duration, 8);
+  assert.equal(item.media, null, 'Duration is available before any conversion output.');
+  assert.equal(room.playback.revision, revision, 'Metadata does not change the room clock.');
+  assert.equal(instance.store.load('rooms').find(value => value.id === room.id).current.duration, 8);
+  assert.ok(probeRanges.some(range => Number(/^bytes=(\d+)-/.exec(range || '')?.[1]) >= moov + padding),
+    'The actual probe must seek to the index at the end.');
+  assert.ok(probedBytes < padding / 2, `Probe read ${probedBytes} bytes rather than the full file.`);
+  assert.throws(() => instance.rooms.control(room, {action: 'seek', position: 9, revision}), /Invalid seek/);
+  instance.rooms.control(room, {action: 'seek', position: 3, revision});
+  gate.resolve();
+  await until(() => {
+    assert.notEqual(item.status, 'error', item.error);
+    return item.media?.complete && item.media.baseTime === 3;
+  }, 15000);
+  await exec(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-allowed_extensions', 'ALL',
+    '-headers', `Cookie: ${cookie}\r\n`, '-i', url + item.media.url, '-map', '0:v:0', '-f', 'null', '-']);
+  t.diagnostic(`Duration arrived before conversion; the probe fetched ${probedBytes} bytes from a ${data.length + padding}-byte MP4.`);
+});
 
 test('Twitch VOD HLS and hosted watch pages share playable, seekable encrypted playback', { timeout: 60000 }, async t => {
   const { instance, api, connect, url, cookie, dir } = await start(t, { youtubeProxy: 'http://127.0.0.1:1' });

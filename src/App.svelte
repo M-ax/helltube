@@ -46,6 +46,7 @@
     const reactions = client.reactions;
     $: room = $realtimeState.room;
     $: connected = $realtimeState.status === 'connected' && $realtimeState.joined && browserOnline;
+    $: if (connected) manager?.reconnect();
     $: if (user && user.role !== 'admin' && modal === 'admin') modal = null;
 
     function notify(message, type = 'notice') {
@@ -267,7 +268,9 @@
     }
 
     onMount(() => {
-        const stopWatching = import.meta.env.PROD ? watchDeployment({buildId: __BUILD_ID__}) : () => {};
+        const stopWatching = import.meta.env.PROD ? watchDeployment({
+            buildId: __BUILD_ID__, canReload: () => !manager?.hasPendingFiles(),
+        }) : () => {};
         void checkSession();
         window.addEventListener('helltube:session-ended', sessionEnded);
         return () => {

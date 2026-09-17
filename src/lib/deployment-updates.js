@@ -1,6 +1,6 @@
 export function watchDeployment({ buildId, fetchVersion = (...args) => fetch(...args),
     reload = () => window.location.reload(), windowTarget = window, documentTarget = document,
-    intervalMs = 30000 } = {}) {
+    intervalMs = 30000, canReload = () => true } = {}) {
     let stopped = false;
     let reloading = false;
     let request;
@@ -18,6 +18,7 @@ export function watchDeployment({ buildId, fetchVersion = (...args) => fetch(...
             const version = await response.json();
             if (stopped || controller.signal.aborted || typeof version?.buildId !== 'string' ||
                 !/^[a-f0-9-]{36}$/.test(version.buildId) || version.buildId === buildId) return;
+            if (!canReload()) return;
             reloading = true;
             reload();
         } catch { /* Retry after network errors and deployment interruptions. */ }

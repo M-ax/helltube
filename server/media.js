@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir, open, readFile, readdir, stat, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { youtubeNetwork } from './youtube-network.js';
+import { FILE_INPUT_FORMATS, HOSTED_INPUT_FORMATS, probeCommand, probeDuration } from './media-metadata.js';
 
 export function playlistProgress(contents, baseTime = 0) {
   const durations = [...contents.matchAll(/^#EXTINF:([\d.]+)/gm)].map(m => Number(m[1]));
@@ -134,6 +135,19 @@ export class Media {
       inputs = resolved.inputs;
     } else if (item.kind === 'http') {
       inputs = [{ url: `http://127.0.0.1:${this.port}/internal/remote/${job.id}?key=${this.sourceSecret}`, headers: {} }];
+      if (job.cancelled) return;
+      if (!(Number.isFinite(item.duration) && item.duration > 0)) {
+        job.probeController = new AbortController();
+        const duration = await probeDuration(inputs[0].url, {
+          command: probeCommand(this.config), signal: job.probeController.signal,
+        });
+        job.probeController = null;
+        if (job.cancelled) return;
+        if (duration !== null) item.duration = duration;
+      }
+      if (baseTime > 0 && item.duration > 0 && baseTime >= item.duration) {
+        throw new Error(`Start time must be before the end of the video (${item.duration} seconds).`);
+      }
     } else {
       const upload = this.uploads.get(item.source.uploadId);
       job.inputComplete = upload.complete;
@@ -150,8 +164,7 @@ export class Media {
       inputs = [{ url: `http://127.0.0.1:${this.port}/internal/uploads/${upload.id}?key=${this.uploads.secret}`, headers: {} }];
     }
     if (job.cancelled) return;
-    const inputFormats = 'mov,matroska,webm,avi,mpegts,mpeg,mpegvideo,ogg' +
-      (item.kind === 'http' ? ',mp3,flac,wav,aac,aiff' : '') +
+    const inputFormats = item.kind === 'http' ? HOSTED_INPUT_FORMATS : FILE_INPUT_FORMATS +
       (item.kind === 'youtube' || item.kind === 'twitch' ? ',hls' : '');
     for (const input of inputs) {
       if (baseTime > 0) args.push('-ss', String(baseTime));
@@ -255,6 +268,7 @@ export class Media {
   dispose(job) {
     if (job.cancelled) return;
     job.cancelled = true;
+    job.probeController?.abort();
     job.child?.kill();
     if (this.jobs.get(job.item.id) === job) this.jobs.delete(job.item.id);
     job.item.media = null;
