@@ -497,7 +497,7 @@
                         {#key preferenceKey}
                             <Player username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
                                     overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
-                                    captureMuted={$desktopState.status !== 'idle' && $desktopState.status !== 'choosing'}
+                                    captureMuted={$desktopState.hasAudio}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
                         <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify} {desktop}

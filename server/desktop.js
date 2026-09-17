@@ -25,8 +25,8 @@ export class DesktopShares {
 
   start(room, ws, user, message) {
     if (typeof message.requestId !== 'string' || !/^[\w-]{1,80}$/.test(message.requestId)) throw httpError(400, 'Invalid sharing request.');
-    if (message.mimeType !== 'video/webm;codecs=vp8,opus' || message.audio !== true) {
-      throw httpError(400, 'Desktop sharing requires video and shared audio.');
+    if (!['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp8'].includes(message.mimeType)) {
+      throw httpError(400, 'Desktop sharing requires WebM video.');
     }
     if (this.sessions.has(ws.id) || room.current?.kind === 'desktop') {
       throw httpError(409, 'A desktop is already being shared. Stop it before starting another.');

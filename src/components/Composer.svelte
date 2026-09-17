@@ -294,8 +294,8 @@
     {:else}
         <div class="desktop-share-panel">
             <span class="upload-symbol"><Icon name="desktop" size={23}/></span>
-            <div><strong>Your screen, live with sound.</strong>
-                <p id="desktop-help">Choose a window, an entire display, or a browser tab in the picker, and enable Share audio.
+            <div><strong>Your screen, live with the room.</strong>
+                <p id="desktop-help">Choose a window, an entire display, or a browser tab in the picker. Enable Share audio if you want to include sound; audio is optional.
                     Audio choices depend on your browser and operating system; a Chrome or Edge tab supports tab audio.
                     Window sharing may include all system sound. Sharing starts now and returns to the queue when stopped.</p></div>
             {#if $desktopState.status === 'idle'}
@@ -312,8 +312,8 @@
     {#if $desktopState.status !== 'idle'}
         <div class="desktop-sharing-status" role="status">
             <span><Icon name="desktop" size={17}/>{
-                $desktopState.status === 'choosing' ? 'Choose a screen and enable audio in the browser picker.' :
-                $desktopState.status === 'starting' ? 'Starting desktop sharing…' : `Sharing ${$desktopState.label} · Audio included`
+                $desktopState.status === 'choosing' ? 'Choose a screen in the browser picker. Audio is optional.' :
+                $desktopState.status === 'starting' ? 'Starting desktop sharing…' : `Sharing ${$desktopState.label} · ${$desktopState.hasAudio ? 'Audio included' : 'Video only'}`
             }</span>
             <button class="button secondary" on:click={() => desktop.stop()}>{
                 $desktopState.status === 'choosing' ? 'Cancel sharing' : 'Stop sharing'

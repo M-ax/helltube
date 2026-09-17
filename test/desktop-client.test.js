@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {get, writable} from 'svelte/store';
-import {createDesktopShare, desktopCaptureOptions, desktopMimeType, desktopSupport} from '../src/lib/desktop-share.js';
+import {createDesktopShare, desktopCaptureOptions, desktopMimeType, desktopVideoMimeType, desktopSupport} from '../src/lib/desktop-share.js';
 
 function fixture(t, {audio = true, capture} = {}) {
     const tracks = ['video', ...(audio ? ['audio'] : [])].map(kind => Object.assign(new EventTarget(), {
@@ -11,9 +11,9 @@ function fixture(t, {audio = true, capture} = {}) {
         getAudioTracks: () => tracks.filter(t => t.kind === 'audio')};
     const recordings = [];
     class Recorder {
-        static isTypeSupported = type => type === desktopMimeType;
+        static isTypeSupported = type => [desktopMimeType, desktopVideoMimeType].includes(type);
         state = 'inactive';
-        constructor(source) { assert.equal(source, stream); recordings.push(this); }
+        constructor(source, options) { assert.equal(source, stream); this.options = options; recordings.push(this); }
         start() { this.state = 'recording'; }
         stop() { this.state = 'inactive'; this.onstop?.(); }
     }
@@ -47,12 +47,31 @@ test('captures video and audio, waits for server acceptance, sends bounded chunk
     assert.equal(h.share.active(), false);
 });
 
-test('missing audio releases screen and never starts a silent share', async t => {
+test('missing audio starts a video-only share and advertises its actual audio state', async t => {
     const h = fixture(t, {audio: false});
     await h.share.start();
-    assert.match(get(h.share.state).error, /No shared audio/);
-    assert.equal(h.commands.length, 0);
-    assert.ok(h.tracks.every(track => track.readyState === 'ended'));
+    h.accept();
+    assert.equal(get(h.share.state).error, '');
+    assert.equal(get(h.share.state).status, 'sharing');
+    assert.equal(get(h.share.state).hasAudio, false);
+    assert.equal(h.commands[0].audio, false);
+    assert.equal(h.recordings[0].options.mimeType, desktopVideoMimeType);
+    assert.equal(h.recordings[0].options.audioBitsPerSecond, undefined);
+    assert.ok(h.tracks.every(track => track.readyState === 'live'));
+});
+
+test('ending audio updates the status without stopping video capture', async t => {
+    const h = fixture(t);
+    await h.share.start();
+    h.accept();
+    assert.equal(get(h.share.state).hasAudio, true);
+    h.tracks[1].stop();
+    h.tracks[1].dispatchEvent(new Event('ended'));
+    assert.equal(h.share.active(), true);
+    assert.equal(get(h.share.state).hasAudio, false);
+    assert.equal(h.tracks[0].readyState, 'live');
+    assert.equal(h.recordings[0].state, 'recording');
+    assert.equal(h.commands.length, 1);
 });
 
 test('cancelling a pending picker releases a subsequently selected screen', async t => {
@@ -71,7 +90,7 @@ for (const cause of ['ended', 'disconnect', 'room', 'backpressure', 'server', 'c
         const h = fixture(t);
         await h.share.start();
         if (cause !== 'cancel-before-ack') h.accept();
-        if (cause === 'ended') h.tracks[1].dispatchEvent(new Event('ended'));
+        if (cause === 'ended') h.tracks[0].dispatchEvent(new Event('ended'));
         if (cause === 'disconnect') h.client.state.update(s => ({...s, joined: false}));
         if (cause === 'room') h.client.state.update(s => ({...s, room: {id: 'other'}}));
         if (cause === 'backpressure') {
@@ -90,4 +109,6 @@ for (const cause of ['ended', 'disconnect', 'room', 'backpressure', 'server', 'c
 test('insecure and unsupported browsers receive a useful explanation', () => {
     assert.match(desktopSupport({secure: false}), /HTTPS/);
     assert.match(desktopSupport({secure: true, devices: {}}), /Chrome or Edge/);
+    assert.equal(desktopSupport({secure: true, devices: {getDisplayMedia() {}},
+        Recorder: {isTypeSupported: type => type === desktopVideoMimeType}}), '');
 });

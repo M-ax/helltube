@@ -37,9 +37,9 @@ test('live share interrupts and resumes a video, never enters history, and disal
     assert.equal(h.media.jobs.size, 0);
 });
 
-test('shares require audio, one sender per room, and an available transcoder', () => {
+test('shares require supported video, one sender per room, and an available transcoder', () => {
     const h = fixture();
-    assert.throws(() => h.desktop.start(h.room, h.ws, h.user, {...request, audio: false}), /shared audio/);
+    assert.throws(() => h.desktop.start(h.room, h.ws, h.user, {...request, mimeType: 'audio/webm'}), /WebM video/);
     h.media.config.maxTranscoders = 0;
     assert.throws(() => h.desktop.start(h.room, h.ws, h.user, request), /busy/);
     h.media.config.maxTranscoders = 4;
@@ -47,6 +47,14 @@ test('shares require audio, one sender per room, and an available transcoder', (
     assert.throws(() => h.desktop.start(h.room, {id: 'another'}, h.user, request), /already/);
     h.desktop.stop({id: 'another'});
     assert.equal(h.desktop.sessions.size, 1);
+    h.desktop.stop(h.ws);
+});
+
+test('desktop sharing accepts video without an audio track', () => {
+    const h = fixture();
+    h.desktop.start(h.room, h.ws, h.user, {...request, mimeType: 'video/webm;codecs=vp8', audio: false});
+    assert.equal(h.room.current.kind, 'desktop');
+    assert.equal(h.messages.at(-1).type, 'desktop:started');
     h.desktop.stop(h.ws);
 });
 

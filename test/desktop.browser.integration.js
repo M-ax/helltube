@@ -24,7 +24,8 @@ async function availablePort() {
 }
 
 for (const split of [false, true]) {
-test(`desktop capture delivers live video and audible audio to a late viewer (${split ? 'Worker + metal' : 'local'})`, {timeout: 90000}, async t => {
+for (const withAudio of [false, true]) {
+test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video only'} to a late viewer (${split ? 'Worker + metal' : 'local'})`, {timeout: 90000}, async t => {
     const backend = await start(t);
     const {instance} = backend;
     let url = backend.url;
@@ -57,8 +58,8 @@ test(`desktop capture delivers live video and audible audio to a late viewer (${
     });
     watch(sender);
     sender.on('pageerror', error => errors.push(error.message));
-    await sender.addInitScript(() => {
-        window.captureAudio = false;
+    await sender.addInitScript(withAudio => {
+        window.captureAudio = withAudio;
         window.captureTracks = [];
         // Substitute only the OS picker. Exercise the real MediaRecorder, socket,
         // FFmpeg, encrypted HLS, and receiving browser decoder.
@@ -87,14 +88,9 @@ test(`desktop capture delivers live video and audible audio to a late viewer (${
             window.captureTracks.push(...stream.getTracks());
             return stream;
         };
-    });
+    }, withAudio);
     await join(sender, url);
     await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
-    await sender.getByRole('button', {name: 'Choose screen to share'}).click();
-    await sender.getByRole('alert').filter({hasText: 'No shared audio'}).waitFor();
-    assert.equal(instance.rooms.get('lobby').current, null);
-    assert.equal(await sender.evaluate(() => window.captureTracks.every(track => track.readyState === 'ended')), true);
-    await sender.evaluate(() => { window.captureAudio = true; });
     await sender.getByRole('button', {name: 'Choose screen to share'}).click();
     await sender.getByRole('button', {name: 'Stop sharing', exact: true}).waitFor();
     await until(() => instance.rooms.get('lobby').current?.media?.bufferedUntil >= 4, 20000);
@@ -102,19 +98,24 @@ test(`desktop capture delivers live video and audible audio to a late viewer (${
     const job = instance.media.jobs.get(item.id);
     assert.ok(job);
     assert.equal(item.kind, 'desktop');
-    assert.equal(await sender.locator('video').evaluate(video => video.muted), true);
+    assert.equal(await sender.locator('video').evaluate(video => video.muted), withAudio);
+    assert.match(await sender.locator('.desktop-sharing-status').textContent(), withAudio ? /Audio included/ : /Video only/);
     const viewer = await browser.newPage();
     watch(viewer);
     viewer.on('pageerror', error => errors.push(error.message));
     await join(viewer, url);
-    await until(() => viewer.locator('video').evaluate(video => video.videoWidth > 0 && !video.paused && video.currentTime > 0), 20000);
-    const pixel = await viewer.locator('video').evaluate(video => {
+    await until(() => viewer.locator('video').evaluate(video => video.readyState >= 2 && video.videoWidth > 0 && !video.paused && video.currentTime > 0), 20000);
+    // Room alignment can briefly seek between readiness and pixel sampling.
+    const pixel = await until(() => viewer.locator('video').evaluate(video => {
+        if (video.readyState < 2) return false;
         const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
         const context = canvas.getContext('2d'); context.drawImage(video, 0, 0, 1, 1);
-        return [...context.getImageData(0, 0, 1, 1).data];
-    });
+        const pixel = [...context.getImageData(0, 0, 1, 1).data];
+        return pixel[3] === 255 ? pixel : false;
+    }));
     assert.ok(pixel[0] > 180 && pixel[1] < 50 && pixel[2] < 50, `Received desktop frame: ${pixel}`);
-    const audioPeak = await viewer.locator('video').evaluate(async video => {
+    if (withAudio) {
+      const audioPeak = await viewer.locator('video').evaluate(async video => {
         const audio = new AudioContext(); await audio.resume();
         const analyser = audio.createAnalyser(); analyser.fftSize = 2048;
         const source = audio.createMediaElementSource(video);
@@ -129,7 +130,8 @@ test(`desktop capture delivers live video and audible audio to a late viewer (${
         await audio.close();
         return peak;
     });
-    assert.ok(audioPeak > 0.1, `Captured tone was audible in the receiving browser: ${audioPeak}`);
+      assert.ok(audioPeak > 0.1, `Captured tone was audible in the receiving browser: ${audioPeak}`);
+    }
     assert.equal(responses.some(response => response.status >= 400), false, JSON.stringify(responses.filter(response => response.status >= 400)));
     if (split) {
         const segments = responses.filter(response => response.path.endsWith('.ts'));
@@ -147,4 +149,5 @@ test(`desktop capture delivers live video and audible audio to a late viewer (${
     await job.cleanup;
     assert.deepEqual(errors, []);
 });
+}
 }
