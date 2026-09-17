@@ -8,7 +8,7 @@
     import {PIPE_LIFETIME_MS} from '../lib/metal-pipe.js';
     import {createReactionAudio} from '../lib/reaction-audio.js';
     import {ballArena, BALL_WIDTH, BALL_HEIGHT} from '../../shared/beach-ball.js';
-    import {targetPosition, driftCorrection, time} from '../lib/format.js';
+    import {targetPosition, driftCorrection, time, bufferDuration} from '../lib/format.js';
     import {sourceLabels, sourceIcons} from '../../shared/media-source.js';
     import {sponsorPosition} from '../../shared/sponsorblock.js';
     import {delivery, isSameOriginUrl} from '../lib/delivery.js';
@@ -830,8 +830,8 @@
         </span>
         <span>{mediaAccess.route === 'cloudflare' ? 'Cloudflare' : mediaAccess.route === 'metal' ? 'Metal' : 'Server'}</span>
         {#if bufferReport}
-            <span>{bufferReport.seconds.toFixed(1)}s buffered</span>
-            <span title="Video prepared on the server ahead of the room position">{bufferReport.serverAhead.toFixed(1)}s ready at source</span>
+            <span>{bufferDuration(bufferReport.seconds)} buffered</span>
+            <span title="Video prepared on the server ahead of the room position">{bufferDuration(bufferReport.serverAhead)} ready at source</span>
             {#if bufferReport.mbps !== null}
                 <span title="Recent segment download speed, including request latency">{bufferReport.mbps.toFixed(1)} Mbps · {bufferReport.downloadRate.toFixed(1)}× playback</span>
             {/if}

@@ -9,6 +9,17 @@
     export let onAdd;
     let tab = 'queue';
     $: queue = room?.queue || [];
+    $: groups = queue.reduce((groups, item, index) => {
+        const previous = groups[groups.length - 1];
+        // Group adjacent playlist videos without changing the playback order.
+        if (item.playlistId && previous?.playlistId === item.playlistId) {
+            previous.entries.push({item, index});
+        } else {
+            groups.push({id: item.id, playlistId: item.playlistId, title: item.playlistTitle || 'Playlist',
+                entries: [{item, index}]});
+        }
+        return groups;
+    }, []);
     $: history = (room?.history || []).slice(0, 5);
     const statuses = {
         queued: 'In line',
@@ -55,22 +66,32 @@
                 </div>
             {:else}
                 <ol class="queue-list">
-                    {#each queue as item, index (item.id)}
-                        <li class:playlist-item={!!item.playlistId}>
-                            {#if item.playlistId && (index === 0 || queue[index - 1].playlistId !== item.playlistId)}
+                    {#each groups as group (group.id)}
+                        <li class:playlist-card={!!group.playlistId}>
+                            {#if group.playlistId}
                                 <div class="playlist-heading">
                                     <Icon name="list" size={15}/>
                                     <div>
-                                        <strong>{item.playlistTitle || 'YouTube playlist'}</strong><span>{queue.filter((entry) => entry.playlistId === item.playlistId).length}
+                                        <strong>{group.title}</strong><span>{group.entries.length}
                                         queued in this playlist</span></div>
                                     <button class="icon-button danger" disabled={!connected}
-                                            aria-label={`Remove all queued videos from ${item.playlistTitle || 'this playlist'}`}
+                                            aria-label={`Remove all queued videos from ${group.title}`}
                                             title="Remove playlist from queue. The video on screen stays."
-                                            on:click={() => onCommand({ type: 'queue:remove-playlist', playlistId: item.playlistId })}>
+                                            on:click={() => onCommand({ type: 'queue:remove-playlist', playlistId: group.playlistId })}>
                                         <Icon name="trash" size={15}/>
                                     </button>
                                 </div>
+                                <ol class="playlist-videos" aria-label={group.title} start={group.entries[0].index + 1}>
+                                    {#each group.entries as {item, index} (item.id)}
+                                        <li>{@render queueEntry(item, index)}</li>
+                                    {/each}
+                                </ol>
+                            {:else}
+                                {@render queueEntry(group.entries[0].item, group.entries[0].index)}
                             {/if}
+                        </li>
+                    {/each}
+                    {#snippet queueEntry(item, index)}
                             <div class="queue-item">
                                 <div class="queue-thumb">
                                     {#if imageUrl(item.thumbnail)}<img src={imageUrl(item.thumbnail)} alt=""
@@ -106,8 +127,7 @@
                                     <Icon name="close" size={16}/>
                                 </button>
                             </div>
-                        </li>
-                    {/each}
+                    {/snippet}
                 </ol>
             {/if}
         {:else}

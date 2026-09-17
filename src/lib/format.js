@@ -8,6 +8,14 @@ export function time(seconds) {
     return `${hours ? `${hours}:${String(minutes).padStart(2, '0')}` : minutes}:${String(value % 60).padStart(2, '0')}`;
 }
 
+export function bufferDuration(seconds) {
+    if (!Number.isFinite(seconds)) return '—';
+    const value = Math.max(0, seconds);
+    if (value >= 3600) return `${(value / 3600).toFixed(1)}h`;
+    if (value > 120) return `${(value / 60).toFixed(1)}m`;
+    return `${value.toFixed(1)}s`;
+}
+
 export function bytes(value) {
     if (!Number.isFinite(value) || value <= 0) return '0 B';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
