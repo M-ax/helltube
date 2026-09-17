@@ -13,6 +13,7 @@
     export let capabilities = {};
     export let manager;
     export let notify;
+    export let onPreparation;
     let mode = 'youtube';
     let url = '';
     let insertAt = 'end';
@@ -99,15 +100,19 @@
         const roomId = room.id;
         const roomName = room.name;
         busy = 'youtube';
+        const preparation = {roomId, kind: linkKind, stage: 'metadata'};
+        onPreparation?.(preparation);
         try {
             const result = await api(`/api/rooms/${encodeURIComponent(roomId)}/media`, {
                 method: 'POST',
                 body: {url: url.trim(), insertAt: position(), startAt}
             });
             url = '';
+            onPreparation?.(null);
             notify(`${result.added} ${result.added === 1 ? 'video' : 'videos'} added to ${roomName}.`, 'notice');
         } catch (cause) {
             error = cause.message;
+            onPreparation?.({...preparation, error});
         } finally {
             busy = '';
         }
@@ -126,13 +131,17 @@
         busy = 'upload';
         resetFileDrag();
         error = '';
+        const preparation = {roomId: selectedRoom.id, kind: 'upload', stage: 'metadata', title: files[0].name};
+        onPreparation?.(preparation);
         try {
             const result = await manager.addMany(files, selectedRoom, selectedPosition);
+            onPreparation?.(null);
             notify(files.length === 1
                 ? `“${files[0].name}” joined the lineup in ${selectedRoom.name}.`
                 : `Playlist “${result.playlistTitle}” (${files.length} videos) joined the lineup in ${selectedRoom.name}.`, 'notice');
         } catch (cause) {
             if (cause.name !== 'AbortError') error = cause.message;
+            onPreparation?.(cause.name === 'AbortError' ? null : {...preparation, error});
         } finally {
             busy = '';
         }

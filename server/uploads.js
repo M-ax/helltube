@@ -54,6 +54,7 @@ export class Uploads {
       const upload = { ...saved, item, file, received, complete: received === saved.size,
         busy: false, cancelled: false, readers: new Set() };
       item.source.complete = upload.complete;
+      item.uploadProgress = { received, total: upload.size, complete: upload.complete };
       this.uploads.set(upload.id, upload);
       this.persist(upload);
     }
@@ -127,6 +128,7 @@ export class Uploads {
       const id = randomUUID();
       const item = makeItem({ kind: 'upload', uploadId: id, complete: false }, {
         title: file.name, duration: file.duration, addedBy: user.displayName, status: 'uploading', playlistId, playlistTitle,
+        uploadProgress: { received: 0, total: file.size, complete: false },
       });
       return { id, item, roomId: room.id, userId: user.id, size: file.size,
         received: 0, complete: false, busy: false, cancelled: false, file: path.join(this.dir, id),
@@ -203,6 +205,7 @@ export class Uploads {
       upload.received += bytes.length;
       upload.complete = upload.received === upload.size;
       upload.item.source.complete = upload.complete;
+      upload.item.uploadProgress = { received: upload.received, total: upload.size, complete: upload.complete };
       upload.samples.push({ bytes: bytes.length, ms: Math.max(1, transferMs) });
       while (upload.samples.length > 30) upload.samples.shift();
       const save = () => {

@@ -25,6 +25,7 @@
     let modal = null;
     let manager;
     let composer;
+    let preparation = null;
     let roomName = '';
     let editingRoom = null;
     let confirmRoomDelete = false;
@@ -171,6 +172,7 @@
     }
 
     function sessionEnded() {
+        preparation = null;
         resetPreferences();
         client.disconnect();
         manager?.dispose();
@@ -213,6 +215,7 @@
     }
 
     function joinRoom(id) {
+        preparation = null;
         if ($realtimeState.selectedRoomId !== id || !$realtimeState.joined) client.join(id);
         sidebarOpen = false;
     }
@@ -474,11 +477,12 @@
                 <div class="work-grid">
                     <section class="stage" aria-label="Watch together">
                         {#key preferenceKey}
-                            <Player {room} {connected} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
+                            <Player {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
                                     overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
-                        <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify}/>
+                        <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify}
+                                  onPreparation={value => preparation = value}/>
                         <Uploads {manager}/>
                         <section class="room-company" aria-label="People in this room">
                             <div class="section-heading">

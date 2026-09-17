@@ -22,6 +22,7 @@ export class Rooms extends EventEmitter {
       const room = { ownerId: null, ...saved, members: new Map() };
       for (const item of [room.current, ...room.queue, ...room.history].filter(Boolean)) {
         item.media = null;
+        item.preparation = null;
         if (item.status !== 'error') item.status = item.kind === 'upload' && !item.source.complete ? 'uploading' : 'queued';
         item.source.startAt = item.startAt || 0;
       }
@@ -36,7 +37,7 @@ export class Rooms extends EventEmitter {
 
   persist(room) {
     if (!this.store) return;
-    const itemState = item => item ? { ...item, media: null } : null;
+    const itemState = item => item ? { ...item, media: null, preparation: null } : null;
     const state = { id: room.id, name: room.name, ownerId: room.ownerId, current: itemState(room.current),
       queue: room.queue.map(itemState), history: room.history.map(itemState), version: room.version,
       resumeWhenReady: room.resumeWhenReady,
@@ -286,6 +287,7 @@ export class Rooms extends EventEmitter {
     return { id: room.id, name: room.name, ownerId: room.ownerId, version: room.version,
       members: [...new Map([...room.members.values()].map(u => [u.id, { id: u.id, displayName: u.displayName }])).values()],
       current: expose(room.current), queue: room.queue.map(expose), history: room.history.map(expose),
+      preparation: room.preparations?.values().next().value || null,
       playback: { ...room.playback } };
   }
 

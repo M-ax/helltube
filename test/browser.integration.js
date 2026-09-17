@@ -8,6 +8,80 @@ import { chromium } from 'playwright';
 import { start, until } from './helpers.js';
 import { createApp } from '../server/app.js';
 import { targetPosition } from '../src/lib/format.js';
+import { makeItem } from '../server/rooms.js';
+
+test('CRT startup shows metadata, measured progress, failures, and yields to real video on desktop and mobile', { timeout: 45000 }, async t => {
+  const { instance, url, dir } = await start(t, { maxTranscoders: 0 });
+  instance.capabilities.youtube = true;
+  const metadata = Promise.withResolvers();
+  const source = Promise.withResolvers();
+  t.after(() => { metadata.resolve(); source.resolve(); });
+  const sample = path.join(dir, 'crt-fixture.mp4');
+  await promisify(execFile)(instance.media.config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=30', '-t', '12', '-c:v', 'libx264',
+    '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', sample]);
+  instance.app.get('/crt-fixture.mp4', (_req, res) => res.sendFile(sample, { dotfiles: 'allow' }));
+  t.mock.method(instance.youtube, 'items', async () => {
+    await metadata.promise;
+    return [makeItem({kind: 'youtube', url: 'https://youtu.be/jNQXAC9IVRw'}, {title: 'CRT playback fixture', duration: 12})];
+  });
+  t.mock.method(instance.youtube, 'resolve', async () => {
+    await source.promise;
+    return {duration: 12, inputs: [{url: `${url}/crt-fixture.mp4`, headers: {}}]};
+  });
+  const browser = await chromium.launch({channel: 'chrome', headless: true});
+  t.after(() => browser.close());
+  const page = await browser.newPage({viewport: {width: 1440, height: 1000}});
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(url);
+  await page.getByLabel('Username', {exact: true}).fill('admin');
+  await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+  await page.getByRole('button', {name: 'Enter Helltube'}).click();
+  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+  await page.getByRole('heading', {name: 'NO SIGNAL'}).waitFor();
+  await page.getByRole('button', {name: 'Add something good'}).click();
+  assert.equal(await page.locator('#youtube-url').evaluate(input => input === document.activeElement), true);
+  await page.locator('#youtube-url').fill('https://youtu.be/jNQXAC9IVRw');
+  await page.getByRole('button', {name: 'Add to queue', exact: true}).click();
+  await page.getByRole('heading', {name: 'BOOTING STREAM'}).waitFor();
+  await page.locator('.crt-running').filter({hasText: 'Fetching source metadata'}).waitFor();
+  metadata.resolve();
+  const room = instance.rooms.get('lobby');
+  await until(() => room.current);
+  room.resumeWhenReady = false;
+  room.current.preparation = {stage: 'transcoding', seconds: 3, baseTime: 0};
+  room.current.uploadProgress = {received: 512, total: 1024, complete: false};
+  instance.rooms.emit('state', room);
+  const progress = page.getByRole('progressbar', {name: 'FFmpeg transcoding', exact: true});
+  await until(async () => await progress.getAttribute('aria-valuenow') === '25');
+  assert.equal(await page.getByRole('progressbar', {name: 'Receiving video upload'}).getAttribute('aria-valuenow'), '50');
+  await page.setViewportSize({width: 375, height: 850});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  assert.equal(await page.locator('.crt-screen').evaluate(screen => screen.scrollWidth <= screen.clientWidth), true);
+  await page.emulateMedia({reducedMotion: 'reduce'});
+  assert.equal(await page.locator('.crt-sweep').evaluate(sweep => getComputedStyle(sweep).display), 'none');
+  room.current.status = 'error';
+  room.current.error = 'Fixture conversion failed';
+  instance.rooms.emit('state', room);
+  await page.getByRole('heading', {name: 'SIGNAL FAILED'}).waitFor();
+  await page.locator('.crt-error').filter({hasText: 'Fixture conversion failed'}).waitFor();
+  assert.equal(await page.locator('.crt-running').count(), 0);
+  room.current.status = 'queued';
+  room.current.error = null;
+  room.current.uploadProgress = null;
+  instance.media.config.maxTranscoders = 1;
+  instance.media.schedule();
+  await until(() => room.current.preparation?.stage === 'metadata');
+  source.resolve();
+  await until(() => room.current.media?.complete, 15000);
+  assert.ok(room.current.preparation.seconds > 0, 'Real FFmpeg stdout produces progress.');
+  await page.locator('.crt-screen').waitFor({state: 'detached'});
+  assert.ok(await page.locator('video').first().evaluate(video => video.readyState >= 2));
+  assert.equal(room.playback.paused, true, 'A paused video still shows its decoded frame.');
+  assert.deepEqual(errors, []);
+});
 
 test('SponsorBlock fetches post-ad HLS first and skips a long sponsor window for two viewers', { timeout: 60000 }, async t => {
   const { instance, url, dir, api } = await start(t, { youtubeProxy: '' });

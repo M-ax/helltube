@@ -5,6 +5,7 @@ import path from 'node:path';
 import { youtubeNetwork } from './youtube-network.js';
 import { FILE_INPUT_FORMATS, HOSTED_INPUT_FORMATS, probeCommand, probeDuration } from './media-metadata.js';
 import { sponsorPosition } from '../shared/sponsorblock.js';
+import { createProgressReader } from './media-progress.js';
 
 export function playlistProgress(contents, baseTime = 0) {
   const durations = [...contents.matchAll(/^#EXTINF:([\d.]+)/gm)].map(m => Number(m[1]));
@@ -57,6 +58,7 @@ export class Media {
       room.current.status = 'queued';
       room.current.error = null;
       room.current.media = null;
+      room.current.preparation = null;
       room.current.source.startAt = position;
     });
     this.timer = setInterval(() => this.poll().catch(error => console.error('Media monitor:', error.message)), 500);
@@ -95,6 +97,7 @@ export class Media {
     this.jobs.set(item.id, job);
     item.status = 'processing';
     item.media = null;
+    item.preparation = { stage: 'metadata', baseTime, seconds: 0 };
     job.task = this.run(job).catch(error => {
       if (job.cancelled) return;
       if (item.kind === 'upload' && item.source.complete && job.inputComplete === false && !item.media) {
@@ -175,6 +178,7 @@ export class Media {
       inputs = [{ url: `http://127.0.0.1:${this.port}/internal/uploads/${upload.id}?key=${this.uploads.secret}`, headers: {} }];
     }
     if (job.cancelled) return;
+    item.preparation = { stage: 'transcoding', baseTime, seconds: 0 };
     const inputFormats = item.kind === 'http' ? HOSTED_INPUT_FORMATS : FILE_INPUT_FORMATS +
       (item.kind === 'youtube' || item.kind === 'twitch' ? ',hls' : '');
     for (const input of inputs) {
@@ -186,7 +190,8 @@ export class Media {
       args.push('-rw_timeout', '120000000', '-protocol_whitelist', `http,https,tcp,tls,crypto${network.proxy ? ',httpproxy' : ''}`,
         '-format_whitelist', inputFormats, '-i', input.url);
     }
-    args.push('-map', item.kind === 'http' ? '0:v:0?' : '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
+    args.push('-progress', 'pipe:1', '-stats_period', '0.5', '-nostats',
+      '-map', item.kind === 'http' ? '0:v:0?' : '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
       '-vf', 'scale=w=min(1280\\,iw):h=min(720\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '3000k', '-bufsize', '6000k',
       '-threads', '2', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
@@ -196,7 +201,11 @@ export class Media {
       '-hls_flags', 'independent_segments+temp_file+periodic_rekey', '-hls_segment_filename', path.join(job.dir, 'segment-%06d.ts'),
       path.join(job.dir, 'index.m3u8'));
     await new Promise((resolve, reject) => {
-      job.child = spawn(this.config.ffmpeg, args, { windowsHide: true, env: network.env, stdio: ['ignore', 'ignore', 'pipe'] });
+      job.child = spawn(this.config.ffmpeg, args, { windowsHide: true, env: network.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      job.child.stdout.on('data', createProgressReader(progress => {
+        if (job.cancelled) return;
+        item.preparation = { ...item.preparation, ...progress };
+      }));
       job.child.stderr.on('data', data => { job.errors = (job.errors + data).slice(-12000); });
       job.child.on('error', error => reject(new Error(`Could not start FFmpeg: ${error.code || error.message}`)));
       job.child.on('close', code => {
@@ -227,6 +236,7 @@ export class Media {
       job.item.media = { url: `/media/${job.id}/index.m3u8`, baseTime: job.baseTime,
         bufferedUntil: progress.bufferedUntil, complete: progress.complete };
       job.item.status = 'ready';
+      job.item.preparation = { ...job.item.preparation, stage: progress.complete ? 'ready' : 'buffering' };
       if (progress.bufferedUntil > job.lastBuffered) {
         job.lastBuffered = progress.bufferedUntil;
         job.lastProgress = Date.now();
@@ -283,6 +293,7 @@ export class Media {
     job.child?.kill();
     if (this.jobs.get(job.item.id) === job) this.jobs.delete(job.item.id);
     job.item.media = null;
+    job.item.preparation = null;
     job.item.status = 'queued';
     job.cleanup = Promise.resolve(job.task).then(async () => {
       job.key.fill(0);

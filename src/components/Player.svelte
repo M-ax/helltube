@@ -2,6 +2,7 @@
     import {onMount, onDestroy, tick} from 'svelte';
     import Hls from 'hls.js';
     import Icon from './Icon.svelte';
+    import CrtScreen from './CrtScreen.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
     import Reactions from './Reactions.svelte';
     import MetalPipeReaction from './MetalPipeReaction.svelte';
@@ -24,6 +25,7 @@
     export let reactions = {roomId: null, ball: null, serverTime: 0, events: []};
     export let onCommand;
     export let onAdd;
+    export let preparation = null;
     export let preferences = {volume: 0.8, muted: false};
     export let preferenceKey = null;
     export let onPreferencesChange;
@@ -41,6 +43,7 @@
     let activeReactions = [];
     let reactionRoom = null;
     let reactionAudio;
+    let reactionsEnabled = true;
     let soundMuted = false;
     const seenReactions = new Set();
     const reactionTimers = new Set();
@@ -69,6 +72,7 @@
     let scrubbing = false;
     let now = Date.now();
     let playing = false;
+    let hasFrame = false;
     let controlsVisible = true;
     let keyboardFocus = false;
     let activePointerCount = 0;
@@ -89,10 +93,10 @@
     $: canAutoHide = !!media && connected && playing && !room?.playback.paused && !preparing
         && !localBuffering && !blocked && !playerError && item?.status !== 'error';
     $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed;
-    $: beachBall = connected && reactions.roomId === room?.id && !!reactions.ball;
+    $: beachBall = reactionsEnabled && connected && reactions.roomId === room?.id && !!reactions.ball;
     $: updateReactionRoom(connected ? room?.id : null);
     $: if (renderer) renderer.setBeachBallState(beachBall ? reactions.ball : null, (Date.now() + clockOffset - reactions.serverTime) / 1000);
-    $: receiveReactions(reactions, connected, room?.id);
+    $: receiveReactions(reactions, connected, room?.id, reactionsEnabled);
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
     $: volumePosition = Math.round(Math.log1p(volume * (VOLUME_CURVE - 1)) / Math.log(VOLUME_CURVE) * 100) / 100;
@@ -252,6 +256,7 @@
         bufferMonitor = null;
         bufferReport = null;
         playing = false;
+        hasFrame = false;
         controlsVisible = true;
         seekCenter = null;
         previewOffset = null;
@@ -484,18 +489,31 @@
     function updateReactionRoom(id) {
         if (reactionRoom === id) return;
         reactionRoom = id;
+        clearActiveReactions();
+        seenReactions.clear();
+    }
+
+    function clearActiveReactions() {
         hitmarkerArmed = false;
         activeReactions = [];
-        seenReactions.clear();
         for (const timer of reactionTimers) clearTimeout(timer);
         reactionTimers.clear();
     }
 
-    function receiveReactions(state, online, roomId) {
+    function toggleReactions() {
+        reactionsEnabled = !reactionsEnabled;
+        if (!reactionsEnabled) {
+            clearActiveReactions();
+            reactionAudio?.stop();
+        }
+    }
+
+    function receiveReactions(state, online, roomId, enabled) {
         if (!online || state.roomId !== roomId) return;
         for (const event of state.events) {
             if (seenReactions.has(event.id)) continue;
             seenReactions.add(event.id);
+            if (!enabled) continue;
             const lifetime = event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
@@ -514,7 +532,7 @@
     }
 
     async function react(kind) {
-        if (!connected) return;
+        if (!connected || !reactionsEnabled) return;
         reactionAudio?.unlock();
         if (kind === 'hitmarker') {
             hitmarkerArmed = !hitmarkerArmed;
@@ -529,11 +547,11 @@
     }
 
     function pipeImpact() {
-        if (connected && !soundMuted && !muted && !document.hidden) reactionAudio?.play(volume, 'metalpipe');
+        if (reactionsEnabled && connected && !soundMuted && !muted && !document.hidden) reactionAudio?.play(volume, 'metalpipe');
     }
 
     function placeHitmarker(event) {
-        if (!connected || !hitmarkerArmed) return;
+        if (!connected || !reactionsEnabled || !hitmarkerArmed) return;
         const rect = event.currentTarget.getBoundingClientRect();
         const point = event.detail === 0 ? aim : {
             x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
@@ -589,7 +607,9 @@
         node.addEventListener('pointercancel', leave);
         window.addEventListener('pointerup', release);
         window.addEventListener('blur', leave);
-        return {destroy() {
+        return {update(enabled) {
+            if (!enabled) leave();
+        }, destroy() {
             clearInterval(heartbeat);
             node.removeEventListener('pointermove', move);
             node.removeEventListener('pointerdown', move);
@@ -648,14 +668,14 @@
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
          data-controls-visible={controlsVisible}>
-    <div class="video-viewport" use:trackReactionPointer data-renderer={webglActive ? 'webgl' : 'native'}
+    <div class="video-viewport" use:trackReactionPointer={beachBall} data-renderer={webglActive ? 'webgl' : 'native'}
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + 28}px`}>
         <!-- svelte-ignore a11y_media_has_caption -->
         <video bind:this={video} playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
                class:webgl-source={webglActive}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
-               on:canplay={sync} on:waiting={() => localBuffering = true}
+               on:canplay={sync} on:loadeddata={() => hasFrame = true} on:waiting={() => localBuffering = true}
                on:playing={() => { playing = true; localBuffering = false; }}
                on:pause={() => playing = false} on:ended={() => playing = false}
                on:error={nativePlaybackError}></video>
@@ -688,18 +708,9 @@
         <div class="screen-topline"><span class="screen-brand"><Icon name="flame" size={16}/>HELLTUBE CINEMA</span><span
                 class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : room.playback.paused ? 'PAUSED TOGETHER' : 'WATCHING TOGETHER'}</span>
         </div>
-        {#if !item}
-            <div class="screen-empty"><span class="cinema-orbit"><Icon name="play" size={36} stroke={1.4}/></span>
-                <p class="eyebrow">LIGHTS DOWN. POSSIBILITIES UP.</p>
-                <h2>What’s the first <em>watch?</em></h2>
-                <p>Add a YouTube, Twitch VOD, or media link, or a video from your device.<br/>Good things are better with company.</p>
-                <button class="button primary" disabled={!connected} on:click={onAdd}>
-                    <Icon name="plus" size={17}/>
-                    Add something good
-                </button>
-            </div>
-            <div class="screen-corner corner-left"></div>
-            <div class="screen-corner corner-right"></div>
+        {#if !media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error')}
+            <CrtScreen {item} {connected} {onAdd} onSkip={() => control('skip')}
+                       pending={item ? null : room?.preparation || (preparation?.roomId === room?.id ? preparation : null)}/>
         {:else if item.status === 'error' || playerError}
             <div class="screen-message error-screen" role="alert"><span class="screen-message-icon"><Icon name="warning"
                                                                                                           size={28}/></span>
@@ -723,12 +734,6 @@
                 <Icon name="offline" size={30}/>
                 <h3>Holding your place.</h3>
                 <p>Reconnecting to the room. Playback is paused on this device until a fresh state arrives.</p></div>
-        {:else if preparing}
-            <div class="screen-message" role="status"><span class="spinner large-spinner"></span>
-                <h3>{item.status === 'uploading' ? 'Making room for your video.' : 'Getting the screen ready.'}</h3>
-                <p>{item.status === 'uploading' ? 'Receiving and preparing the file. Playback begins as soon as the server has playable media.' : 'The server is preparing this video for everyone. Hang tight.'}</p>
-                {#if item.kind === 'upload'}<span class="container-note">Some MP4/MOV and other containers keep their index at the end and need the complete upload before playback can begin.</span>{/if}
-            </div>
         {:else if blocked}
             <div class="screen-message"><span class="screen-message-icon"><Icon name="volume" size={28}/></span>
                 <h3>Your browser needs a little nudge.</h3>
@@ -803,7 +808,8 @@
         </div>
     </div>
 </section>
-<Reactions {connected} {beachBall} armed={hitmarkerArmed} {soundMuted} onReact={react}
+<Reactions {connected} {beachBall} armed={hitmarkerArmed} enabled={reactionsEnabled} {soundMuted} onReact={react}
+           onEnabledToggle={toggleReactions}
            onSoundToggle={() => { soundMuted = !soundMuted; reactionAudio?.unlock(); }}/>
 <div class="now-playing">
     <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>

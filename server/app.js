@@ -237,11 +237,20 @@ export async function createApp(overrides = {}) {
     if (!kind) throw httpError(400, 'Enter a YouTube, Twitch VOD, or HTTP/HTTPS media URL.');
     if ((kind === 'youtube' || kind === 'twitch') && !capabilities[kind]) throw httpError(503, 'yt-dlp is missing. Install it and restart the server.');
     const provider = { youtube, twitch, http: remote }[kind];
-    const items = await provider.items(url, req.auth.user, req.body.startAt);
-    if (!accounts.authenticate(req.headers.cookie)) throw httpError(401, 'Session expired.');
-    membership(req);
-    rooms.add(room, items, req.body.insertAt);
-    res.status(201).json({ added: items.length });
+    const preparation = { id: randomUUID(), kind, stage: 'metadata' };
+    room.preparations ||= new Map();
+    room.preparations.set(preparation.id, preparation);
+    rooms.emit('state', room);
+    try {
+      const items = await provider.items(url, req.auth.user, req.body.startAt);
+      if (!accounts.authenticate(req.headers.cookie)) throw httpError(401, 'Session expired.');
+      membership(req);
+      rooms.add(room, items, req.body.insertAt);
+      res.status(201).json({ added: items.length });
+    } finally {
+      room.preparations.delete(preparation.id);
+      if (rooms.rooms.get(room.id) === room) rooms.emit('state', room);
+    }
   });
   app.post('/api/rooms/:id/uploads', async (req, res) => {
     requireMedia();

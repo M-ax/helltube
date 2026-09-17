@@ -93,6 +93,7 @@ test('FFmpeg proxies each YouTube input, allows CONNECT, and leaves uploads/dire
     const mock = t.mock.method(childProcess, 'spawn', (command, args, options) => {
       launch = { command, args, options };
       const child = new EventEmitter();
+      child.stdout = new PassThrough();
       child.stderr = new PassThrough();
       process.nextTick(() => { job.cancelled = true; child.emit('close', 0); });
       return child;

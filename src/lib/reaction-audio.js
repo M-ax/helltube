@@ -24,8 +24,14 @@ export function createReactionAudio() {
         } catch { /* A blocked audio device must never interrupt the player. */ }
     }
 
+    function stop() {
+        for (const source of sources) source.stop();
+        sources.clear();
+    }
+
     return {
         unlock,
+        stop,
         play(volume, kind = 'hitmarker') {
             const sound = sounds[kind];
             if (destroyed || !sound?.buffer || context?.state !== 'running' || volume <= 0 || sources.size >= 8) return;
@@ -40,8 +46,7 @@ export function createReactionAudio() {
         },
         destroy() {
             destroyed = true;
-            for (const source of sources) source.stop();
-            sources.clear();
+            stop();
             void context?.close().catch(() => {});
         },
     };
