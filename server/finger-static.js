@@ -7,7 +7,6 @@ export class FingerStatic {
     constructor() {
         this.rubbed = new Float64Array(COLUMNS * ROWS).fill(-Infinity);
         this.lastRub = -Infinity;
-        this.lastCrackle = -Infinity;
     }
 
     charge(index, now) {
@@ -17,8 +16,8 @@ export class FingerStatic {
     rub(from, to, now) {
         const dx = (to.x - from.x) * WIDTH, dy = (to.y - from.y) * HEIGHT;
         const distance = Math.hypot(dx, dy);
-        if (distance < .5) return 0;
-        let released = 0;
+        if (distance < .5) return [];
+        const released = [];
         const steps = Math.ceil(distance / (CELL / 2));
         // Sweep the path so quick motions cannot skip charged patches.
         for (let step = 0; step <= steps; step++) {
@@ -28,7 +27,7 @@ export class FingerStatic {
             const row = Math.min(ROWS - 1, Math.floor(y / CELL));
             const charge = this.charge(row * COLUMNS + col, now);
             const charged = charge >= .2;
-            if (charged) released = Math.max(released, charge);
+            if (charged) released.push({strength: charge, fraction: step / steps});
             for (let cy = Math.max(0, row - 4); cy <= Math.min(ROWS - 1, row + 4); cy++) {
                 for (let cx = Math.max(0, col - 4); cx <= Math.min(COLUMNS - 1, col + 4); cx++) {
                     if (Math.hypot((cx + .5) * CELL - x, (cy + .5) * CELL - y) > RADIUS) continue;
@@ -40,8 +39,6 @@ export class FingerStatic {
             }
         }
         this.lastRub = now;
-        if (!released || now - this.lastCrackle < 65) return 0;
-        this.lastCrackle = now;
         return released;
     }
 }

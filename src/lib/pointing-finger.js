@@ -7,11 +7,13 @@ export function drawPointingFinger(ctx, finger, width, height, arrival = 1) {
     const dx = finger.x * width - px;
     const dy = finger.y * height - py;
     const length = Math.hypot(dx, dy) * arrival;
-    const size = Math.max(17, Math.min(30, width / 30));
+    const size = Math.min(Math.max(17, Math.min(30, width / 30)), length / 1.95);
+    const handLength = size * 1.95;
+    const wrist = Math.sqrt(Math.max(0, length * length - handLength * handLength));
     ctx.save();
     ctx.translate(px, py);
-    ctx.rotate(Math.atan2(dy, dx));
-    const wrist = length - size * 1.95;
+    // The hand points clockwise across the shaft; aim the wrist so its fingertip still meets the cursor.
+    ctx.rotate(Math.atan2(dy, dx) - Math.atan2(handLength, wrist));
     // Thick outer tube, two nested tubes, and the collars that reveal the telescoping construction.
     for (let i = 0; i < 3; i++) {
         const start = Math.max(0, wrist) * i / 3;
@@ -27,7 +29,8 @@ export function drawPointingFinger(ctx, finger, width, height, arrival = 1) {
             ctx.fillStyle = '#d6cfb8'; ctx.fillRect(end - 3, -r - 1, 1, r * 1.5);
         }
     }
-    ctx.translate(length, 0);
+    ctx.translate(wrist, handLength);
+    ctx.rotate(Math.PI / 2);
     ctx.scale(size, size);
     // The fingertip stays at (0, 0), even when pressed into the glass.
     ctx.scale(1, finger.pressed ? .88 : 1);

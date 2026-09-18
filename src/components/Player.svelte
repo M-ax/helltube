@@ -609,7 +609,8 @@
                 continue;
             }
             if (event.kind === 'fingerstatic') {
-                if (age < 200) reactionSound('fingerstatic', event.strength);
+                if (age < 200) reactionSound('fingerstatic', 1, {seed: event.id,
+                    clusters: event.clusters || [{strength: event.strength ?? 1, offset: 0}]});
                 continue;
             }
             activeReactions = [...activeReactions.slice(-39), event];
@@ -649,9 +650,9 @@
         if (reactionsEnabled && connected && !soundMuted && !muted && !captureMuted && !document.hidden) reactionAudio?.play(volume, 'metalpipe');
     }
 
-    function reactionSound(kind, level = 1) {
+    function reactionSound(kind, level = 1, options) {
         if (reactionsEnabled && connected && !soundMuted && !muted && !captureMuted && !document.hidden) {
-            return reactionAudio?.play(volume * level, kind);
+            return reactionAudio?.play(volume * level, kind, options);
         }
     }
 

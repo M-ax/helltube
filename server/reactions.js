@@ -69,9 +69,12 @@ export class Reactions {
                 && (x !== previousFinger.x || y !== previousFinger.y)) {
                 let surface = this.staticSurfaces.get(roomId);
                 if (!surface) { surface = new FingerStatic(); this.staticSurfaces.set(roomId, surface); }
-                const strength = surface.rub(previousFinger, {x, y}, now);
-                if (strength) this.broadcast(roomId, {type: 'reaction', roomId, id: randomUUID(), clientId, userId,
-                    kind: 'fingerstatic', x, y, strength, serverTime: now});
+                const discharged = surface.rub(previousFinger, {x, y}, now);
+                // Bundle every crossed patch into this cursor tick, preserving their order without extra messages.
+                const sweep = Math.min(.04, Math.max(0, now - previousFinger.time) / 1000);
+                if (discharged.length) this.broadcast(roomId, {type: 'reaction', roomId, id: randomUUID(), clientId, userId,
+                    kind: 'fingerstatic', x, y, clusters: discharged.map(({strength, fraction}) => ({strength, offset: fraction * sweep})),
+                    serverTime: now});
             }
         } else state.fingers.delete(clientId);
         if (absent || !state.ball) state.pointers.delete(clientId);

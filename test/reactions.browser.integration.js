@@ -22,14 +22,17 @@ test('pointing fingers track locally, stream at 60Hz, tap and slide together, an
         page.setDefaultTimeout(8000);
         page.on('pageerror', error => errors.push(error.message));
         await page.addInitScript(() => {
-            window.fingerAudio = {taps: 0, slides: 0, active: 0, crackles: 0};
+            window.fingerAudio = {taps: 0, slides: 0, active: 0, crackles: 0, patterns: []};
             const active = new Set();
             const start = AudioBufferSourceNode.prototype.start;
             const stop = AudioBufferSourceNode.prototype.stop;
             AudioBufferSourceNode.prototype.start = function (...args) {
                 if (this.loop) { window.fingerAudio.slides++; active.add(this); window.fingerAudio.active = active.size; }
                 else if (this.buffer?.duration > .104 && this.buffer.duration < .106) window.fingerAudio.taps++;
-                else if (this.buffer?.duration >= .045 && this.buffer.duration < .046) window.fingerAudio.crackles++;
+                else if (this.buffer?.duration < .1) {
+                    window.fingerAudio.crackles++;
+                    window.fingerAudio.patterns.push(this.buffer.duration);
+                }
                 return start.apply(this, args);
             };
             AudioBufferSourceNode.prototype.stop = function (...args) {
@@ -78,6 +81,9 @@ test('pointing fingers track locally, stream at 60Hz, tap and slide together, an
     await until(async () => await a.evaluate(() => window.fingerAudio.crackles) > 0
         && await a.evaluate(() => window.fingerAudio.crackles) === await b.evaluate(() => window.fingerAudio.crackles));
     const crackles = await a.evaluate(() => window.fingerAudio.crackles);
+    const patterns = await a.evaluate(() => window.fingerAudio.patterns);
+    assert.ok(new Set(patterns).size > 1, 'Fresh patches have different cluster timing.');
+    assert.deepEqual(patterns, await b.evaluate(() => window.fingerAudio.patterns), 'Both viewers hear the same randomized patterns.');
     for (let i = 11; i >= 0; i--) {
         await a.mouse.move(at(.65 + i * .015, .406 + i * .008).x, at(.65 + i * .015, .406 + i * .008).y);
         await a.waitForTimeout(18);

@@ -9,6 +9,7 @@ export function createReactionAudio() {
         flashbangRing: {url: '/sounds/csgo-flashbang-ring.mp3', gain: .5},
         bidenThing: {url: '/sounds/biden-you-know-the-thing.mp3', gain: .8},
         bidenWord: {url: '/sounds/biden-one-word.mp3', gain: .8},
+        fingerstatic: {gain: .4},
     };
     let destroyed = false;
     const sources = new Set();
@@ -22,7 +23,6 @@ export function createReactionAudio() {
             if (!AudioContext) return;
             context ||= new AudioContext();
             sounds.fingertap ||= {buffer: createFingerBuffer(context), gain: .8};
-            sounds.fingerstatic ||= {buffer: createFingerStaticBuffer(context), gain: .4};
             slideBuffer ||= createFingerBuffer(context, true);
             if (context.state === 'suspended') void context.resume().catch(() => {});
             for (const sound of Object.values(sounds)) {
@@ -74,13 +74,15 @@ export function createReactionAudio() {
             slide.gain.gain.setTargetAtTime(level, context.currentTime, .04);
             slide.source.playbackRate.setTargetAtTime(.96 + speed * .08, context.currentTime, .08);
         },
-        play(volume, kind = 'hitmarker') {
+        play(volume, kind = 'hitmarker', options = {}) {
             const sound = sounds[kind];
-            if (destroyed || !sound?.buffer || context?.state !== 'running' || volume <= 0 || sources.size >= 8) return;
+            if (destroyed || !sound || context?.state !== 'running' || volume <= 0 || sources.size >= 8) return;
+            const buffer = kind === 'fingerstatic' ? createFingerStaticBuffer(context, options.seed, options.clusters) : sound.buffer;
+            if (!buffer) return;
             const source = context.createBufferSource();
             const gain = context.createGain();
             gain.gain.value = Math.min(1, volume) * sound.gain;
-            source.buffer = sound.buffer;
+            source.buffer = buffer;
             source.connect(gain).connect(context.destination);
             sources.add(source);
             source.onended = () => { sources.delete(source); source.disconnect(); gain.disconnect(); };

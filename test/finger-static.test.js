@@ -4,39 +4,49 @@ import {FingerStatic, STATIC_RECOVERY_MS} from '../server/finger-static.js';
 import {Reactions} from '../server/reactions.js';
 
 const from = {x: .2, y: .5}, to = {x: .7, y: .5};
+const strength = clusters => Math.max(0, ...clusters.map(cluster => cluster.strength));
 
 test('rubbing discharges a swept path and nearby patches, leaving fresh glass charged', () => {
     const surface = new FingerStatic();
-    assert.equal(surface.rub(from, to, 0), 1);
-    assert.equal(surface.rub(to, from, 100), 0, 'Returning along the trail is quiet.');
-    assert.equal(surface.rub({x: .3, y: .52}, {x: .6, y: .52}, 200), 0, 'A neighboring trail is also discharged.');
-    assert.equal(surface.rub({x: .2, y: .8}, {x: .7, y: .8}, 300), 1, 'Untouched glass still crackles.');
-    assert.equal(surface.rub(to, to, 400), 0, 'Holding still does not create static.');
+    assert.equal(strength(surface.rub(from, to, 0)), 1);
+    assert.deepEqual(surface.rub(to, from, 100), [], 'Returning along the trail is quiet.');
+    assert.deepEqual(surface.rub({x: .3, y: .52}, {x: .6, y: .52}, 200), [], 'A neighboring trail is also discharged.');
+    assert.equal(strength(surface.rub({x: .2, y: .8}, {x: .7, y: .8}, 300)), 1, 'Untouched glass still crackles.');
+    assert.deepEqual(surface.rub(to, to, 400), [], 'Holding still does not create static.');
 });
 
 test('charge recovers gradually over twenty seconds and continued rubbing postpones recovery', () => {
     function strengthAfter(delay) {
         const surface = new FingerStatic();
         surface.rub(from, to, 0);
-        return surface.rub(to, from, delay);
+        return strength(surface.rub(to, from, delay));
     }
     assert.equal(strengthAfter(1000), 0);
     assert.equal(strengthAfter(10000), .5);
     assert.equal(strengthAfter(STATIC_RECOVERY_MS), 1);
     const surface = new FingerStatic();
     surface.rub(from, to, 0);
-    for (let time = 1000; time <= 30000; time += 1000) assert.equal(surface.rub(from, to, time), 0);
-    assert.equal(surface.rub(from, to, 50000), 1);
+    for (let time = 1000; time <= 30000; time += 1000) assert.deepEqual(surface.rub(from, to, time), []);
+    assert.equal(strength(surface.rub(from, to, 50000)), 1);
 });
 
 test('slow pointer samples still find fresh patches without skipping or replaying a discharge', () => {
     const surface = new FingerStatic();
     let cracks = 0;
     for (let step = 0; step < 100; step++) {
-        cracks += surface.rub({x: .2 + step * .005, y: .5}, {x: .205 + step * .005, y: .5}, step * 20) > 0;
+        cracks += surface.rub({x: .2 + step * .005, y: .5}, {x: .205 + step * .005, y: .5}, step * 20).length;
     }
     assert.ok(cracks >= 5 && cracks <= 20, `Expected sparse crackles along fresh glass, got ${cracks}`);
-    assert.equal(surface.rub(to, from, 2100), 0);
+    assert.deepEqual(surface.rub(to, from, 2100), []);
+});
+
+test('a fast stroke retains every crossed patch and fresh patches can discharge on consecutive ticks', () => {
+    const surface = new FingerStatic();
+    const clusters = surface.rub(from, to, 0);
+    assert.ok(clusters.length >= 8, 'A fast sweep produces many clusters instead of collapsing to one.');
+    assert.ok(clusters.every(cluster => cluster.strength === 1 && cluster.fraction >= 0 && cluster.fraction <= 1));
+    assert.deepEqual(clusters.map(cluster => cluster.fraction), clusters.map(cluster => cluster.fraction).toSorted((a, b) => a - b));
+    assert.ok(surface.rub({x: .2, y: .8}, {x: .7, y: .8}, 16).length >= 8, 'No global cooldown drops fresh discharges.');
 });
 
 test('static is shared between fingers, isolated by room, and survives putting a finger away', () => {
@@ -50,7 +60,8 @@ test('static is shared between fingers, isolated by room, and survives putting a
     const cracks = () => sent.filter(message => message.kind === 'fingerstatic');
     point('one', 'a', .2); point('one', 'a', .7);
     assert.equal(cracks().length, 1);
-    assert.equal(cracks()[0].strength, 1);
+    assert.ok(cracks()[0].clusters.length >= 8);
+    assert.ok(cracks()[0].clusters.every(cluster => cluster.strength === 1 && cluster.offset >= 0 && cluster.offset <= .04));
     service.pointer('one', 'a', {x: null, y: null});
     assert.equal(service.rooms.has('one'), false);
     point('one', 'b', .6, .52); point('one', 'b', .3, .52);

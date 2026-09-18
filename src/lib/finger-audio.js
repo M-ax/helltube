@@ -26,20 +26,20 @@ function createGlassRub(context) {
     const buffer = context.createBuffer(1, Math.ceil(rate * 3), rate);
     const samples = buffer.getChannelData(0);
     const noise = noiseGenerator(761);
-    const modes = [resonance(rate, 540, 2.5), resonance(rate, 970, 3), resonance(rate, 1640, 4)];
-    const soften = 1 - Math.exp(-2 * Math.PI * 1050 / rate);
-    const bassCut = 1 - Math.exp(-2 * Math.PI * 90 / rate);
+    const modes = [resonance(rate, 1870, 22), resonance(rate, 2830, 28), resonance(rate, 4120, 35)];
+    const soften = 1 - Math.exp(-2 * Math.PI * 4800 / rate);
+    const bassCut = 1 - Math.exp(-2 * Math.PI * 900 / rate);
     let low = 0, soft = 0, bass = 0;
     for (let i = 0; i < samples.length; i++) {
-        // Rounded friction and broad glass resonances, without a sharp hiss or a periodic rasp.
+        // Friction excites narrow, bright glass modes; very little raw noise reaches the output.
         low += (noise() - low) * soften;
         soft += (low - soft) * soften;
         bass += (soft - bass) * bassCut;
         const body = soft - bass;
-        const glass = modes[0](body) * .8 + modes[1](body) * .5 + modes[2](body) * .25;
+        const glass = modes[0](body) * 2.8 + modes[1](body) * 2 + modes[2](body) * 1.1;
         const t = i / rate;
         const pressure = .92 + .05 * Math.sin(t * 2 * Math.PI * 1.3) + .03 * Math.sin(t * 2 * Math.PI * 2.1);
-        samples[i] = (body * .8 + glass * 1.8) * pressure;
+        samples[i] = (body * .025 + glass * 1.8) * pressure;
     }
     const fade = Math.floor(rate * FINGER_SLIDE_LOOP_START);
     for (let i = 0; i < fade; i++) {
@@ -50,21 +50,46 @@ function createGlassRub(context) {
     return buffer;
 }
 
-// A tiny cluster of electrical ticks, kept separate from the smooth rubbing texture.
-export function createFingerStaticBuffer(context) {
+// One shared event seed produces the same irregular clusters on every viewer's device.
+export function fingerStaticPops(seed = 'static', clusters = [{strength: 1, offset: 0}]) {
+    let hash = 2166136261;
+    for (const char of String(seed)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+    const noise = noiseGenerator(hash);
+    const random = () => (noise() + 1) / 2;
+    const pops = [];
+    const level = .65 / Math.sqrt(Math.max(1, clusters.length));
+    for (const {strength, offset} of clusters) {
+        const count = 5 + Math.floor(random() * 7);
+        let at = offset + random() * .0015;
+        for (let i = 0; i < count; i++) {
+            pops.push({at, gain: level * strength * (.3 + random() * .7), decay: 1500 + random() * 1400,
+                cutoff: 3600 + random() * 2400, seed: Math.floor(random() * 4294967296)});
+            // Uneven, tightly packed doublets and short pauses replace the repeated three-tick sample.
+            at += .0008 + random() ** 1.5 * .0045;
+        }
+    }
+    return pops;
+}
+
+// Each newly discharged patch has its own brief cluster, with the original soft electrical timbre.
+export function createFingerStaticBuffer(context, seed, clusters) {
     const rate = context.sampleRate;
-    const buffer = context.createBuffer(1, Math.ceil(rate * .045), rate);
+    const pops = fingerStaticPops(seed, clusters);
+    const duration = Math.max(.01, ...pops.map(pop => pop.at + .01));
+    const buffer = context.createBuffer(1, Math.ceil(rate * duration), rate);
     const samples = buffer.getChannelData(0);
-    const noise = noiseGenerator(307);
-    let soft = 0;
-    for (let i = 0; i < samples.length; i++) {
-        const t = i / rate;
-        const envelope = [[0, 1], [.007, .4], [.019, .18]].reduce((sum, [at, gain]) => {
-            const age = t - at;
-            return sum + (age >= 0 ? gain * Math.min(1, age / .0002) * Math.exp(-age * 1900) : 0);
-        }, 0);
-        soft += (noise() - soft) * (1 - Math.exp(-2 * Math.PI * 4800 / rate));
-        samples[i] = soft * envelope * .65;
+    for (const pop of pops) {
+        const noise = noiseGenerator(pop.seed);
+        const soften = 1 - Math.exp(-2 * Math.PI * pop.cutoff / rate);
+        const start = Math.floor(pop.at * rate);
+        const end = Math.min(samples.length, start + Math.ceil(rate * .01));
+        let soft = 0;
+        for (let i = start; i < end; i++) {
+            const age = (i - start) / rate;
+            const envelope = Math.min(1, age / .0002) * Math.exp(-age * pop.decay);
+            soft += (noise() - soft) * soften;
+            samples[i] += soft * envelope * pop.gain;
+        }
     }
     return buffer;
 }
