@@ -26,6 +26,11 @@ export function youtubeURL(value) {
   const video = videoId(url);
   const playlist = url.searchParams.get('list');
   if (playlist && /^[a-zA-Z0-9_-]{10,100}$/.test(playlist)) {
+    // YouTube Mix/radio playlists need their seed video. Converting these to
+    // /playlist?list=RD... makes YouTube reject an otherwise playable link.
+    if (playlist.startsWith('RD') && video && /^[a-zA-Z0-9_-]{11}$/.test(video)) {
+      return `https://www.youtube.com/watch?v=${video}&list=${playlist}`;
+    }
     return `https://www.youtube.com/playlist?list=${playlist}`;
   }
   if (video && /^[a-zA-Z0-9_-]{11}$/.test(video)) return `https://www.youtube.com/watch?v=${video}`;

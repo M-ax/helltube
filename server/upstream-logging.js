@@ -3,6 +3,7 @@
 export function upstreamFailure(text = '') {
   const status = /(?:HTTP(?:\s+(?:Error|error|status))?|Server returned)\s*:?\s*([45]\d\d)\b/i.exec(text);
   const causes = [
+    ['unviewable-playlist', /playlist type is unviewable/i],
     ['bot-verification', /confirm.*not a bot|bot verification|sign in.*bot/i],
     ['dns-failure', /name resolution|name or service not known|getaddrinfo|could not resolve/i],
     ['connection-refused', /connection refused|ECONNREFUSED/i],

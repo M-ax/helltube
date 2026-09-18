@@ -34,6 +34,31 @@ test('partial event playlists report chunk readiness without waiting for end of 
   assert.equal(playlistProgress(`${partial}#EXT-X-ENDLIST\n`).complete, true);
 });
 
+test('YouTube Mix links retain the seed video through metadata extraction and queue creation', async t => {
+  const canonical = 'https://www.youtube.com/watch?v=5WzswZXTMZQ&list=RD5WzswZXTMZQ';
+  for (const input of [
+    canonical + '&start_radio=1&tracking=discard-me',
+    'https://youtu.be/5WzswZXTMZQ?list=RD5WzswZXTMZQ',
+    'https://music.youtube.com/watch?v=5WzswZXTMZQ&list=RD5WzswZXTMZQ',
+  ]) assert.equal(youtubeURL(input), canonical);
+  const youtube = new YouTube({});
+  t.after(() => youtube.close());
+  const extract = t.mock.method(youtube, 'extract', async args => {
+    assert.equal(args.at(-1), canonical);
+    return {title: 'Mix', entries: [
+      {id: '5WzswZXTMZQ', title: 'Selected video', duration: 90},
+      {id: 'jNQXAC9IVRw', title: 'Next video', duration: 19},
+    ]};
+  });
+  const items = await youtube.items(canonical + '&start_radio=1&t=10', {displayName: 'Viewer'});
+  assert.equal(extract.mock.callCount(), 1);
+  assert.deepEqual(items.map(item => item.source.url), [
+    'https://www.youtube.com/watch?v=5WzswZXTMZQ', 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+  ]);
+  assert.deepEqual(items.map(item => item.startAt), [10, 0]);
+  assert.ok(items[0].playlistId && items[0].playlistId === items[1].playlistId);
+});
+
 test('playlist metadata becomes an ordered removable group and rejects private entries', async t => {
   const youtube = new YouTube({ ytdlp: 'yt-dlp' });
   const extract = t.mock.method(youtube, 'extract', async () => ({ title: 'A playlist', entries: [

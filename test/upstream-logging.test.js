@@ -8,6 +8,7 @@ test('upstream classifications retain status and cause without diagnostic secret
   for (const [text, cause, httpStatus] of [
     ['HTTP Error 403: Forbidden https://user:secret@host/?token=secret', 'http-error', 403],
     ['HTTP error 429 Too Many Requests', 'http-error', 429],
+    ['YouTube said: This playlist type is unviewable.', 'unviewable-playlist', null],
     ['Server returned 503 Service Unavailable', 'http-error', 503],
     ['Sign in to confirm you are not a bot. Cookie: SID=secret', 'bot-verification', null],
     ['getaddrinfo: Temporary failure in name resolution', 'dns-failure', null],

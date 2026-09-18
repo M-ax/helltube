@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { start, until } from './helpers.js';
 
 test('public YouTube video resolves through yt-dlp and becomes playable server HLS', { timeout: 150000 }, async t => {
-  const { instance, api, connect, url, cookie } = await start(t);
+  const { instance, api, connect, url, cookie } = await start(t, {maxTranscoders: 1});
   assert.equal(instance.capabilities.youtube, true, 'Install yt-dlp before this opt-in network test.');
   const ws = await connect();
   ws.send(JSON.stringify({ type: 'join', roomId: 'lobby' }));
@@ -22,8 +22,9 @@ test('public YouTube video resolves through yt-dlp and becomes playable server H
   assert.equal(response.status, 200);
   const playlist = await response.text();
   assert.ok(playlist.includes('#EXTINF:'));
-  const segment = playlist.split('\n').find(line => line.endsWith('.ts'));
-  const video = await fetch(url + room.current.media.url.replace('index.m3u8', segment), { headers: { Cookie: cookie } });
+  const segment = playlist.split(/\r?\n/).find(line => /^segment-\d+\.(?:ts|m4s)(?:\?.*)?$/.test(line));
+  assert.ok(segment, 'The media playlist contains a playable TS or fMP4 segment.');
+  const video = await fetch(new URL(segment, new URL(room.current.media.url, url)), { headers: { Cookie: cookie } });
   assert.equal(video.status, 200);
   assert.ok((await video.arrayBuffer()).byteLength > 1000);
   t.diagnostic(`YouTube → yt-dlp → FFmpeg → authenticated HLS succeeded: ${room.current.title}.`);
