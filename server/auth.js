@@ -173,6 +173,12 @@ export class Accounts {
     if (!user || !valid || !this.users.includes(user) || user.passwordHash !== passwordHash) {
       throw httpError(401, 'Invalid username or password.');
     }
+    return this.createSession(user);
+  }
+
+  // persist can consume a one-time sign-in grant in the same transaction.
+  createSession(user, persist = () => {}) {
+    if (!this.users.includes(user)) throw httpError(401, 'Account no longer exists.');
     const now = Date.now();
     const expired = [...this.sessions].filter(([, session]) => session.expires <= now).map(([token]) => token);
     if (this.sessions.size - expired.length >= 10000) throw httpError(503, 'Too many active sessions.');
@@ -181,6 +187,7 @@ export class Accounts {
     this.store.transaction(() => {
       for (const expiredToken of expired) this.store.delete('sessions', expiredToken);
       this.store.save('sessions', token, { token, ...session });
+      persist();
     });
     for (const expiredToken of expired) this.sessions.delete(expiredToken);
     this.sessions.set(token, session);

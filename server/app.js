@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { config as defaults, httpError, text } from './config.js';
 import { Accounts, publicUser } from './auth.js';
+import { AccountRequests } from './account-requests.js';
+import { accountRequestRoutes } from './account-request-routes.js';
 import { Rooms } from './rooms.js';
 import { Reactions } from './reactions.js';
 import { startPointerTicker } from '../shared/reaction-pointer.js';
@@ -56,6 +58,7 @@ export async function createApp(overrides = {}) {
     });
   } catch (error) { store.close(); throw error; }
   const accounts = new Accounts(config.dataDir, store);
+  const accountRequests = new AccountRequests(accounts);
   const deployment = new Deployment(config, store);
   const youtube = new YouTube(config);
   const twitch = new Twitch(config);
@@ -66,6 +69,7 @@ export async function createApp(overrides = {}) {
   try {
     await deployment.init();
     await accounts.init();
+    accountRequests.init();
     rooms = new Rooms({ ...config, store });
     uploads = new Uploads(config, rooms, store);
     media = new Media(config, rooms, uploads, youtube, twitch);
@@ -144,6 +148,10 @@ export async function createApp(overrides = {}) {
     if (++value.count > max) throw httpError(429, 'Too many requests. Please wait a moment.');
   }
   const cookie = token => `session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${token ? 604800 : 0}${config.secureCookies ? '; Secure' : ''}`;
+  const clientIP = req => {
+    const edgeIP = req.edge && req.headers['x-helltube-client-ip'];
+    return typeof edgeIP === 'string' && isIP(edgeIP) ? edgeIP : req.ip;
+  };
   const identify = (req, _res, next) => {
     const session = accounts.authenticate(req.headers.cookie);
     if (!session) return next(httpError(401, 'Please sign in.'));
@@ -186,12 +194,13 @@ export async function createApp(overrides = {}) {
     res.json({ ok: true, commit: deployment.commit });
   });
   app.post('/api/login', async (req, res) => {
-    const edgeIP = req.edge && req.headers['x-helltube-client-ip'];
-    const clientIP = typeof edgeIP === 'string' && isIP(edgeIP) ? edgeIP : req.ip;
-    limit(`login:${clientIP}`, 10);
+    limit(`login:${clientIP(req)}`, 10);
     const { user, token } = await accounts.login(req.body.username, req.body.password);
+    accountRequests.completeForUser(user.id);
     res.set('Set-Cookie', cookie(token)).json({ user: publicUser(user), capabilities });
   });
+  const closeAccountRequests = accountRequestRoutes(app, { requests: accountRequests, accounts, identify, admin,
+    limit, clientIP, cookie, config, capabilities });
   app.use('/api', identify, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.get('/api/config', (_req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin }));
   app.get('/api/media/:jobId/access', (req, res) => {
@@ -560,7 +569,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, rooms, reactions, desktop, uploads, media, youtube, twitch, remote, capabilities, store, cleanup,
+  return { app, server, accounts, accountRequests, rooms, reactions, desktop, uploads, media, youtube, twitch, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;
@@ -575,6 +584,7 @@ export async function createApp(overrides = {}) {
         stopReactionTick();
         clearInterval(heartbeat);
         clearInterval(housekeeping);
+        closeAccountRequests();
         const stopped = server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve();
         for (const ws of wss.clients) { desktop.stop(ws); closeConnection(ws, 'server-shutdown'); }
         wss.close();

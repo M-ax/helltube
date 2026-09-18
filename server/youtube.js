@@ -120,7 +120,8 @@ export class YouTube {
 
   async resolve(url) {
     const [data, segments] = await Promise.all([
-      this.extract(['--no-playlist', '-f', 'bv*+ba/b', '-S', 'res,fps', '--dump-single-json', '--', url]),
+      // Probe the selected streams before handing their URLs to FFmpeg.
+      this.extract(['--no-playlist', '--check-formats', '-f', 'bv*+ba/b', '-S', 'res,fps', '--dump-single-json', '--', url]),
       this.sponsorBlock.segments(videoId(new URL(url))),
     ]);
     if (data.is_live) throw new Error('Live broadcasts are not supported; use a video or completed livestream.');

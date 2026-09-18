@@ -20,6 +20,10 @@
     let password = '';
     let role = 'user';
     let deleting = null;
+    let requests = [];
+    let requestsLoading = true;
+    let requestError = '';
+    let reviewing = null;
 
     async function load() {
         loading = true;
@@ -33,7 +37,36 @@
         }
     }
 
-    onMount(load);
+    onMount(() => {
+        void load();
+        const events = new EventSource('/api/account-requests/events');
+        events.onerror = () => { requestError = 'Account request updates disconnected. Reconnecting…'; };
+        events.addEventListener('account-requests', event => {
+            const data = JSON.parse(event.data);
+            if (!data) { events.close(); requestError = 'Administrator access has ended. Reopen this panel after signing in.'; return; }
+            requests = data.requests;
+            requestsLoading = false;
+            requestError = '';
+        });
+        return () => events.close();
+    });
+
+    async function review(request, action) {
+        if (reviewing) return;
+        reviewing = request.id;
+        error = '';
+        success = '';
+        try {
+            await api(`/api/account-requests/${encodeURIComponent(request.id)}/${action}`, {method: 'POST'});
+            requests = requests.filter(entry => entry.id !== request.id);
+            if (action === 'approve') await load();
+            success = action === 'approve' ? `@${request.username} is approved. They can sign in with their chosen password.` : `Request from @${request.username} denied.`;
+        } catch (cause) {
+            error = cause.message;
+        } finally {
+            reviewing = null;
+        }
+    }
 
     function edit(member = null) {
         editing = member;
@@ -87,7 +120,35 @@
     }
 </script>
 
-<Modal title="Good company starts here." subtitle="Create accounts and manage who has a seat." {onClose} wide>
+<Modal title="Good company starts here." subtitle="Review requests, create accounts and manage who has a seat." {onClose} wide>
+    {#if error}<p class="form-error" role="alert">{error}</p>{/if}
+    {#if success}<p class="form-success" role="status">{success}</p>{/if}
+    <section class="account-requests" aria-label="Account requests">
+        <div class="section-heading"><h3><Icon name="users" size={18}/>Account requests <span class="count">{requests.length}</span></h3></div>
+        <p class="field-help">Approved guests join as users with the username, display name and password they chose.</p>
+        {#if requestError}<p class="form-error" role="alert">{requestError}</p>{/if}
+        {#if requestsLoading}
+            <div class="loading-line"><span class="spinner"></span>Loading requests…</div>
+        {:else if !requests.length}
+            <p class="empty-small">No account requests waiting for review.</p>
+        {:else}
+            <ul class="admin-users">
+                {#each requests as request (request.id)}
+                    <li class="request-row">
+                        <div class="user-detail"><strong>{request.displayName}</strong><span class="muted">@{request.username}</span>
+                            <time class="field-help" datetime={new Date(request.createdAt).toISOString()}>{new Date(request.createdAt).toLocaleString()}</time>
+                        </div>
+                        <div class="button-row">
+                            <button class="button primary small" disabled={!!reviewing || busy} aria-label={`Approve ${request.username}`}
+                                    on:click={() => review(request, 'approve')}>{reviewing === request.id ? 'Saving…' : 'Approve'}</button>
+                            <button class="button danger-button small" disabled={!!reviewing || busy} aria-label={`Deny ${request.username}`}
+                                    on:click={() => review(request, 'deny')}>Deny</button>
+                        </div>
+                    </li>
+                {/each}
+            </ul>
+        {/if}
+    </section>
     <div class="section-heading">
         <h3>
             <Icon name="users" size={18}/>
@@ -97,8 +158,6 @@
             Create user
         </button>
     </div>
-    {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-    {#if success}<p class="form-success" role="status">{success}</p>{/if}
     {#if formOpen}
         <form class="admin-form stack-form" on:submit|preventDefault={save}>
             <div class="section-heading"><h3>{editing ? `Edit @${editing.username}` : 'A new face in the room'}</h3>
@@ -177,3 +236,10 @@
         </ul>
     {/if}
 </Modal>
+
+<style>
+    .account-requests { margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid #3b2c3b; }
+    .request-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 0; }
+    .request-row .user-detail { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
+    .request-row time { display: block; }
+</style>

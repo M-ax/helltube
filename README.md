@@ -19,7 +19,7 @@ npm run dev
 
 Open **http://127.0.0.1:5173**. Vite proxies the API, media, and WebSockets to port 3000. In WebStorm, run `dev` from `package.json`, or run the same commands in its terminal.
 
-Initial account: **`admin` / `garbageTime_`**. Open Account and change this password before sharing the server. Admins can create accounts, change roles, reset passwords, and delete users. There is no public registration. Everyone can create/join rooms and control playback; accounts are not room access-control lists.
+Initial account: **`admin` / `garbageTime_`**. Open Account and change this password before sharing the server. Admins can create accounts, change roles, reset passwords, and delete users. New guests can choose **Request an account** on the sign-in page and submit a username, display name and password. Admins approve or deny the live queue under **Manage users → Account requests**. Approval creates an ordinary user account and signs the waiting browser in immediately; guests who closed the page can sign in with their chosen credentials later. Passwords are hashed on submission and never shown to admins. Requests survive restarts and page refreshes, and expire after seven days. Everyone can create/join rooms and control playback; accounts are not room access-control lists.
 
 For a production build:
 
