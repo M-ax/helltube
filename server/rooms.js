@@ -20,7 +20,7 @@ export class Rooms extends EventEmitter {
     this.saved = new Map();
     this.rooms = new Map();
     for (const saved of store?.load('rooms') || []) {
-      const room = { ownerId: null, ...saved, members: new Map() };
+      const room = { ownerId: null, ...saved, desktops: [], members: new Map() };
       for (const item of [room.current, ...room.queue, ...room.history].filter(Boolean)) {
         item.media = null;
         item.preparation = null;
@@ -67,7 +67,7 @@ export class Rooms extends EventEmitter {
   create(name, id = randomUUID(), ownerId = null) {
     if (this.rooms.size >= this.maxRooms) throw httpError(409, 'Room limit reached.');
     const room = { id, ownerId, name: text(name, 'Room name', 50), members: new Map(), current: null,
-      queue: [], history: [], playback: { paused: true, position: 0, updatedAt: this.now(), revision: 0 },
+      desktops: [], queue: [], history: [], playback: { paused: true, position: 0, updatedAt: this.now(), revision: 0 },
       version: 0, resumeWhenReady: false };
     this.rooms.set(id, room);
     this.persist(room);
@@ -152,6 +152,7 @@ export class Rooms extends EventEmitter {
   }
 
   advance(room) {
+    room.desktops = [];
     if (room.current && room.current.kind !== 'desktop') room.history = [room.current, ...room.history.filter(i => i.id !== room.current.id)].slice(0, 5);
     room.current = room.queue.shift() || null;
     room.resumeWhenReady = !!room.current;
@@ -302,7 +303,7 @@ export class Rooms extends EventEmitter {
     };
     return { id: room.id, name: room.name, ownerId: room.ownerId, version: room.version,
       members: [...new Map([...room.members.values()].map(u => [u.id, { id: u.id, displayName: u.displayName }])).values()],
-      current: expose(room.current), queue: room.queue.map(expose), history: room.history.map(expose),
+      current: expose(room.current), desktops: room.desktops.map(expose), queue: room.queue.map(expose), history: room.history.map(expose),
       preparation: room.preparations?.values().next().value || null,
       playback: { ...room.playback } };
   }

@@ -232,7 +232,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
 
     function getGhostRect(width, height) {
         if (!ghost?.width || !ghost?.height) return null;
-        return videoRect(width, height, video.videoWidth, video.videoHeight)
+        return videoRect(width, height, video?.videoWidth, video?.videoHeight)
             || videoRect(width, height, ghost.width, ghost.height);
     }
 
@@ -442,8 +442,14 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     }
 
     const events = ['loadedmetadata', 'loadeddata', 'seeked', 'resize'];
-    for (const event of events) video.addEventListener(event, redraw);
-    video.addEventListener('emptied', reset);
+    function setVideo(next) {
+        for (const event of events) video?.removeEventListener(event, redraw);
+        video?.removeEventListener('emptied', reset);
+        video = next;
+        for (const event of events) video?.addEventListener(event, redraw);
+        video?.addEventListener('emptied', reset);
+    }
+    setVideo(video);
     canvas.addEventListener('webglcontextlost', contextLost);
     canvas.addEventListener('webglcontextrestored', contextRestored);
     document.addEventListener('visibilitychange', visibilityChanged);
@@ -458,6 +464,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     redraw();
 
     return {
+        setVideo(next) { if (next !== video) setVideo(next); },
         setCrtActive(value) {
             if (destroyed || crtActive === !!value) return;
             crtActive = !!value;
@@ -487,8 +494,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             destroyed = true;
             cancelFrame();
             observer.disconnect();
-            for (const event of events) video.removeEventListener(event, redraw);
-            video.removeEventListener('emptied', reset);
+            setVideo(null);
             canvas.removeEventListener('webglcontextlost', contextLost);
             canvas.removeEventListener('webglcontextrestored', contextRestored);
             document.removeEventListener('visibilitychange', visibilityChanged);

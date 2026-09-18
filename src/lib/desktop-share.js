@@ -24,19 +24,28 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
     Peer = globalThis.RTCPeerConnection, Stream = globalThis.MediaStream, secure = globalThis.isSecureContext,
     makePeer = createDesktopPeer, connectTimeout = 20000, disconnectTimeout = 5000} = {}) {
     const state = writable({status: 'idle', roomId: null, error: '', label: '', hasAudio: false});
-    const playback = writable(emptyPlayback());
+    const playback = writable({});
     let operation;
-    let viewing;
+    const views = new Map();
+    let viewingRoom = null;
 
-    function closeView(notifyServer = true) {
-        const previous = viewing;
-        viewing = null;
+    function updateView(itemId, patch) {
+        playback.update(value => ({...value, [itemId]: {...value[itemId], ...patch}}));
+    }
+
+    function closeView(itemId, notifyServer = true) {
+        const previous = views.get(itemId);
+        views.delete(itemId);
         if (previous) {
             clearTimeout(previous.timer);
             previous.peer?.close();
             if (notifyServer && previous.requestId) client.command({type: 'desktop:unwatch', requestId: previous.requestId});
         }
-        playback.set(emptyPlayback());
+        playback.update(value => {
+            const next = {...value};
+            delete next[itemId];
+            return next;
+        });
     }
 
     function stop(error = '', notifyServer = true) {
@@ -47,7 +56,7 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
             clearTimeout(previous.connectionTimer);
             previous.peer?.close();
             previous.stream?.getTracks().forEach(track => track.stop());
-            if (viewing?.local) closeView(false);
+            if (views.get(previous.itemId)?.local) closeView(previous.itemId, false);
             if (notifyServer && previous.requested) client.command({type: 'desktop:stop', requestId: previous.requestId});
         }
         state.set({status: 'idle', roomId: null, error, label: '', hasAudio: false});
@@ -100,12 +109,12 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
     }
 
     function watch(itemId, attempts = 0) {
-        closeView();
+        closeView(itemId);
         const pending = {itemId, requestId: crypto.randomUUID(), attempts};
-        viewing = pending;
-        playback.set({...emptyPlayback(), itemId});
+        views.set(itemId, pending);
+        updateView(itemId, {...emptyPlayback(), itemId});
         if (!Peer) {
-            playback.update(value => ({...value, error: 'This browser does not support WebRTC desktop playback.'}));
+            updateView(itemId, {error: 'This browser does not support WebRTC desktop playback.'});
             return;
         }
         pending.timer = setTimeout(() => failView(pending), connectTimeout);
@@ -113,7 +122,7 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
     }
 
     function failView(pending, error = connectionError, retry = true) {
-        if (viewing !== pending || pending.finished) return;
+        if (views.get(pending.itemId) !== pending || pending.finished) return;
         clearTimeout(pending.timer);
         pending.peer?.close();
         pending.peer = null;
@@ -123,7 +132,7 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
         }
         pending.finished = true;
         client.command({type: 'desktop:unwatch', requestId: pending.requestId});
-        playback.set({...emptyPlayback(), itemId: pending.itemId, error});
+        updateView(pending.itemId, {...emptyPlayback(), itemId: pending.itemId, error});
     }
 
     const unsubscribeMessages = client.desktopMessages.subscribe(message => {
@@ -140,12 +149,12 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
                         onStats: stats => {
                             if (operation !== pending) return;
                             pending.stats = stats;
-                            if (viewing?.local && viewing.itemId === pending.itemId) playback.update(value => ({...value, stats}));
+                            if (views.get(pending.itemId)?.local) updateView(pending.itemId, {stats});
                         },
                         onState: status => {
                             if (operation !== pending) return;
                             pending.connectionState = status;
-                            if (viewing?.local && viewing.itemId === pending.itemId) playback.update(value => ({...value, connectionState: status}));
+                            if (views.get(pending.itemId)?.local) updateView(pending.itemId, {connectionState: status});
                             if (status === 'connected') clearTimeout(pending.connectionTimer);
                             else if (status === 'failed') restartPublisher(pending);
                             else if (status === 'disconnected') {
@@ -161,21 +170,21 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
             } else if (message.type === 'desktop:error' || message.type === 'desktop:stopped') stop(message.message || '', false);
             return;
         }
-        const view = viewing;
-        if (!view || view.finished || message.requestId !== view.requestId) return;
+        const view = [...views.values()].find(value => value.requestId === message.requestId);
+        if (!view || view.finished) return;
         if (message.type === 'desktop:watching' && !view.peer && message.itemId === view.itemId) {
             view.peerId = message.peerId;
             try {
                 view.peer = makePeer({client, connection: message, Stream,
                     onStream: stream => {
-                        if (viewing === view && !view.finished) playback.update(value => ({...value, stream, error: ''}));
+                        if (views.get(view.itemId) === view && !view.finished) updateView(view.itemId, {stream, error: ''});
                     },
                     onStats: stats => {
-                        if (viewing === view && !view.finished) playback.update(value => ({...value, stats}));
+                        if (views.get(view.itemId) === view && !view.finished) updateView(view.itemId, {stats});
                     },
                     onState: status => {
-                        if (viewing !== view || view.finished) return;
-                        playback.update(value => ({...value, connectionState: status}));
+                        if (views.get(view.itemId) !== view || view.finished) return;
+                        updateView(view.itemId, {connectionState: status});
                         if (status === 'connected') clearTimeout(view.timer);
                         else if (status === 'failed') failView(view);
                         else if (status === 'disconnected') {
@@ -187,27 +196,40 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
                 void view.peer.start().catch(error => failView(view, error.message || connectionError));
             } catch { failView(view); }
         } else if (message.type === 'desktop:error') failView(view, message.message, false);
-        else if (message.type === 'desktop:stopped') closeView(false);
+        else if (message.type === 'desktop:stopped') closeView(view.itemId, false);
     });
 
     const unsubscribeRoom = client.state.subscribe(room => {
         const joined = room.joined && room.status === 'connected' && room.room;
+        const items = joined ? room.room.desktops ?? (room.room.current?.kind === 'desktop' ? [room.room.current] : []) : [];
+        const itemIds = new Set(items.map(item => item.id));
         if (operation) {
             if (!joined || room.room.id !== operation.roomId) {
                 stop('Desktop sharing stopped because you left the room or lost the connection.', false);
-            } else if (operation.itemId && room.room.current?.id !== operation.itemId) stop('', false);
+            } else if (operation.itemId && !itemIds.has(operation.itemId)) stop('', false);
         }
-        const itemId = joined && room.room.current?.kind === 'desktop' ? room.room.current.id : null;
-        if (viewing?.itemId === itemId) return;
-        closeView(!!joined);
-        if (!itemId) return;
-        if (operation?.itemId === itemId) {
-            viewing = {itemId, local: true};
-            playback.set({...emptyPlayback(), itemId, stream: operation.stream, local: true,
-                stats: operation.stats || null, connectionState: operation.connectionState || 'new'});
-        } else watch(itemId);
+        const roomId = joined ? room.room.id : null;
+        for (const itemId of views.keys()) {
+            if (viewingRoom !== roomId || !itemIds.has(itemId)) closeView(itemId, !!joined && viewingRoom === roomId);
+        }
+        viewingRoom = roomId;
+        for (const itemId of itemIds) {
+            if (views.has(itemId)) continue;
+            if (operation?.itemId === itemId) {
+                views.set(itemId, {itemId, local: true});
+                updateView(itemId, {...emptyPlayback(), itemId, stream: operation.stream, local: true,
+                    stats: operation.stats || null, connectionState: operation.connectionState || 'new'});
+            } else watch(itemId);
+        }
     });
     return {state, playback, start, stop, active: () => !!operation,
-        retryView() { if (viewing && !viewing.local) watch(viewing.itemId); },
-        dispose() { unsubscribeMessages(); unsubscribeRoom(); closeView(); stop(); }};
+        retryView(itemId) {
+            const view = views.get(itemId);
+            if (view && !view.local) watch(itemId);
+        },
+        dispose() {
+            unsubscribeMessages(); unsubscribeRoom();
+            for (const itemId of views.keys()) closeView(itemId);
+            stop();
+        }};
 }

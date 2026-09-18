@@ -19,7 +19,7 @@ function fixture(t, relay) {
     t.after(() => desktop.close());
     const rpc = async (socket, connection, action, extra = {}) => {
         const rpcId = randomUUID();
-        await desktop.request(room, socket, {itemId: room.current.id, requestId: connection.requestId,
+        await desktop.request(room, socket, {itemId: connection.itemId, requestId: connection.requestId,
             peerId: connection.peerId, rpcId, action, ...extra});
         return messages.find(message => message.rpcId === rpcId).data;
     };
@@ -108,14 +108,19 @@ test('codec retries cannot tear down published tracks or a ready share', async t
     assert.equal(session.producers.size, 1);
 });
 
-test('only one share can start per room and legacy direct sharing is rejected', async t => {
+test('concurrent sharers share a room; duplicate capture per connection and legacy transport are rejected', async t => {
     const h = fixture(t);
     await assert.rejects(h.desktop.start(h.room, h.ws, h.user, {...request, transport: 'webrtc'}), /Reload/);
     const starting = h.desktop.start(h.room, h.ws, h.user, request);
-    await assert.rejects(h.desktop.start(h.room, {id: 'another'}, h.user, request), /already/);
-    await starting;
+    await assert.rejects(h.desktop.start(h.room, h.ws, h.user, request), /already/);
+    await Promise.all([starting, h.desktop.start(h.room, {id: 'another'}, h.user, request)]);
+    assert.equal(h.desktop.sessions.size, 2);
+    assert.equal(h.room.desktops.length, 2);
+    assert.equal(h.rooms.snapshot(h.room).desktops.length, 2);
+    assert.equal(h.room.queue.length, 0);
     h.desktop.stop({id: 'another'});
     assert.equal(h.desktop.sessions.size, 1);
+    assert.equal(h.room.desktops.length, 1);
 });
 
 test('timeout, skip, deletion and source failure release all native resources', async t => {
@@ -133,6 +138,60 @@ test('timeout, skip, deletion and source failure release all native resources', 
         assert.equal(session.router.closed, true, cause);
         assert.ok(h.messages.some(message => message.type === 'desktop:stopped' && message.requestId === 'watch-1'), cause);
     }
+});
+
+test('a viewer watches several desktops and reconnects or stops one without affecting the others', async t => {
+    const h = fixture(t);
+    const video = makeItem({kind: 'http', url: 'https://example.com/video.mp4'});
+    h.rooms.add(h.room, [video]);
+    h.rooms.stamp(h.room, 25, true);
+    const first = (await publish(h)).session;
+    const secondSender = {id: 'second-sender'};
+    // The interrupted video fills this queue; additional captures need no queue slots.
+    h.rooms.maxQueue = 1;
+    await h.desktop.start(h.room, secondSender, {id: 'second-user', displayName: 'Second'}, request);
+    const second = h.desktop.sessions.get(secondSender.id);
+    const viewer = {id: 'viewer'};
+    await h.desktop.watch(h.room, viewer, {itemId: first.item.id, requestId: 'first'});
+    await h.desktop.watch(h.room, viewer, {itemId: second.item.id, requestId: 'second'});
+    const firstView = [...first.viewers.values()][0];
+    const secondView = [...second.viewers.values()][0];
+    assert.equal(firstView.transport.closed, false);
+    await h.desktop.watch(h.room, viewer, {itemId: second.item.id, requestId: 'second-retry'});
+    assert.equal(secondView.transport.closed, true);
+    assert.equal(firstView.transport.closed, false);
+    assert.equal(first.viewers.size, 1);
+    assert.equal(second.viewers.size, 1);
+    h.desktop.unwatch(viewer, 'second');
+    assert.equal(second.viewers.size, 1, 'A stale retry cannot remove the replacement');
+    const replacement = [...second.viewers.values()][0];
+    h.desktop.stop(h.ws);
+    assert.equal(firstView.transport.closed, true);
+    assert.equal(replacement.transport.closed, false);
+    assert.equal(h.room.current.id, second.item.id);
+    assert.deepEqual(h.room.queue.map(item => item.id), [video.id]);
+    assert.equal(h.room.queue[0].resumeAt, 25);
+    h.desktop.stop(secondSender);
+    assert.equal(replacement.transport.closed, true);
+    assert.equal(h.room.current.id, video.id);
+    assert.equal(h.room.playback.position, 25);
+    assert.deepEqual(h.room.desktops, []);
+    assert.equal(h.room.history.length, 0);
+});
+
+test('skipping multiple desktops stops every publisher and resumes the queue exactly once', async t => {
+    const h = fixture(t);
+    const videos = [1, 2].map(() => makeItem({kind: 'http', url: 'https://example.com/video.mp4'}));
+    h.rooms.add(h.room, videos);
+    await publish(h);
+    await h.desktop.start(h.room, {id: 'second-sender'}, h.user, request);
+    const sessions = [...h.desktop.sessions.values()];
+    h.rooms.control(h.room, {action: 'skip', revision: h.room.playback.revision});
+    assert.equal(h.desktop.sessions.size, 0);
+    assert.equal(h.room.current.id, videos[0].id);
+    assert.deepEqual(h.room.queue.map(item => item.id), [videos[1].id]);
+    assert.deepEqual(h.room.desktops, []);
+    assert.ok(sessions.every(session => session.router.closed && session.publisher.transport.closed));
 });
 
 test('capture persists only the interrupted video and unready publishers time out', async t => {

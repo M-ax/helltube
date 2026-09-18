@@ -6,6 +6,7 @@ import {createDesktopShare, desktopCaptureOptions, desktopSupport} from '../src/
 import {createDesktopPeer} from '../src/lib/desktop-peer.js';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
+const playback = (share, id = 'desktop') => get(share.playback)[id] || {stream: null, stats: null, connectionState: 'new'};
 class FakeStream {
     tracks = [];
     getTracks() { return this.tracks; }
@@ -51,8 +52,8 @@ test('one metal uplink starts after acceptance and the sender uses its local pre
     assert.equal(h.peers.length, 0);
     h.accept(); await flush();
     assert.equal(get(h.share.state).status, 'sharing');
-    assert.equal(get(h.share.playback).stream, h.stream);
-    assert.equal(get(h.share.playback).local, true);
+    assert.equal(playback(h.share).stream, h.stream);
+    assert.equal(playback(h.share).local, true);
     assert.equal(h.commands.some(command => command.type === 'desktop:watch'), false);
     assert.equal(h.peers.length, 1);
     assert.equal(h.peers[0].stream, h.stream);
@@ -102,7 +103,7 @@ for (const cause of ['ended', 'disconnect', 'room', 'server', 'cancel-before-ack
         }
         assert.equal(h.share.active(), false);
         assert.ok(h.tracks.every(track => track.readyState === 'ended'));
-        assert.equal(get(h.share.playback).stream, null);
+        assert.equal(playback(h.share).stream, null);
         assert.ok(h.peers.every(peer => peer.closed));
     });
 }
@@ -114,16 +115,16 @@ test('viewers subscribe once, accept forwarded tracks, retry with fresh identity
     h.client.desktopMessages.set({type: 'desktop:watching', requestId, itemId: 'desktop', peerId: 'viewer'});
     const peer = h.peers[0];
     peer.onStream(h.stream);
-    assert.equal(get(h.share.playback).stream, h.stream);
+    assert.equal(playback(h.share).stream, h.stream);
     h.current('desktop');
     assert.equal(h.commands.filter(command => command.type === 'desktop:watch').length, 1);
-    h.share.retryView();
+    h.share.retryView('desktop');
     assert.equal(peer.closed, true);
     assert.notEqual(h.commands.at(-1).requestId, requestId);
     peer.onStream(h.stream);
-    assert.equal(get(h.share.playback).stream, null, 'A closed receiver cannot reattach stale media');
+    assert.equal(playback(h.share).stream, null, 'A closed receiver cannot reattach stale media');
     h.client.state.update(value => ({...value, joined: false}));
-    assert.equal(get(h.share.playback).stream, null);
+    assert.equal(playback(h.share).stream, null);
 });
 
 test('failed viewer connections retry a bounded number of times with a metal connectivity hint', async t => {
@@ -131,9 +132,60 @@ test('failed viewer connections retry a bounded number of times with a metal con
     h.current('desktop');
     await new Promise(resolve => setTimeout(resolve, 90));
     assert.equal(h.commands.filter(command => command.type === 'desktop:watch').length, 3);
-    assert.match(get(h.share.playback).error, /media port or TURN/);
+    assert.match(playback(h.share).error, /media port or TURN/);
     h.current('desktop');
     assert.equal(h.commands.filter(command => command.type === 'desktop:watch').length, 3);
+});
+
+test('multiple views isolate streams, retries, stale replies and cleanup', t => {
+    const h = fixture(t);
+    const setItems = ids => h.client.state.update(value => ({...value, room: {id: 'lobby',
+        current: {id: ids[0], kind: 'desktop'}, desktops: ids.map(id => ({id, kind: 'desktop'}))}}));
+    setItems(['first', 'second']);
+    const watches = h.commands.filter(command => command.type === 'desktop:watch');
+    assert.deepEqual(watches.map(command => command.itemId), ['first', 'second']);
+    for (const command of watches) h.client.desktopMessages.set({...command, type: 'desktop:watching', peerId: command.itemId});
+    const [first, second] = h.peers;
+    first.onStream(h.stream);
+    const otherStream = new FakeStream();
+    second.onStream(otherStream);
+    second.onStats({bitrate: 2000});
+    h.share.retryView('first');
+    assert.equal(first.closed, true);
+    assert.equal(second.closed, false);
+    assert.equal(playback(h.share, 'second').stream, otherStream);
+    assert.deepEqual(playback(h.share, 'second').stats, {bitrate: 2000});
+    first.onStream(h.stream);
+    h.client.desktopMessages.set({type: 'desktop:stopped', requestId: watches[0].requestId});
+    assert.equal(playback(h.share, 'first').stream, null);
+    assert.ok(get(h.share.playback).first, 'A stale stop cannot remove the new connection');
+    setItems(['second']);
+    assert.deepEqual(Object.keys(get(h.share.playback)), ['second']);
+    assert.equal(second.closed, false);
+    h.client.state.update(value => ({...value, room: {id: 'other'}}));
+    assert.equal(second.closed, true);
+    assert.deepEqual(get(h.share.playback), {});
+});
+
+test('a sharer previews locally while watching another desktop and survives its departure', async t => {
+    const h = fixture(t);
+    h.current('other');
+    const watching = h.commands.at(-1);
+    h.client.desktopMessages.set({...watching, type: 'desktop:watching', peerId: 'other-peer'});
+    await h.share.start();
+    const requestId = h.commands.find(command => command.type === 'desktop:start').requestId;
+    h.client.desktopMessages.set({type: 'desktop:started', requestId, itemId: 'desktop', peerId: 'metal', roomId: 'lobby'});
+    h.client.state.update(value => ({...value, room: {...value.room, desktops: [value.room.current, {id: 'desktop', kind: 'desktop'}]}}));
+    await flush();
+    assert.equal(h.share.active(), true);
+    assert.equal(playback(h.share).local, true);
+    assert.equal(playback(h.share).stream, h.stream);
+    assert.equal(h.commands.filter(command => command.type === 'desktop:watch').length, 1);
+    h.current('desktop');
+    assert.equal(h.peers[0].closed, true);
+    assert.equal(h.peers[1].closed, false);
+    assert.equal(h.share.active(), true);
+    assert.equal(playback(h.share).stream, h.stream);
 });
 
 test('publisher ICE retries keep one transport and stop capture after repeated failure', async t => {
@@ -247,11 +299,11 @@ test('publisher statistics follow the local preview and cannot outlive a share',
     await h.share.start(); h.accept(); await flush();
     const report = {bitrate: 3000000, encoderLoad: 15};
     h.peers[0].onStats(report);
-    assert.equal(get(h.share.playback).stats, report);
-    assert.equal(get(h.share.playback).connectionState, 'connected');
+    assert.equal(playback(h.share).stats, report);
+    assert.equal(playback(h.share).connectionState, 'connected');
     h.share.stop();
     h.peers[0].onStats(report);
-    assert.equal(get(h.share.playback).stats, null);
+    assert.equal(playback(h.share).stats, null);
 });
 
 test('viewer statistics survive track updates and reset on retry or leaving', t => {
@@ -263,14 +315,14 @@ test('viewer statistics survive track updates and reset on retry or leaving', t 
     const report = {bitrate: 2000000};
     peer.onStats(report);
     peer.onStream(h.stream);
-    assert.equal(get(h.share.playback).stats, report);
-    h.share.retryView();
+    assert.equal(playback(h.share).stats, report);
+    h.share.retryView('desktop');
     peer.onStats(report);
     peer.onState('connected');
-    assert.equal(get(h.share.playback).stats, null);
-    assert.equal(get(h.share.playback).connectionState, 'new');
+    assert.equal(playback(h.share).stats, null);
+    assert.equal(playback(h.share).connectionState, 'new');
     h.client.state.update(value => ({...value, joined: false}));
-    assert.equal(get(h.share.playback).stats, null);
+    assert.equal(playback(h.share).stats, null);
 });
 
 test('a rejected preferred codec retries with fresh transport and publishes video before audio', async t => {

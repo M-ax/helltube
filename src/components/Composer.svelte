@@ -297,16 +297,16 @@
             <div><strong>Your screen, live with the room.</strong>
                 <p id="desktop-help">Choose a window, an entire display, or a browser tab in the picker. Enable Share audio if you want to include sound; audio is optional.
                     Audio choices depend on your browser and operating system; a Chrome or Edge tab supports tab audio.
-                    Window sharing may include all system sound. Sharing starts now and returns to the queue when stopped.</p></div>
+                    Window sharing may include all system sound. Desktops play together; the queue resumes when the last share stops.</p></div>
             {#if $desktopState.status === 'idle'}
                 <button class="button primary desktop-start" aria-describedby="desktop-help"
-                        disabled={!connected || !room || !!busy || !!desktopUnavailable || room?.current?.kind === 'desktop'}
+                        disabled={!connected || !room || !!busy || !!desktopUnavailable}
                         on:click={desktop.start}>Choose screen to share</button>
             {/if}
         </div>
         {#if desktopUnavailable}<p class="inline-note">{desktopUnavailable}</p>{/if}
         {#if room?.current?.kind === 'desktop' && $desktopState.status === 'idle'}
-            <p class="field-help">{room.current.addedBy} is sharing. Skip the live share to return to videos.</p>
+            <p class="field-help">Join in by sharing your desktop. Skip the live shares to return everyone to videos.</p>
         {/if}
     {/if}
     {#if $desktopState.status !== 'idle'}

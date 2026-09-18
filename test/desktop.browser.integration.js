@@ -12,9 +12,9 @@ import {makeItem} from '../server/rooms.js';
 const firefoxReceiver = process.env.DESKTOP_TEST_FIREFOX === 'true';
 const tcpOnly = process.env.DESKTOP_TEST_TCP === 'true';
 
-async function join(page, url) {
+async function join(page, url, username = 'admin') {
     await page.goto(url);
-    await page.getByLabel('Username', {exact: true}).fill('admin');
+    await page.getByLabel('Username', {exact: true}).fill(username);
     await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
     await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
@@ -28,6 +28,112 @@ async function availablePort() {
     await new Promise(resolve => server.close(resolve));
     return port;
 }
+
+test('multiple users tile independent native desktops and keep remaining shares playing', {timeout: 90000}, async t => {
+    const {instance, url, api} = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', desktopIceServers: '[]'});
+    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--autoplay-policy=no-user-gesture-required',
+        '--disable-background-timer-throttling', '--disable-renderer-backgrounding']});
+    t.after(() => browser.close());
+    const errors = [];
+    const senders = [];
+    const room = instance.rooms.get('lobby');
+    for (const [index, color] of ['red', 'lime', 'blue'].entries()) {
+        const username = `sharer${index}`;
+        const created = await api('/api/users', {method: 'POST', body: {username, displayName: `Sharer ${index + 1}`, password: 'garbageTime_'}});
+        assert.equal(created.status, 201);
+        const page = await browser.newPage();
+        page.on('pageerror', error => errors.push(error.message));
+        await page.addInitScript(color => {
+            navigator.mediaDevices.getDisplayMedia = async () => {
+                const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+                const context = canvas.getContext('2d');
+                const draw = () => { context.fillStyle = color; context.fillRect(0, 0, 640, 360); };
+                draw();
+                const timer = setInterval(draw, 50);
+                window.addEventListener('pagehide', () => clearInterval(timer), {once: true});
+                return canvas.captureStream(20);
+            };
+        }, color);
+        await join(page, url, username);
+        senders.push(page);
+    }
+    const startSharing = async page => {
+        await page.getByRole('button', {name: 'Share desktop', exact: true}).click();
+        const start = page.getByRole('button', {name: 'Choose screen to share'});
+        assert.equal(await start.isEnabled(), true);
+        await start.click();
+    };
+    const playing = (page, count) => until(() => page.locator('.desktop-tile video').evaluateAll((videos, expected) =>
+        videos.length === expected && videos.every(video => video.controls && video.srcObject instanceof MediaStream &&
+            video.readyState >= 2 && video.videoWidth === 640 && !video.paused), count), 20000);
+    const checkBounds = page => page.locator('.desktop-grid').evaluate(grid => {
+        const outer = grid.getBoundingClientRect();
+        const bounds = [...grid.children].map(tile => tile.getBoundingClientRect());
+        return bounds.every((tile, index) => tile.width > 0 && tile.height > 0 &&
+            tile.left >= outer.left - 1 && tile.right <= outer.right + 1 && tile.top >= outer.top - 1 && tile.bottom <= outer.bottom + 1 &&
+            bounds.slice(index + 1).every(other => tile.right <= other.left + 1 || other.right <= tile.left + 1 ||
+                tile.bottom <= other.top + 1 || other.bottom <= tile.top + 1));
+    });
+    await startSharing(senders[0]);
+    await playing(senders[0], 1);
+    await startSharing(senders[1]);
+    for (const page of senders.slice(0, 2)) await playing(page, 2);
+    assert.equal(room.desktops.length, 2);
+    const viewer = await browser.newPage();
+    viewer.on('pageerror', error => errors.push(error.message));
+    await join(viewer, url);
+    await playing(viewer, 2);
+    assert.equal(await checkBounds(viewer), true);
+    const firstId = room.desktops[0].id, secondId = room.desktops[1].id;
+    const secondVideo = viewer.locator(`[data-item-id="${secondId}"] video`);
+    await secondVideo.evaluate(video => { window.retainedDesktop = {video, stream: video.srcObject}; });
+    const pixels = await viewer.locator('.desktop-tile video').evaluateAll(videos => videos.map(video => {
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+        const context = canvas.getContext('2d'); context.drawImage(video, 0, 0, 1, 1);
+        return [...context.getImageData(0, 0, 1, 1).data];
+    }));
+    assert.ok(pixels[0][0] > 180 && pixels[0][1] < 50);
+    assert.ok(pixels[1][1] > 180 && pixels[1][0] < 50);
+    const firstVideo = viewer.locator(`[data-item-id="${firstId}"] video`);
+    await firstVideo.evaluate(video => { video.pause(); video.muted = true; video.volume = 0.25; });
+    instance.rooms.changed(room);
+    await until(() => firstVideo.evaluate(video => video.paused && video.muted && video.volume === 0.25));
+    assert.equal(await secondVideo.evaluate(video => !video.paused && !video.muted && video.volume === 0.8), true);
+    await firstVideo.evaluate(video => video.play());
+    await viewer.screenshot({path: 'test-artifacts/desktop-two-shares.png', fullPage: true});
+    await startSharing(senders[2]);
+    await playing(viewer, 3);
+    await playing(senders[2], 3);
+    assert.equal(await viewer.locator('video').count(), 3, 'Each stream has exactly one native player');
+    assert.equal(await checkBounds(viewer), true);
+    assert.equal(await secondVideo.evaluate(video => video === window.retainedDesktop.video && video.srcObject === window.retainedDesktop.stream), true);
+    const sessions = [...instance.desktop.sessions.values()];
+    assert.ok(sessions.every(session => session.viewers.size === 3));
+    assert.ok(sessions.every(session => session.producers.size === 1));
+    await viewer.screenshot({path: 'test-artifacts/desktop-three-shares.png', fullPage: true});
+    await viewer.getByRole('button', {name: 'Toggle fullscreen'}).click();
+    await until(() => viewer.evaluate(() => !!document.fullscreenElement));
+    assert.equal(await checkBounds(viewer), true);
+    await viewer.evaluate(() => document.exitFullscreen());
+    await viewer.setViewportSize({width: 390, height: 844});
+    assert.equal(await checkBounds(viewer), true);
+    await viewer.screenshot({path: 'test-artifacts/desktop-three-shares-mobile.png', fullPage: true});
+    await senders[0].getByRole('button', {name: 'Stop sharing', exact: true}).click();
+    await playing(viewer, 2);
+    assert.equal(room.current.id, secondId);
+    assert.equal(await secondVideo.evaluate(video => video === window.retainedDesktop.video && video.srcObject === window.retainedDesktop.stream), true);
+    assert.equal(await checkBounds(viewer), true);
+    await senders[2].close();
+    await playing(viewer, 1);
+    assert.equal(instance.desktop.sessions.size, 1);
+    await viewer.getByRole('button', {name: 'Skip video for everyone'}).click();
+    await until(() => instance.desktop.sessions.size === 0 && room.current === null);
+    await until(() => viewer.locator('.desktop-tile').count().then(count => count === 0));
+    assert.deepEqual(room.desktops, []);
+    assert.equal(room.history.length, 0);
+    assert.deepEqual((await instance.desktop.relay.webRtcServer.dump()).webRtcTransportIds, []);
+    assert.deepEqual(errors, []);
+});
 
 for (const split of [false, true]) {
 for (const withAudio of [false, true]) {
@@ -309,8 +415,8 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     assert.ok(latency[23] < 1000, `Local desktop latency must remain subsecond: ${latency}`);
     assert.deepEqual(responses, [], 'Desktop must not request any HLS media');
     await viewer.locator('.video-viewport').hover();
-    assert.equal(await viewer.getByRole('slider', {name: 'Seek shared video'}).isDisabled(), true);
-    assert.equal(await viewer.getByRole('button', {name: 'Pause for everyone'}).isDisabled(), true);
+    assert.equal(await viewer.getByRole('slider', {name: 'Seek shared video'}).count(), 0);
+    assert.equal(await viewer.getByRole('button', {name: 'Pause for everyone'}).count(), 0);
     if (!split && !withAudio) {
         await sender.screenshot({path: 'test-artifacts/desktop-encoder-stats.png', fullPage: true});
         await sender.setViewportSize({width: 390, height: 844});

@@ -21,7 +21,7 @@ export class DesktopShares {
     rooms.on('state', room => {
       for (const session of this.sessions.values()) {
         if (session.room !== room || session.starting) continue;
-        if (room.current?.id !== session.item.id) this.stop(session.ws);
+        if (!room.desktops.some(item => item.id === session.item.id)) this.stop(session.ws);
         else if (session.item.status === 'error') this.stop(session.ws, session.item.error);
       }
     });
@@ -37,10 +37,10 @@ export class DesktopShares {
   async start(room, ws, user, message) {
     if (!validRequest(message.requestId)) throw httpError(400, 'Invalid sharing request.');
     if (message.transport !== 'mediasoup') throw httpError(400, 'Reload the page to use metal desktop sharing.');
-    if (this.closed || this.sessions.has(ws.id) || [...this.sessions.values()].some(value => value.room === room)) {
-      throw httpError(409, 'A desktop is already being shared. Stop it before starting another.');
+    if (this.closed || this.sessions.has(ws.id)) {
+      throw httpError(409, 'You are already sharing a desktop. Stop it before starting another.');
     }
-    if (room.current && room.queue.length >= this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
+    if (room.current && room.current.kind !== 'desktop' && room.queue.length >= this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
     const item = makeItem({kind: 'desktop'}, {
       title: user.displayName + '’s desktop', addedBy: user.displayName, sharedBy: user.id,
       status: 'ready', transport: 'mediasoup',
@@ -54,15 +54,18 @@ export class DesktopShares {
       session.router = router;
       await this.createTransport(session, session.publisher);
       this.active(session);
-      if (room.current && room.queue.length >= this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
-      if (room.current) {
-        room.current.resumeAt = this.rooms.position(room);
-        room.queue.unshift(room.current);
+      if (room.current?.kind !== 'desktop') {
+        if (room.current && room.queue.length >= this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
+        if (room.current) {
+          room.current.resumeAt = this.rooms.position(room);
+          room.queue.unshift(room.current);
+        }
+        room.current = item;
+        room.resumeWhenReady = false;
+        this.rooms.stamp(room, 0, false);
       }
-      room.current = item;
+      room.desktops.push(item);
       session.starting = false;
-      room.resumeWhenReady = false;
-      this.rooms.stamp(room, 0, false);
       this.send(ws, {type: 'desktop:started', itemId: item.id, roomId: room.id, ...this.connection(session, session.publisher)});
       this.rooms.changed(room);
       this.rooms.emit('rooms');
@@ -99,7 +102,7 @@ export class DesktopShares {
 
   current(room, itemId) {
     const session = [...this.sessions.values()].find(value => value.room === room && value.item.id === itemId);
-    if (!session || session.starting || room.current?.id !== itemId) throw httpError(409, 'This desktop share has ended.');
+    if (!session || session.starting || !room.desktops.some(item => item.id === itemId)) throw httpError(409, 'This desktop share has ended.');
     return session;
   }
 
@@ -107,7 +110,7 @@ export class DesktopShares {
     if (!validRequest(message.requestId)) throw httpError(400, 'Invalid viewing request.');
     const session = this.current(room, message.itemId);
     if (session.ws === ws) throw httpError(409, 'The sharer uses a local preview.');
-    this.unwatch(ws);
+    this.unwatch(ws, undefined, session.item.id);
     if (session.viewers.size >= this.maxViewers) throw httpError(409, 'This desktop share has reached its viewer limit.');
     const peer = endpoint(ws, message.requestId);
     session.viewers.set(peer.id, peer);
@@ -242,8 +245,9 @@ export class DesktopShares {
     }
   }
 
-  unwatch(ws, requestId) {
+  unwatch(ws, requestId, itemId) {
     for (const session of this.sessions.values()) {
+      if (itemId && session.item.id !== itemId) continue;
       for (const [peerId, viewer] of session.viewers) {
         if (viewer.ws !== ws || (requestId && viewer.requestId !== requestId)) continue;
         this.closePeer(viewer);
@@ -267,7 +271,17 @@ export class DesktopShares {
     session.producers.clear();
     session.router?.close();
     this.send(ws, {type: 'desktop:stopped', requestId: session.requestId, itemId: session.item.id, message: error});
-    if (this.rooms.rooms.has(session.room.id) && session.room.current?.id === session.item.id) this.rooms.advance(session.room);
+    const room = session.room;
+    const included = room.desktops.some(item => item.id === session.item.id);
+    room.desktops = room.desktops.filter(item => item.id !== session.item.id);
+    if (this.rooms.rooms.has(room.id) && included) {
+      if (!room.desktops.length) this.rooms.advance(room);
+      else {
+        if (room.current?.id === session.item.id) room.current = room.desktops[0];
+        this.rooms.changed(room);
+        this.rooms.emit('rooms');
+      }
+    }
   }
 
   tick() {

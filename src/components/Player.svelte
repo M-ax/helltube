@@ -5,6 +5,8 @@
     import SeekJoystick from './SeekJoystick.svelte';
     import QualitySelect from './QualitySelect.svelte';
     import DesktopStats from './DesktopStats.svelte';
+    import DesktopPlayer from './DesktopPlayer.svelte';
+    import {desktopLayout} from '../lib/desktop-layout.js';
     import Reactions from './Reactions.svelte';
     import PointingFingers from './PointingFingers.svelte';
     import {trackReactionPointer} from '../lib/reaction-pointer.js';
@@ -38,11 +40,13 @@
     export let preferenceKey = null;
     export let onPreferencesChange;
     export let captureMuted = false;
-    export let desktopPlayback = {itemId: null, stream: null, error: '', local: false};
+    export let desktopPlayback = {};
     export let onRetryDesktop;
     let video;
     let canvas;
     let effectsCanvas;
+    let desktopWidth = 960;
+    let desktopHeight = 480;
     let renderer;
     let seekPreview;
     let seekCenter = null;
@@ -99,10 +103,13 @@
 
     $: item = room?.current;
     $: live = item?.kind === 'desktop';
+    $: desktops = live ? room.desktops ?? [item] : [];
+    $: desktopGrid = desktopLayout(desktops.length, desktopWidth, desktopHeight);
     $: qualities = availableQualities(item?.media);
     $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
-    $: crtVisible = (!media && !live) || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error');
+    $: crtVisible = !live && (!media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error'));
     $: if (renderer) renderer.setCrtActive(crtVisible);
+    $: if (renderer) renderer.setVideo(video);
     $: duration = item?.duration;
     $: seekMax = Math.max(1, duration || media?.bufferedUntil || position);
     $: displayedPosition = scrubbing ? scrubPosition : position;
@@ -121,10 +128,10 @@
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
     $: volumePosition = Math.round(Math.log1p(volume * (VOLUME_CURVE - 1)) / Math.log(VOLUME_CURVE) * 100) / 100;
-    $: if (video) attach(item?.id, media?.url, media?.baseTime, null, live ? desktopPlayback : null);
+    $: if (video && !live) attach(item?.id, media?.url, media?.baseTime);
     $: if (video) {
         video.volume = volume;
-        video.muted = muted || captureMuted || (live && desktopPlayback.local);
+        video.muted = muted || captureMuted;
     }
     $: if (!connected && video) video.pause();
     $: if (!connected || playerError || item?.status === 'error') previewRelative(null);
@@ -205,7 +212,7 @@
         function canToggleFullscreen(event) {
             return !hitmarkerArmed && !fingerArmed && !beachBall
                 && event.target.closest('.video-viewport')
-                && !event.target.closest('.player-controls, button, input, a, select, textarea, [role="button"]');
+                && !event.target.closest('.desktop-tile, .player-controls, button, input, a, select, textarea, [role="button"]');
         }
 
         function updateFocus() {
@@ -299,7 +306,7 @@
         };
     }
 
-    function cleanupSource() {
+    function cleanupSource(sourceVideo = video) {
         sourceGeneration++;
         sourceController?.abort();
         sourceController = null;
@@ -317,22 +324,22 @@
         renderer?.setGhost(null);
         hls?.destroy();
         hls = null;
-        video?.pause();
-        if (video) {
-            video.srcObject = null;
-            video.removeAttribute('src');
-            video.load();
+        sourceVideo?.pause();
+        if (sourceVideo) {
+            sourceVideo.srcObject = null;
+            sourceVideo.removeAttribute('src');
+            sourceVideo.load();
         }
         playPending = false;
     }
 
-    async function attach(id, url, baseTime, accessOverride = null, desktop = null) {
-        const key = `${id || ''}|${url || ''}|${baseTime || 0}|${desktop ? 'desktop' : 'hls'}`;
-        const stream = desktop && desktop.itemId === id ? desktop.stream : null;
-        if (sourceKey === key && (!desktop || video.srcObject === stream)) {
-            if (desktop) playerError = desktop.error || '';
-            return;
-        }
+    function mediaElement(node) {
+        return {destroy() { cleanupSource(node); sourceKey = ''; }};
+    }
+
+    async function attach(id, url, baseTime, accessOverride = null) {
+        const key = `${id || ''}|${url || ''}|${baseTime || 0}|hls`;
+        if (sourceKey === key) return;
         cleanupSource();
         sourceKey = key;
         playerError = '';
@@ -348,14 +355,6 @@
         if (qualityFallbackItemId !== id) {
             qualityFallbackItemId = null;
             qualityNotice = '';
-        }
-        if (desktop) {
-            playerError = desktop.error || '';
-            localBuffering = !stream;
-            video.srcObject = stream;
-            video.playbackRate = 1;
-            if (stream) tryPlay();
-            return;
         }
         if (!url) return;
         const generation = sourceGeneration;
@@ -501,13 +500,7 @@
         now = Date.now();
         if (connected) position = targetPosition(room, clockOffset, now);
         refreshPreview();
-        if (live) {
-            if (!video || !connected || playerError || !video.srcObject) { video?.pause(); return; }
-            video.playbackRate = 1;
-            localBuffering = video.readyState < 2;
-            if (video.paused && !blocked) tryPlay();
-            return;
-        }
+        if (live) return;
         if (!video || !media || !connected || playerError) {
             video?.pause();
             return;
@@ -698,7 +691,6 @@
     }
 
     function retryPlayback() {
-        if (live) { onRetryDesktop?.(); return; }
         sourceKey = '';
         attach(item?.id, media?.url, media?.baseTime);
     }
@@ -707,7 +699,7 @@
         try {
             if (document.fullscreenElement) await document.exitFullscreen();
             else if (playerShell.requestFullscreen) await playerShell.requestFullscreen();
-            else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+            else if (video?.webkitEnterFullscreen) video.webkitEnterFullscreen();
             else playerError = 'Fullscreen is not available in this browser.';
         } catch {
             playerError = 'Fullscreen was blocked by your browser. You can continue watching here.';
@@ -751,14 +743,25 @@
              roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
          data-renderer="native" data-effects-renderer={webglEffectsActive ? 'webgl' : '2d'}
          data-preview-time={previewPosition} data-beach-ball={beachBall}
-         style={`--controls-height: ${transportRowHeight + 28}px`}>
+         style={`--controls-height: ${transportRowHeight + (live ? 8 : 28)}px`}>
+        {#if live}
+            <div class="desktop-grid" bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
+                 data-columns={desktopGrid.columns} data-rows={desktopGrid.rows}
+                 style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}`}>
+                {#each desktops as desktop (desktop.id)}
+                    <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {connected} {volume} {muted}
+                                   {captureMuted} onRetry={onRetryDesktop}/>
+                {/each}
+            </div>
+        {:else}
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video bind:this={video} playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media || live}
+        <video bind:this={video} use:mediaElement playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
                on:canplay={sync} on:loadeddata={() => hasFrame = true} on:waiting={() => localBuffering = true}
                on:playing={() => { playing = true; localBuffering = false; }}
                on:pause={() => playing = false} on:ended={() => playing = false}
                on:error={nativePlaybackError}></video>
+        {/if}
         <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
                 class:video-visible={webglEffectsActive && (crtVisible || !!media || live)} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
@@ -797,12 +800,12 @@
             <div class="seek-preview-label">Seek preview · {time(previewPosition)}</div>
         {/if}
         <div class="screen-topline"><span class="screen-brand"><Icon name="flame" size={16}/>HELLTUBE CINEMA</span><span
-                class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : room.playback.paused ? 'PAUSED TOGETHER' : 'WATCHING TOGETHER'}</span>
+                class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : live ? `${desktops.length} LIVE ${desktops.length === 1 ? 'DESKTOP' : 'DESKTOPS'}` : room.playback.paused ? 'PAUSED TOGETHER' : 'WATCHING TOGETHER'}</span>
         </div>
         {#if crtVisible}
             <CrtScreen {username} {item} {connected} {onAdd} onSkip={() => control('skip')}
                        pending={item ? null : room?.preparation || (preparation?.roomId === room?.id ? preparation : null)}/>
-        {:else if item.status === 'error' || playerError}
+        {:else if !live && (item.status === 'error' || playerError)}
             <div class="screen-message error-screen" role="alert"><span class="screen-message-icon"><Icon name="warning"
                                                                                                           size={28}/></span>
                 <h3>This watch hit a snag.</h3>
@@ -825,7 +828,7 @@
                 <Icon name="offline" size={30}/>
                 <h3>Holding your place.</h3>
                 <p>Reconnecting to the room. Playback is paused on this device until a fresh state arrives.</p></div>
-        {:else if blocked}
+        {:else if !live && blocked}
             <div class="screen-message"><span class="screen-message-icon"><Icon name="volume" size={28}/></span>
                 <h3>Your browser needs a little nudge.</h3>
                 <p>Enable video and sound on this device. Everyone else keeps watching, uninterrupted.</p>
@@ -834,7 +837,7 @@
                     Enable playback
                 </button>
             </div>
-        {:else if localBuffering}
+        {:else if !live && localBuffering}
             <div class="buffering-indicator" role="status"><span class="spinner"></span>Buffering your view…</div>
         {/if}
         {#if serverOverlay}
@@ -849,6 +852,7 @@
                     <span class="controls-blur"></span><span class="controls-blur"></span>
                 </div>
             {/if}
+            {#if !live}
             <div class="seek-track" style={`--progress: ${progress}%; --buffered: ${buffered}%`}>
                 <input type="range" min="0" max={seekMax} step="0.1" value={displayedPosition}
                        disabled={!connected || !media || live} aria-label="Seek shared video"
@@ -856,8 +860,10 @@
                        on:input={(event) => { scrubbing = true; scrubPosition = Number(event.currentTarget.value); }}
                        on:change={seek} on:blur={() => scrubbing = false}/>
             </div>
+            {/if}
             <div class="transport-row" bind:clientHeight={transportRowHeight}>
                 <div class="shared-controls">
+                    {#if !live}
                     <button class="icon-button" title="Play previous video for everyone"
                             aria-label="Play previous video for everyone" disabled={!connected || !room?.history?.length || live}
                             on:click={() => control('previous')}>
@@ -869,18 +875,19 @@
                             on:click={() => control(room.playback.paused ? 'play' : 'pause')}>
                         <Icon name={room?.playback.paused || !item ? 'play' : 'pause'} size={21}/>
                     </button>
+                    {/if}
                     <button class="icon-button" title="Skip video for everyone" aria-label="Skip video for everyone"
                             disabled={!connected || !item} on:click={() => control('skip')}>
                         <Icon name="next" size={19}/>
                     </button>
                     <span class="time-display">{#if live}LIVE{:else}{time(displayedPosition)}<span> / {time(duration)}</span>{/if}</span>
                 </div>
-                <div class="relative-seek-control">
+                {#if !live}<div class="relative-seek-control">
                     {#key `${room?.id}|${sourceKey}`}
                         <SeekJoystick disabled={!connected || !media || !!playerError || item?.status === 'error' || live}
                                       onSeek={seekRelative} onPreview={previewRelative}/>
                     {/key}
-                </div>
+                </div>{/if}
                 <div class="local-controls"><span class="shared-label"><Icon name="users" size={13}/>Shared controls</span>
                     {#if media}
                         {#key `${room?.id}|${item?.id}`}
@@ -912,7 +919,7 @@
     {#if captureMuted}<p class="field-help" role="status">Your player is muted while sharing to prevent audio feedback. Viewers receive your shared audio.</p>{/if}
     <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
         <div class="now-playing-heading">
-            <h2>{item?.title || 'A little less scrolling. A little more watching.'}</h2>
+            <h2>{desktops.length > 1 ? `${desktops.length} shared desktops` : item?.title || 'A little less scrolling. A little more watching.'}</h2>
             {#if item?.hasOriginalStream}
                 <a class="icon-button bordered"
                    href={`/api/rooms/${encodeURIComponent(room.id)}/items/${encodeURIComponent(item.id)}/original`}
@@ -937,7 +944,10 @@
             name={connected ? 'wifi' : 'offline'} size={15}/>{connected ? 'Room synced' : 'Not connected'}
         {#if connected && rtt !== null}<span>{Math.round(rtt)} ms</span>{/if}</span></div>
 {#if live}
-    <DesktopStats playback={desktopPlayback.itemId === item.id ? desktopPlayback : null} {connected}/>
+    {#each desktops as desktop (desktop.id)}
+        {#if desktops.length > 1}<p class="field-help">{desktop.title}</p>{/if}
+        <DesktopStats playback={desktopPlayback[desktop.id]} {connected}/>
+    {/each}
 {:else if media && mediaAccess}
     <div class="playback-health" aria-label="Playback buffer health" data-delivery={mediaAccess.route}
          data-buffer-status={bufferReport?.status || 'Loading'}>
@@ -954,6 +964,20 @@
         {/if}
     </div>
 {/if}
+
+<style>
+    .desktop-grid {
+        position: absolute;
+        inset: 38px 8px var(--controls-height);
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-content: center;
+        gap: 8px;
+        min-width: 0;
+        min-height: 0;
+    }
+</style>
 {#if fallbackNotice && media}
     <p class="delivery-notice" role="status">{fallbackNotice}</p>
 {/if}
