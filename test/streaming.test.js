@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { uploadHealth } from '../server/uploads.js';
 import { YouTube, youtubeURL } from '../server/youtube.js';
 import { playlistProgress } from '../server/media.js';
+import { youtubeMixVideoURL } from '../shared/media-source.js';
 
 test('upload pacing fills a healthy buffer before delaying and detects sustained poor throughput', () => {
   const baseline = { size: 100000000, duration: 100, received: 60000000, position: 0,
@@ -57,6 +58,24 @@ test('YouTube Mix links retain the seed video through metadata extraction and qu
   ]);
   assert.deepEqual(items.map(item => item.startAt), [10, 0]);
   assert.ok(items[0].playlistId && items[0].playlistId === items[1].playlistId);
+});
+
+test('Mix video opt-out recognizes supported YouTube links without rewriting ordinary playlists', () => {
+  for (const prefix of ['https://www.youtube.com/watch?v=', 'https://youtu.be/',
+    'https://music.youtube.com/watch?v=', 'https://m.youtube.com/shorts/', 'https://youtube.com/live/']) {
+    const input = prefix + '5WzswZXTMZQ' + (prefix.includes('?') ? '&' : '?') + 'list=RD5WzswZXTMZQ&t=10';
+    assert.equal(youtubeMixVideoURL(input), 'https://www.youtube.com/watch?v=5WzswZXTMZQ');
+  }
+  for (const input of ['not a URL', 'https://youtube.com/watch?v=5WzswZXTMZQ',
+    'https://youtube.com/watch?v=5WzswZXTMZQ&list=PL1234567890123',
+    'https://youtube.com/playlist?list=RD5WzswZXTMZQ',
+    'https://youtube.com/watch?v=bad&list=RD5WzswZXTMZQ',
+    'https://youtube.com/watch?v=5WzswZXTMZQ&list=RD!',
+    'https://youtube.com.evil.test/watch?v=5WzswZXTMZQ&list=RD5WzswZXTMZQ',
+    'https://user:pass@youtube.com/watch?v=5WzswZXTMZQ&list=RD5WzswZXTMZQ',
+    'https://youtube.com:444/watch?v=5WzswZXTMZQ&list=RD5WzswZXTMZQ']) {
+    assert.equal(youtubeMixVideoURL(input), null, input);
+  }
 });
 
 test('playlist metadata becomes an ordered removable group and rejects private entries', async t => {

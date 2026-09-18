@@ -1319,6 +1319,93 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
   assert.deepEqual(errors, []);
 });
 
+test('Mix playlist switch defaults off and controls the imported queue on desktop and mobile', {timeout: 30000}, async t => {
+  const {instance, url} = await start(t);
+  instance.capabilities.youtube = true;
+  t.mock.method(instance.media, 'schedule', () => {});
+  const seed = {id: '5WzswZXTMZQ', title: 'Mix seed video', duration: 90};
+  const extracted = [];
+  let releaseExtraction;
+  t.mock.method(instance.youtube, 'extract', async args => {
+    const target = args.at(-1);
+    extracted.push(target);
+    if (releaseExtraction) await releaseExtraction.promise;
+    return new URL(target).searchParams.has('list')
+      ? {title: 'Test Mix', entries: [seed, {id: 'jNQXAC9IVRw', title: 'Next video', duration: 19}]} : seed;
+  });
+  const browser = await chromium.launch({channel: 'chrome', headless: true});
+  t.after(async () => {releaseExtraction?.resolve(); await browser.close();});
+  const page = await browser.newPage({viewport: {width: 1280, height: 900}});
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(url);
+  await page.getByLabel('Username', {exact: true}).fill('admin');
+  await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+  await page.getByRole('button', {name: 'Enter Helltube'}).click();
+  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+  const room = instance.rooms.get('lobby');
+  await until(() => room.members.size);
+  const input = page.getByLabel('YouTube, Twitch VOD, or hosted media URL', {exact: true});
+  const toggle = page.getByRole('switch', {name: 'Include Mix playlist', exact: true});
+  const mix = 'https://www.youtube.com/watch?v=5WzswZXTMZQ&list=RD5WzswZXTMZQ&start_radio=1&t=10';
+  const submit = async expected => {
+    const response = page.waitForResponse(response => response.url().endsWith('/api/rooms/lobby/media') &&
+      response.request().method() === 'POST');
+    await page.getByRole('button', {name: 'Add to queue', exact: true}).click();
+    const result = await response;
+    assert.equal(result.status(), 201);
+    assert.equal((await result.json()).added, expected);
+    await until(async () => await input.inputValue() === '');
+  };
+  assert.equal(await toggle.count(), 0);
+  await input.fill(mix);
+  assert.equal(await toggle.getAttribute('aria-checked'), 'false');
+  await page.locator('.composer').screenshot({path: 'test-artifacts/mix-playlist-desktop.png'});
+  await submit(1);
+  assert.equal(extracted.at(-1), 'https://www.youtube.com/watch?v=5WzswZXTMZQ');
+  assert.equal(room.current.playlistId, null);
+  assert.equal(room.current.startAt, 10, 'Video-only submissions keep the selected start time.');
+  assert.equal(room.queue.length, 0);
+
+  await input.fill(mix);
+  assert.equal(await toggle.getAttribute('aria-checked'), 'false');
+  await toggle.press('Space');
+  assert.equal(await toggle.getAttribute('aria-checked'), 'true');
+  await toggle.press('Space');
+  assert.equal(await toggle.getAttribute('aria-checked'), 'false');
+  await toggle.click();
+  for (const width of [390, 320]) {
+    await page.setViewportSize({width, height: 844});
+    await toggle.scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
+  }
+  await page.locator('.composer').screenshot({path: 'test-artifacts/mix-playlist-mobile.png'});
+  releaseExtraction = Promise.withResolvers();
+  const pending = submit(2);
+  await until(() => extracted.length === 2);
+  assert.equal(await toggle.isDisabled(), true, 'The choice is locked during submission.');
+  releaseExtraction.resolve();
+  await pending;
+  releaseExtraction = null;
+  assert.equal(extracted.at(-1), 'https://www.youtube.com/watch?v=5WzswZXTMZQ&list=RD5WzswZXTMZQ');
+  assert.deepEqual(room.queue.map(item => item.startAt), [10, 0]);
+  assert.ok(room.queue[0].playlistId && room.queue[0].playlistId === room.queue[1].playlistId);
+
+  await input.fill(mix);
+  assert.equal(await toggle.getAttribute('aria-checked'), 'false', 'Each new submission starts with Mix disabled.');
+  await toggle.click();
+  await input.fill('https://youtu.be/5WzswZXTMZQ?list=RD5WzswZXTMZQ');
+  assert.equal(await toggle.getAttribute('aria-checked'), 'false', 'Changing the URL resets the choice.');
+  await submit(1);
+  assert.equal(room.queue.at(-1).playlistId, null);
+  await input.fill('https://www.youtube.com/watch?v=5WzswZXTMZQ&list=PL1234567890123');
+  assert.equal(await toggle.count(), 0);
+  await submit(2);
+  assert.equal(extracted.at(-1), 'https://www.youtube.com/playlist?list=PL1234567890123');
+  assert.deepEqual(errors, []);
+});
+
 test('YouTube start-time editor and joystick feed timestamped playback to two browsers', { timeout: 90000 }, async t => {
   const { instance, url, dir } = await start(t);
   instance.capabilities.youtube = true;

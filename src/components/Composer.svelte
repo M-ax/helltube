@@ -4,7 +4,7 @@
     import SeekJoystick from './SeekJoystick.svelte';
     import {api} from '../lib/api.js';
     import {time} from '../lib/format.js';
-    import {sourceKind, twitchURL} from '../../shared/media-source.js';
+    import {sourceKind, twitchURL, youtubeMixVideoURL} from '../../shared/media-source.js';
     import {videoFileAccept} from '../lib/uploads.js';
     import {parseStartTime, youtubeTimeArgument} from '../../shared/youtube-time.js';
     import {desktopSupport} from '../lib/desktop-share.js';
@@ -27,6 +27,7 @@
     let startTimeEnabled = false;
     let startTimeText = '';
     let startTimeError = '';
+    let includeMixPlaylist = false;
     let fileInput;
     let urlInput;
     let section;
@@ -36,14 +37,16 @@
     $: if (insertAt !== 'end' && Number(insertAt) >= queue.length) insertAt = 'end';
     $: unavailable = !connected || !room || capabilities.ffmpeg === false;
     $: linkKind = sourceKind(url.trim());
+    $: mixVideoURL = youtubeMixVideoURL(url.trim());
     $: providerUnavailable = (linkKind === 'youtube' || linkKind === 'twitch') && capabilities[linkKind] === false;
     $: youtubeUnavailable = unavailable || !!busy;
     $: uploadUnavailable = unavailable || !!busy || !manager;
     $: if (uploadUnavailable) resetFileDrag();
     $: if (mode !== 'upload') dropzoneDragDepth = 0;
-    $: resetStartTime(url);
+    $: resetLinkOptions(url);
 
-    function resetStartTime(value) {
+    function resetLinkOptions(value) {
+        includeMixPlaylist = false;
         const argument = ['youtube', 'twitch'].includes(sourceKind(value.trim())) ? youtubeTimeArgument(value.trim()) : null;
         const seconds = argument === null ? null : parseStartTime(argument);
         hasStartTime = argument !== null;
@@ -109,7 +112,7 @@
         try {
             const result = await api(`/api/rooms/${encodeURIComponent(roomId)}/media`, {
                 method: 'POST',
-                body: {url: url.trim(), insertAt: position(), startAt}
+                body: {url: mixVideoURL && !includeMixPlaylist ? mixVideoURL : url.trim(), insertAt: position(), startAt}
             });
             url = '';
             onPreparation?.(null);
@@ -239,6 +242,16 @@
                 <input id="youtube-url" bind:this={urlInput} bind:value={url} type="url"
                        placeholder="Paste a YouTube, Twitch VOD, or media file link" required
                        disabled={youtubeUnavailable} autocomplete="off"/></div>
+            {#if mixVideoURL}
+                <div class="youtube-mix-option">
+                    <button class="mix-playlist-toggle" type="button" role="switch" aria-checked={includeMixPlaylist}
+                            aria-describedby="youtube-mix-help" disabled={youtubeUnavailable || providerUnavailable}
+                            on:click={() => includeMixPlaylist = !includeMixPlaylist}>
+                        <span class="mix-playlist-track" aria-hidden="true"></span>Include Mix playlist
+                    </button>
+                    <span id="youtube-mix-help">{includeMixPlaylist ? 'Up to 200 videos' : 'Only this video'}</span>
+                </div>
+            {/if}
             {#if hasStartTime}
                 <div class="youtube-start-time">
                     <label><input type="checkbox" bind:checked={startTimeEnabled} aria-label="Start at"

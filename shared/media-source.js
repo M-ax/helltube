@@ -11,6 +11,17 @@ export function sourceKind(value) {
   } catch { return null; }
 }
 
+export function youtubeMixVideoURL(value) {
+  if (sourceKind(value) !== 'youtube') return null;
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.port) return null;
+  const video = url.hostname === 'youtu.be' ? url.pathname.slice(1)
+    : /^\/(?:shorts|live)\//.test(url.pathname) ? url.pathname.split('/')[2] : url.searchParams.get('v');
+  if (!/^[a-zA-Z0-9_-]{11}$/.test(video || '') ||
+    !/^RD[a-zA-Z0-9_-]{8,98}$/.test(url.searchParams.get('list') || '')) return null;
+  return `https://www.youtube.com/watch?v=${video}`;
+}
+
 export function twitchURL(value) {
   let url;
   try { url = new URL(value); } catch { throw new Error('Enter a valid Twitch VOD URL.'); }
