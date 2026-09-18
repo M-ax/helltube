@@ -67,11 +67,14 @@ test('the existing cursor channel sustains 60Hz, shares fingers, isolates rooms 
     assert.ok(states.length >= 95, `Expected roughly 120 shared ticks, got ${states.length}`);
     assert.equal(states.at(-1).fingers[0].clientId, clientId);
     assert.equal(states.at(-1).fingers[0].userId, instance.accounts.users[0].id);
-    assert.ok(!outsider.messages.some(value => value.fingers?.length || value.kind === 'fingertap'));
+    const staticEvents = b.messages.filter(value => value.kind === 'fingerstatic');
+    assert.ok(staticEvents.length > 0, 'Pressed movement emits shared static on fresh glass.');
+    assert.deepEqual(a.messages.filter(value => value.kind === 'fingerstatic'), staticEvents);
+    assert.ok(!outsider.messages.some(value => value.fingers?.length || ['fingertap', 'fingerstatic'].includes(value.kind)));
     const late = await connect();
     late.send(JSON.stringify({type: 'join', roomId: 'lobby'}));
     await until(() => late.messages.some(value => value.fingers?.length));
-    assert.ok(!late.messages.some(value => value.kind === 'fingertap'), 'Joining does not replay a tap.');
+    assert.ok(!late.messages.some(value => ['fingertap', 'fingerstatic'].includes(value.kind)), 'Joining does not replay a tap or static.');
     a.send(JSON.stringify({type: 'reaction:pointer', x: null, y: null}));
     await until(() => !instance.reactions.rooms.has('lobby'));
     assert.equal(instance.rooms.get('lobby').playback.revision, revision);

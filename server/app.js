@@ -404,7 +404,7 @@ export async function createApp(overrides = {}) {
   }
   rooms.on('state', broadcastState);
   rooms.on('deleted', room => {
-    reactions.rooms.delete(room.id);
+    reactions.leave(room.id, null, true);
     for (const ws of wss.clients) if (ws.roomId === room.id) ws.roomId = null;
   });
   rooms.on('rooms', broadcastRooms);

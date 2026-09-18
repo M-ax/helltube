@@ -1,4 +1,4 @@
-import {createFingerBuffer} from './finger-audio.js';
+import {createFingerBuffer, createFingerStaticBuffer, FINGER_SLIDE_LOOP_START} from './finger-audio.js';
 
 export function createReactionAudio() {
     let context;
@@ -22,6 +22,7 @@ export function createReactionAudio() {
             if (!AudioContext) return;
             context ||= new AudioContext();
             sounds.fingertap ||= {buffer: createFingerBuffer(context), gain: .8};
+            sounds.fingerstatic ||= {buffer: createFingerStaticBuffer(context), gain: .4};
             slideBuffer ||= createFingerBuffer(context, true);
             if (context.state === 'suspended') void context.resume().catch(() => {});
             for (const sound of Object.values(sounds)) {
@@ -46,11 +47,11 @@ export function createReactionAudio() {
         stop,
         slide(id, volume, speed) {
             let slide = slides.get(id);
-            const level = Math.min(1, Math.max(0, speed)) * Math.min(1, Math.max(0, volume)) * .42;
+            const level = Math.sqrt(Math.min(1, Math.max(0, speed))) * Math.min(1, Math.max(0, volume)) * .36;
             if (!level || destroyed || context?.state !== 'running') {
                 if (slide) {
-                    slide.gain.gain.setTargetAtTime(0, context.currentTime, .008);
-                    slide.source.stop(context.currentTime + .035);
+                    slide.gain.gain.setTargetAtTime(0, context.currentTime, .02);
+                    slide.source.stop(context.currentTime + .1);
                     slides.delete(id);
                 }
                 return;
@@ -61,7 +62,7 @@ export function createReactionAudio() {
                 const gain = context.createGain();
                 source.buffer = slideBuffer;
                 source.loop = true;
-                source.loopStart = .015;
+                source.loopStart = FINGER_SLIDE_LOOP_START;
                 gain.gain.value = 0;
                 source.connect(gain).connect(context.destination);
                 sources.add(source);
@@ -70,8 +71,8 @@ export function createReactionAudio() {
                 source.onended = () => { sources.delete(source); source.disconnect(); gain.disconnect(); };
                 source.start();
             }
-            slide.gain.gain.setTargetAtTime(level, context.currentTime, .012);
-            slide.source.playbackRate.setTargetAtTime(.8 + speed * .4, context.currentTime, .025);
+            slide.gain.gain.setTargetAtTime(level, context.currentTime, .04);
+            slide.source.playbackRate.setTargetAtTime(.96 + speed * .08, context.currentTime, .08);
         },
         play(volume, kind = 'hitmarker') {
             const sound = sounds[kind];

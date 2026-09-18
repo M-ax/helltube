@@ -2,12 +2,14 @@ import {randomUUID} from 'node:crypto';
 import {httpError} from './config.js';
 import {advanceBeachBall, bumpBeachBall, createBeachBall, BALL_WIDTH, BALL_HEIGHT} from '../shared/beach-ball.js';
 import {POINTER_TIMEOUT_MS, validFinger} from '../shared/reaction-pointer.js';
+import {FingerStatic, STATIC_RECOVERY_MS} from './finger-static.js';
 
 export class Reactions {
     constructor({now = Date.now, broadcast}) {
         this.now = now;
         this.broadcast = broadcast;
         this.rooms = new Map();
+        this.staticSurfaces = new Map();
     }
 
     snapshot(roomId) {
@@ -63,6 +65,14 @@ export class Reactions {
                 this.broadcast(roomId, {type: 'reaction', roomId, id: randomUUID(), clientId, userId,
                     kind: 'fingertap', x, y, serverTime: now});
             }
+            if (pressed && previousFinger?.pressed && now - previousFinger.time < POINTER_TIMEOUT_MS
+                && (x !== previousFinger.x || y !== previousFinger.y)) {
+                let surface = this.staticSurfaces.get(roomId);
+                if (!surface) { surface = new FingerStatic(); this.staticSurfaces.set(roomId, surface); }
+                const strength = surface.rub(previousFinger, {x, y}, now);
+                if (strength) this.broadcast(roomId, {type: 'reaction', roomId, id: randomUUID(), clientId, userId,
+                    kind: 'fingerstatic', x, y, strength, serverTime: now});
+            }
         } else state.fingers.delete(clientId);
         if (absent || !state.ball) state.pointers.delete(clientId);
         else {
@@ -77,7 +87,7 @@ export class Reactions {
     }
 
     leave(roomId, clientId, empty = false) {
-        if (empty) this.rooms.delete(roomId);
+        if (empty) { this.rooms.delete(roomId); this.staticSurfaces.delete(roomId); }
         else {
             const state = this.rooms.get(roomId);
             state?.pointers.delete(clientId);
@@ -88,6 +98,9 @@ export class Reactions {
 
     tick() {
         const now = this.now();
+        for (const [roomId, surface] of this.staticSurfaces) {
+            if (now - surface.lastRub >= STATIC_RECOVERY_MS) this.staticSurfaces.delete(roomId);
+        }
         for (const [roomId, state] of this.rooms) {
             if (state.ball) state.ball = advanceBeachBall(state.ball, (now - state.time) / 1000);
             state.time = now;

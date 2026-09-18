@@ -608,6 +608,10 @@
                 if (event.clientId !== state.clientId && age < 200) reactionSound('fingertap');
                 continue;
             }
+            if (event.kind === 'fingerstatic') {
+                if (age < 200) reactionSound('fingerstatic', event.strength);
+                continue;
+            }
             activeReactions = [...activeReactions.slice(-39), event];
             if (event.kind === 'hitmarker' && !soundMuted && !muted && !captureMuted) reactionAudio?.play(volume);
             const timer = setTimeout(() => {
