@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {httpError} from './config.js';
 import {advanceBeachBall, bumpBeachBall, createBeachBall, BALL_WIDTH, BALL_HEIGHT} from '../shared/beach-ball.js';
-import {POINTER_TIMEOUT_MS, validFinger} from '../shared/reaction-pointer.js';
+import {FINGER_TAP_IMPACT_MS, POINTER_TIMEOUT_MS, validFinger} from '../shared/reaction-pointer.js';
 import {FingerStatic, STATIC_RECOVERY_MS} from './finger-static.js';
 
 export class Reactions {
@@ -60,12 +60,14 @@ export class Reactions {
             const {x, y, pressed, taps} = message.finger;
             const pivot = previousFinger?.pivot || {...message.finger.pivot};
             const count = Math.max(previousFinger?.taps || 0, taps);
-            state.fingers.set(clientId, {clientId, userId, x, y, pivot, pressed, taps: count, time: now});
+            const tapTime = count > (previousFinger?.taps || 0) ? now : previousFinger?.tapTime ?? null;
+            state.fingers.set(clientId, {clientId, userId, x, y, pivot, pressed, taps: count, tapTime, time: now});
             if (count > (previousFinger?.taps || 0)) {
                 this.broadcast(roomId, {type: 'reaction', roomId, id: randomUUID(), clientId, userId,
                     kind: 'fingertap', x, y, serverTime: now});
             }
             if (pressed && previousFinger?.pressed && now - previousFinger.time < POINTER_TIMEOUT_MS
+                && (tapTime === null || now - tapTime >= FINGER_TAP_IMPACT_MS)
                 && (x !== previousFinger.x || y !== previousFinger.y)) {
                 let surface = this.staticSurfaces.get(roomId);
                 if (!surface) { surface = new FingerStatic(); this.staticSurfaces.set(roomId, surface); }

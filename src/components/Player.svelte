@@ -605,7 +605,7 @@
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
             if (event.kind === 'fingertap') {
-                if (event.clientId !== state.clientId && age < 200) reactionSound('fingertap');
+                // Pointer snapshots drive the whole-prop strike and its sound on the contact frame.
                 continue;
             }
             if (event.kind === 'fingerstatic') {
@@ -661,7 +661,7 @@
         reactionAudio?.slide(id, level, speed);
     }
 
-    function fingerTap() { reactionAudio?.unlock(); reactionSound('fingertap'); }
+    function fingerTap() { reactionAudio?.unlock(); }
     function setLocalFinger(finger) { localFinger = finger; }
 
     function placeHitmarker(event) {
@@ -751,7 +751,7 @@
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
         {#if reactionsEnabled && connected && reactions.roomId === room?.id && (fingerArmed || reactions.fingers?.length)}
             <PointingFingers fingers={reactions.fingers || []} local={localFinger} clientId={reactions.clientId}
-                             {clockOffset} onSlide={fingerSlide}/>
+                             {clockOffset} onSlide={fingerSlide} onImpact={() => reactionSound('fingertap')}/>
         {/if}
         {#each activeReactions.filter(reaction => reaction.kind === 'metalpipe') as reaction (reaction.id)}
             <MetalPipeReaction {reaction} {clockOffset} onImpact={pipeImpact}/>

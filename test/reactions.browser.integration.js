@@ -5,6 +5,7 @@ import {start, until} from './helpers.js';
 import {createBeachBall, ballArena} from '../shared/beach-ball.js';
 import {FLASH_DETONATE_MS, FLASH_LIFETIME_MS} from '../src/lib/flashbang.js';
 import {BIDEN_LIFETIME_MS, bidenSound} from '../src/lib/biden.js';
+import {writeFile} from 'node:fs/promises';
 
 test('pointing fingers track locally, stream at 60Hz, tap and slide together, and clean up', {timeout: 60000}, async t => {
     const {instance, url} = await start(t, {maxTranscoders: 0});
@@ -23,12 +24,30 @@ test('pointing fingers track locally, stream at 60Hz, tap and slide together, an
         page.on('pageerror', error => errors.push(error.message));
         await page.addInitScript(() => {
             window.fingerAudio = {taps: 0, slides: 0, active: 0, crackles: 0, patterns: []};
+            window.fingerImpacts = [];
+            window.fingerMotion = [];
+            window.fingerFrames = {};
+            let peakLift = 0;
+            function sampleMotion() {
+                const canvas = document.querySelector('.pointing-fingers');
+                const phase = canvas?.dataset.tapPhase;
+                const lift = Number(canvas?.dataset.tapLift);
+                if (phase && phase !== 'idle') window.fingerMotion.push({phase, lift});
+                if (lift > peakLift) { peakLift = lift; window.fingerFrames.lift = canvas.toDataURL(); }
+                requestAnimationFrame(sampleMotion);
+            }
+            requestAnimationFrame(sampleMotion);
             const active = new Set();
             const start = AudioBufferSourceNode.prototype.start;
             const stop = AudioBufferSourceNode.prototype.stop;
             AudioBufferSourceNode.prototype.start = function (...args) {
                 if (this.loop) { window.fingerAudio.slides++; active.add(this); window.fingerAudio.active = active.size; }
-                else if (this.buffer?.duration > .104 && this.buffer.duration < .106) window.fingerAudio.taps++;
+                else if (this.buffer?.duration > .104 && this.buffer.duration < .106) {
+                    window.fingerAudio.taps++;
+                    const canvas = document.querySelector('.pointing-fingers');
+                    window.fingerImpacts.push({phase: canvas?.dataset.tapPhase, lift: Number(canvas?.dataset.tapLift), at: Date.now()});
+                    window.fingerFrames.impact ||= canvas?.toDataURL();
+                }
                 else if (this.buffer?.duration < .1) {
                     window.fingerAudio.crackles++;
                     window.fingerAudio.patterns.push(this.buffer.duration);
@@ -71,6 +90,15 @@ test('pointing fingers track locally, stream at 60Hz, tap and slide together, an
     await a.mouse.down();
     await until(async () => await b.evaluate(() => window.fingerAudio.taps) === 1);
     assert.equal(await a.evaluate(() => window.fingerAudio.taps), 1, 'Local tap plays once without its echoed sound.');
+    const impacts = await Promise.all([a, b].map(page => page.evaluate(() => window.fingerImpacts[0])));
+    for (const impact of impacts) {
+        assert.equal(impact.phase, 'impact', 'The tapping sound starts on the contact frame.');
+        assert.equal(impact.lift, 0, 'The pointer is touching the screen when the sound plays.');
+    }
+    assert.ok(Math.abs(impacts[0].at - impacts[1].at) < 120, 'Shared viewers strike at the same time.');
+    assert.ok(await a.evaluate(() => window.fingerMotion.some(frame => frame.lift > 25)), 'The click has a visible lift before contact.');
+    const frames = await a.evaluate(() => window.fingerFrames);
+    for (const [phase, data] of Object.entries(frames)) await writeFile(`test-artifacts/pointing-finger-${phase}.png`, Buffer.from(data.split(',')[1], 'base64'));
     assert.equal(await a.evaluate(() => window.fingerAudio.slides), 0, 'Holding still never slides.');
     for (let i = 0; i < 12; i++) {
         await a.mouse.move(at(.65 + i * .015, .4 + i * .008).x, at(.65 + i * .015, .4 + i * .008).y);
@@ -99,6 +127,7 @@ test('pointing fingers track locally, stream at 60Hz, tap and slide together, an
     const mutedTaps = await b.evaluate(() => window.fingerAudio.taps);
     await a.mouse.click(at(.6, .35).x, at(.6, .35).y);
     await until(async () => await a.evaluate(() => window.fingerAudio.taps) === 2);
+    assert.equal((await a.evaluate(() => window.fingerImpacts[1])).phase, 'impact', 'A quick click still completes its full strike.');
     await a.waitForTimeout(150);
     assert.equal(await b.evaluate(() => window.fingerAudio.taps), mutedTaps);
     const mutedCrackles = await b.evaluate(() => window.fingerAudio.crackles);

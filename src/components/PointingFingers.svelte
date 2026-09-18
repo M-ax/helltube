@@ -1,13 +1,15 @@
 <script>
     import {onMount} from 'svelte';
     import {drawPointingFinger} from '../lib/pointing-finger.js';
-    import {POINTER_TIMEOUT_MS} from '../../shared/reaction-pointer.js';
+    import {fingerStrikePose, FINGER_TAP_DURATION_MS} from '../lib/finger-strike.js';
+    import {FINGER_TAP_IMPACT_MS, POINTER_TIMEOUT_MS} from '../../shared/reaction-pointer.js';
 
     export let fingers = [];
     export let local = null;
     export let clientId = null;
     export let clockOffset = 0;
     export let onSlide;
+    export let onImpact;
     let canvas;
     let count = 0;
 
@@ -33,13 +35,23 @@
                 && Date.now() + clockOffset - finger.time < POINTER_TIMEOUT_MS);
             if (local && !document.hidden) visible.push({...local, clientId: 'local'});
             const alive = new Set();
+            canvas.dataset.tapPhase = 'idle';
+            canvas.dataset.tapLift = '0';
             for (const finger of visible) {
                 const id = finger.clientId;
                 alive.add(id);
                 let pose = poses.get(id);
                 if (!pose) {
-                    pose = {x: finger.x, y: finger.y, targetX: finger.x, targetY: finger.y, lastMove: now, lastFrame: now, born: now, speed: 0};
+                    pose = {x: finger.x, y: finger.y, targetX: finger.x, targetY: finger.y, lastMove: now, lastFrame: now, born: now, speed: 0,
+                        taps: 0, tapStarted: -Infinity, impacted: true};
                     poses.set(id, pose);
+                }
+                if (finger.taps > pose.taps) {
+                    pose.taps = finger.taps;
+                    const age = finger.tapTime == null ? Infinity : id === 'local'
+                        ? Math.max(0, now - finger.tapTime) : Math.max(0, Date.now() + clockOffset - finger.tapTime);
+                    pose.tapStarted = now - age;
+                    pose.impacted = age >= FINGER_TAP_DURATION_MS;
                 }
                 if (finger.pressed && !pose.pressed) pose.speed = 0;
                 pose.pressed = finger.pressed;
@@ -53,9 +65,20 @@
                 pose.x += (finger.x - pose.x) * blend;
                 pose.y += (finger.y - pose.y) * blend;
                 pose.lastFrame = now;
-                const arrival = reducedMotion ? 1 : Math.min(1, (now - pose.born) / 120);
-                drawPointingFinger(ctx, {...finger, x: pose.x, y: pose.y}, width, height, 1 - (1 - arrival) ** 3);
-                onSlide(id, finger.pressed && now - pose.lastMove < 75 ? pose.speed : 0);
+                const tapAge = now - pose.tapStarted;
+                const impactNow = !pose.impacted && tapAge >= FINGER_TAP_IMPACT_MS;
+                if (impactNow) pose.impacted = true;
+                const playImpact = impactNow && tapAge < FINGER_TAP_IMPACT_MS + 100;
+                // Even after a delayed frame, the sound and the exact screen-contact pose share this draw.
+                const strike = fingerStrikePose(playImpact ? FINGER_TAP_IMPACT_MS : tapAge, reducedMotion);
+                const arrival = reducedMotion || tapAge < FINGER_TAP_DURATION_MS ? 1 : Math.min(1, (now - pose.born) / 120);
+                if (strike.phase !== 'idle') {
+                    canvas.dataset.tapPhase = strike.phase;
+                    canvas.dataset.tapLift = String(strike.lift);
+                }
+                drawPointingFinger(ctx, {...finger, x: pose.x, y: pose.y}, width, height, 1 - (1 - arrival) ** 3, strike);
+                if (playImpact) onImpact();
+                onSlide(id, finger.pressed && tapAge >= FINGER_TAP_IMPACT_MS && now - pose.lastMove < 75 ? pose.speed : 0);
             }
             for (const id of poses.keys()) if (!alive.has(id)) { poses.delete(id); onSlide(id, 0); }
             count = visible.length;

@@ -1,5 +1,6 @@
 export const POINTER_TICK_MS = 1000 / 60;
 export const POINTER_TIMEOUT_MS = 1500;
+export const FINGER_TAP_IMPACT_MS = 64;
 
 export function startPointerTicker(callback) {
     let deadline = performance.now() + POINTER_TICK_MS;

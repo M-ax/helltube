@@ -8,6 +8,8 @@ export function trackReactionPointer(node, initial) {
     let sent = false;
     let sentTaps = 0;
     let pointerId = null;
+    let tapTime = null;
+    const showFinger = finger => options.onFinger(finger ? {...finger, tapTime} : null);
     const listen = (target, name, fn) => {
         target.addEventListener(name, fn);
         return () => target.removeEventListener(name, fn);
@@ -26,8 +28,9 @@ export function trackReactionPointer(node, initial) {
         sent = false;
         sentTaps = 0;
         pointerId = null;
+        tapTime = null;
         if (resetEntry) entry = null;
-        options.onFinger(null);
+        showFinger(null);
     }
     function coordinates(event) {
         const rect = node.getBoundingClientRect();
@@ -55,7 +58,7 @@ export function trackReactionPointer(node, initial) {
         const ball = options.beachBall && bx >= 0 && bx <= 1 && by >= 0 && by <= 1;
         if (!finger && !ball) return clear(false);
         point = {x: ball ? bx : null, y: ball ? by : null, finger};
-        options.onFinger(finger);
+        showFinger(finger);
     }
     function down(event) {
         if (event.button !== 0 || event.isPrimary === false) return;
@@ -63,8 +66,9 @@ export function trackReactionPointer(node, initial) {
         if (!point?.finger) return;
         event.preventDefault();
         pointerId = event.pointerId;
+        tapTime = performance.now();
         point.finger = {...point.finger, pressed: true, taps: point.finger.taps + 1};
-        options.onFinger(point.finger);
+        showFinger(point.finger);
         options.onTap();
     }
     function release(event) {
@@ -72,7 +76,7 @@ export function trackReactionPointer(node, initial) {
         pointerId = null;
         if (point?.finger) {
             point.finger = {...point.finger, pressed: false};
-            options.onFinger(point.finger);
+            showFinger(point.finger);
         }
         if (event.pointerType !== 'mouse') clear();
     }
