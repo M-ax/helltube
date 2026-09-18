@@ -7,8 +7,13 @@
     export let volume = 0.8;
     export let muted = false;
     export let captureMuted = false;
+    export let inputDisabled = false;
     export let onRetry;
+    let tile;
     let video;
+    let fullscreen = false;
+    let fullscreenPending = false;
+    let fullscreenError = '';
     let blocked = false;
     let loading = true;
     let error = '';
@@ -17,6 +22,21 @@
     $: forcedMute = captureMuted || !!playback?.local;
     $: if (video) video.volume = volume;
     $: if (video) video.muted = muted || forcedMute;
+
+    async function toggleFullscreen() {
+        if (fullscreenPending || (inputDisabled && !fullscreen)) return;
+        fullscreenPending = true;
+        fullscreenError = '';
+        try {
+            if (document.fullscreenElement === tile) await document.exitFullscreen();
+            // Keep the MediaStream video in its normal playback mode. Only its
+            // surrounding tile enters fullscreen; the decoder and capture stay attached.
+            else if (tile.requestFullscreen) await tile.requestFullscreen();
+            else fullscreenError = 'Fullscreen is not available in this browser.';
+        } catch {
+            fullscreenError = 'Fullscreen was blocked. Try again.';
+        } finally { fullscreenPending = false; }
+    }
 
     async function play(node = video) {
         const current = generation;
@@ -52,15 +72,24 @@
     }
 </script>
 
-<div class="desktop-tile" data-item-id={item.id} data-local={!!playback?.local}>
+<svelte:document on:fullscreenchange={() => fullscreen = document.fullscreenElement === tile}/>
+
+<div class="desktop-tile" bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}>
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
     <video bind:this={video} use:attachStream={{stream: playback?.stream, connected}}
-           controls playsinline aria-label={`Shared desktop: ${item.title}`}
+           controls={!inputDisabled} controlslist="nofullscreen" inert={inputDisabled} playsinline aria-label={`Shared desktop: ${item.title}`}
+           on:dblclick|preventDefault={toggleFullscreen}
            on:volumechange={() => { if (forcedMute && video && !video.muted) video.muted = true; }}
            on:loadeddata={() => loading = false} on:playing={() => { loading = false; error = ''; blocked = false; }}
            on:waiting={() => loading = true}
            on:error={() => error = 'This desktop could not be played. Retry playback.'}></video>
     <span class="desktop-name" title={item.title}>{item.addedBy || item.title}{playback?.local ? ' (you)' : ''}</span>
+    <button class="icon-button desktop-fullscreen" type="button"
+            aria-label={fullscreen ? 'Exit fullscreen' : `Fullscreen ${item.title}`} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen this desktop'}
+            disabled={fullscreenPending || (inputDisabled && !fullscreen)} on:click={toggleFullscreen}>
+        <Icon name="fullscreen" size={17}/>
+    </button>
+    {#if fullscreenError}<p class="desktop-fullscreen-error" role="status">{fullscreenError}</p>{/if}
     {#if playback?.error || error}
         <div class="desktop-message" role="alert">
             <span>{playback?.error || error}</span>
@@ -91,11 +120,34 @@
         border-radius: 5px;
     }
     video { width: 100%; height: 100%; display: block; object-fit: contain; }
+    video::-webkit-media-controls-fullscreen-button { display: none; }
+    .desktop-tile:fullscreen { width: 100%; height: 100%; border-radius: 0; }
+    .desktop-tile::backdrop { background: #050506; }
+    .desktop-fullscreen {
+        position: absolute;
+        top: 7px;
+        right: 8px;
+        z-index: 1;
+        width: 30px;
+        height: 30px;
+        background: #000b;
+        color: #eee;
+    }
+    .desktop-fullscreen-error {
+        position: absolute;
+        top: 40px;
+        right: 8px;
+        left: 8px;
+        margin: 0;
+        padding: 5px 8px;
+        background: #000d;
+        font-size: 12px;
+    }
     .desktop-name {
         position: absolute;
         top: 7px;
         left: 8px;
-        max-width: calc(100% - 16px);
+        max-width: calc(100% - 56px);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;

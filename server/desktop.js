@@ -43,6 +43,7 @@ export class DesktopShares {
     if (room.current && room.current.kind !== 'desktop' && room.queue.length >= this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
     const item = makeItem({kind: 'desktop'}, {
       title: user.displayName + '’s desktop', addedBy: user.displayName, sharedBy: user.id,
+      sharedByUsername: user.username,
       status: 'ready', transport: 'mediasoup',
     });
     const session = {room, ws, item, requestId: message.requestId, started: this.now(), starting: true,

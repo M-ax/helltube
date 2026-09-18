@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { httpError, text } from './config.js';
 import { sponsorPosition } from '../shared/sponsorblock.js';
 import { sourceKind } from '../shared/media-source.js';
+import { roomNowPlayingTitle } from '../shared/room-title.js';
 
 export function makeItem(source, extra = {}) {
   return { id: randomUUID(), title: 'Untitled video', duration: null, thumbnail: null,
@@ -292,7 +293,7 @@ export class Rooms extends EventEmitter {
   list() {
     return [...this.rooms.values()].map(room => ({ id: room.id, name: room.name, ownerId: room.ownerId,
       memberCount: new Set([...room.members.values()].map(u => u.id)).size,
-      currentTitle: room.current?.title || null }));
+      currentTitle: roomNowPlayingTitle(room), currentKind: room.current?.kind || null }));
   }
 
   snapshot(room) {

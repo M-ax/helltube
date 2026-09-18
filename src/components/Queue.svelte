@@ -2,6 +2,7 @@
     import Icon from './Icon.svelte';
     import {imageUrl, time} from '../lib/format.js';
     import {sourceLabels, sourceIcons} from '../../shared/media-source.js';
+    import {roomNowPlayingTitle} from '../../shared/room-title.js';
 
     export let room = null;
     export let connected = false;
@@ -9,6 +10,7 @@
     export let onAdd;
     let tab = 'queue';
     $: queue = room?.queue || [];
+    $: currentTitle = roomNowPlayingTitle(room);
     $: groups = queue.reduce((groups, item, index) => {
         const previous = groups[groups.length - 1];
         // Group adjacent playlist videos without changing the playback order.
@@ -52,7 +54,7 @@
             {#if room?.current}
                 <div class="current-queue-item"><span class="equalizer" class:still={room.playback.paused || !connected}
                                                       aria-hidden="true"><i></i><i></i><i></i></span>
-                    <div><p class="eyebrow">ON SCREEN</p><strong>{room.current.title}</strong></div>
+                    <div><p class="eyebrow">ON SCREEN</p><strong class:desktop-title={room.current.kind === 'desktop'} title={currentTitle}>{currentTitle}</strong></div>
                     <span class="tag">{room.playback.paused ? 'Paused' : 'Now'}</span></div>
             {/if}
             {#if !queue.length}

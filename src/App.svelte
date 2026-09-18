@@ -354,7 +354,7 @@
                             aria-current={$realtimeState.selectedRoomId === entry.id ? 'page' : undefined}
                             on:click={() => joinRoom(entry.id)}><span class="room-hash"><Icon name="room"
                                                                                               size={20}/></span><span
-                            class="room-button-copy"><strong>{entry.name}</strong><span>{entry.currentTitle || 'Ready for a good watch'}</span></span><span
+                            class="room-button-copy"><strong>{entry.name}</strong><span class:desktop-title={entry.currentKind === 'desktop'} title={entry.currentTitle || undefined}>{entry.currentTitle || 'Ready for a good watch'}</span></span><span
                             class="member-count" title={`${entry.memberCount} in room`}><Icon name="users"
                                                                                               size={11}/>{entry.memberCount}</span>
                     </button>
@@ -484,7 +484,7 @@
                         {#each $realtimeState.rooms as entry (entry.id)}
                             <button class="room-card" on:click={() => joinRoom(entry.id)}><span class="room-card-icon"><Icon
                                     name="room" size={25}/></span><span
-                                    class="room-card-info"><strong>{entry.name}</strong><span>{entry.currentTitle || 'Nothing on screen yet. Bring the first pick.'}</span></span><span
+                                    class="room-card-info"><strong>{entry.name}</strong><span class:desktop-title={entry.currentKind === 'desktop'} title={entry.currentTitle || undefined}>{entry.currentTitle || 'Nothing on screen yet. Bring the first pick.'}</span></span><span
                                     class="room-card-footer"><span><Icon name="users"
                                                                          size={15}/>{entry.memberCount} {entry.memberCount === 1 ? 'person' : 'people'}</span><span>Join room<Icon
                                     name="chevron" size={16}/></span></span></button>

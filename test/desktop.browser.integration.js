@@ -111,6 +111,80 @@ test('multiple users tile independent native desktops and keep remaining shares 
     assert.ok(sessions.every(session => session.viewers.size === 3));
     assert.ok(sessions.every(session => session.producers.size === 1));
     await viewer.screenshot({path: 'test-artifacts/desktop-three-shares.png', fullPage: true});
+    const videos = viewer.locator('.desktop-tile video');
+    const playbackBeforeReactions = await videos.evaluateAll(videos => {
+        window.desktopInputEvents = [];
+        for (const video of videos) for (const type of ['pointerdown', 'click', 'keydown']) {
+            video.addEventListener(type, () => window.desktopInputEvents.push(type));
+        }
+        return videos.map(video => ({muted: video.muted, volume: video.volume}));
+    });
+    for (const name of ['Pointing finger', 'Beach ball', 'MW2 hit marker']) {
+        const reaction = viewer.getByRole('button', {name, exact: true});
+        await reaction.click();
+        await until(() => videos.evaluateAll(videos => videos.every(video => video.inert && !video.controls &&
+            getComputedStyle(video).pointerEvents === 'none')));
+        assert.equal(await viewer.locator('.desktop-fullscreen:enabled').count(), 0, 'Reaction input also blocks per-stream fullscreen');
+        assert.equal(await videos.evaluateAll(videos => videos.every(video => {
+            video.focus();
+            return document.activeElement !== video;
+        })), true, `${name} prevents native keyboard focus`);
+        await viewer.locator('.desktop-grid').scrollIntoViewIfNeeded();
+        const bounds = await firstVideo.boundingBox();
+        // Click where the native play/pause control normally sits.
+        await viewer.mouse.click(bounds.x + 28, bounds.y + bounds.height - 24);
+        assert.deepEqual(await viewer.evaluate(() => window.desktopInputEvents), [], `${name} owns input over every desktop`);
+        assert.equal(await videos.evaluateAll(videos => videos.every(video => !video.paused)), true);
+        if (name === 'Pointing finger') {
+            await until(() => viewer.locator('.pointing-fingers').getAttribute('data-local-x').then(x => x !== null && x !== ''));
+            await viewer.keyboard.press('Escape');
+        } else if (name === 'Beach ball') await reaction.click();
+        else await until(() => viewer.locator('.hitmarker-target').count().then(count => count === 0));
+        await until(() => videos.evaluateAll(videos => videos.every(video => !video.inert && video.controls &&
+            getComputedStyle(video).pointerEvents !== 'none')));
+    }
+    await viewer.getByRole('button', {name: 'Pointing finger', exact: true}).click();
+    await viewer.getByRole('switch', {name: 'Enable reactions on this device'}).click();
+    await until(() => videos.evaluateAll(videos => videos.every(video => !video.inert && video.controls)));
+    await viewer.getByRole('switch', {name: 'Enable reactions on this device'}).click();
+    assert.deepEqual(await videos.evaluateAll(videos => videos.map(video => ({muted: video.muted, volume: video.volume}))), playbackBeforeReactions);
+    assert.equal(await secondVideo.evaluate(video => video === window.retainedDesktop.video && video.srcObject === window.retainedDesktop.stream), true);
+    await secondVideo.click();
+    assert.ok((await viewer.evaluate(() => window.desktopInputEvents)).includes('click'), 'Native input returns when reactions finish');
+    await secondVideo.evaluate(video => video.play());
+    const frameCounts = page => page.locator('.desktop-tile video').evaluateAll(videos => videos.map(video =>
+        ({id: video.closest('.desktop-tile').dataset.itemId, frames: video.getVideoPlaybackQuality().totalVideoFrames})));
+    for (const page of [viewer, senders[0]]) {
+        const tile = page.locator(`[data-item-id="${firstId}"]`);
+        const tileVideo = tile.locator('video');
+        const otherTabs = [viewer, ...senders].filter(other => other !== page);
+        assert.equal(await tileVideo.evaluate(video => {
+            window.fullscreenVideo = video;
+            window.fullscreenStream = video.srcObject;
+            return video.controlsList.contains('nofullscreen');
+        }), true, 'The native video-only fullscreen action is replaced');
+        if (page === viewer) await tile.getByRole('button', {name: /^Fullscreen /}).click();
+        else await tileVideo.dblclick();
+        await until(() => tile.evaluate(node => document.fullscreenElement === node));
+        assert.equal(await tileVideo.evaluate(video => {
+            const bounds = video.getBoundingClientRect();
+            return bounds.width === window.innerWidth && bounds.height === window.innerHeight &&
+                video === window.fullscreenVideo && video.srcObject === window.fullscreenStream && !video.paused;
+        }), true, 'Fullscreen expands the tile without replacing or restarting native playback');
+        // Check ongoing decoding and JavaScript responsiveness in every other tab.
+        for (let sample = 0; sample < 3; sample++) {
+            const before = await Promise.all(otherTabs.map(frameCounts));
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            for (const [index, other] of otherTabs.entries()) {
+                await until(async () => (await frameCounts(other)).every(current =>
+                    current.frames > before[index].find(previous => previous.id === current.id).frames), 5000);
+            }
+        }
+        await tile.getByRole('button', {name: 'Exit fullscreen', exact: true}).click();
+        await until(() => page.evaluate(() => !document.fullscreenElement));
+        assert.equal(await tileVideo.evaluate(video => video === window.fullscreenVideo && video.srcObject === window.fullscreenStream), true);
+        assert.equal(await checkBounds(page), true);
+    }
     await viewer.getByRole('button', {name: 'Toggle fullscreen'}).click();
     await until(() => viewer.evaluate(() => !!document.fullscreenElement));
     assert.equal(await checkBounds(viewer), true);

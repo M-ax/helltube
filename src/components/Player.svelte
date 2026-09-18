@@ -7,6 +7,7 @@
     import DesktopStats from './DesktopStats.svelte';
     import DesktopPlayer from './DesktopPlayer.svelte';
     import {desktopLayout} from '../lib/desktop-layout.js';
+    import {roomNowPlayingTitle} from '../../shared/room-title.js';
     import Reactions from './Reactions.svelte';
     import PointingFingers from './PointingFingers.svelte';
     import {trackReactionPointer} from '../lib/reaction-pointer.js';
@@ -121,6 +122,7 @@
         && !localBuffering && !blocked && !playerError && item?.status !== 'error';
     $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed;
     $: beachBall = reactionsEnabled && connected && reactions.roomId === room?.id && !!reactions.ball;
+    $: reactionInputActive = connected && reactionsEnabled && (fingerArmed || hitmarkerArmed || beachBall);
     $: updateReactionRoom(connected ? room?.id : null);
     $: if (renderer) renderer.setBeachBallState(beachBall ? reactions.ball : null, (Date.now() + clockOffset - reactions.serverTime) / 1000);
     $: receiveReactions(reactions, connected, room?.id, reactionsEnabled);
@@ -750,12 +752,13 @@
                  style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}`}>
                 {#each desktops as desktop (desktop.id)}
                     <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {connected} {volume} {muted}
-                                   {captureMuted} onRetry={onRetryDesktop}/>
+                                   {captureMuted} inputDisabled={reactionInputActive} onRetry={onRetryDesktop}/>
                 {/each}
             </div>
         {:else}
         <!-- svelte-ignore a11y_media_has_caption -->
         <video bind:this={video} use:mediaElement playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
+               inert={reactionInputActive}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
                on:canplay={sync} on:loadeddata={() => hasFrame = true} on:waiting={() => localBuffering = true}
                on:playing={() => { playing = true; localBuffering = false; }}
@@ -919,7 +922,7 @@
     {#if captureMuted}<p class="field-help" role="status">Your player is muted while sharing to prevent audio feedback. Viewers receive your shared audio.</p>{/if}
     <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
         <div class="now-playing-heading">
-            <h2>{desktops.length > 1 ? `${desktops.length} shared desktops` : item?.title || 'A little less scrolling. A little more watching.'}</h2>
+            <h2>{roomNowPlayingTitle(room) || 'A little less scrolling. A little more watching.'}</h2>
             {#if item?.hasOriginalStream}
                 <a class="icon-button bordered"
                    href={`/api/rooms/${encodeURIComponent(room.id)}/items/${encodeURIComponent(item.id)}/original`}

@@ -709,6 +709,15 @@ ul, ol {
     text-overflow: ellipsis;
 }
 
+.room-button-copy > .desktop-title,
+.room-card-info > .desktop-title,
+.current-queue-item strong.desktop-title {
+    display: block;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    -webkit-line-clamp: unset;
+}
+
 .active .room-button-copy strong {
     color: #ffcab0;
 }
@@ -1076,6 +1085,8 @@ ul, ol {
 
 .video-viewport.finger-armed { cursor: none; touch-action: none; user-select: none; }
 .video-viewport.finger-armed .player-controls { cursor: auto; }
+
+.video-viewport video[inert] { pointer-events: none; }
 
 .video-canvas.crt-flames {
     z-index: 1;
