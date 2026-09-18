@@ -7,13 +7,11 @@ export function drawPointingFinger(ctx, finger, width, height, arrival = 1) {
     const dx = finger.x * width - px;
     const dy = finger.y * height - py;
     const length = Math.hypot(dx, dy) * arrival;
-    const size = Math.min(Math.max(17, Math.min(30, width / 30)), length / 1.95);
-    const handLength = size * 1.95;
-    const wrist = Math.sqrt(Math.max(0, length * length - handLength * handLength));
+    const size = Math.max(17, Math.min(30, width / 30));
+    const wrist = length - size * 1.95;
     ctx.save();
     ctx.translate(px, py);
-    // The hand points clockwise across the shaft; aim the wrist so its fingertip still meets the cursor.
-    ctx.rotate(Math.atan2(dy, dx) - Math.atan2(handLength, wrist));
+    ctx.rotate(Math.atan2(dy, dx));
     // Thick outer tube, two nested tubes, and the collars that reveal the telescoping construction.
     for (let i = 0; i < 3; i++) {
         const start = Math.max(0, wrist) * i / 3;
@@ -29,28 +27,31 @@ export function drawPointingFinger(ctx, finger, width, height, arrival = 1) {
             ctx.fillStyle = '#d6cfb8'; ctx.fillRect(end - 3, -r - 1, 1, r * 1.5);
         }
     }
-    ctx.translate(wrist, handLength);
-    ctx.rotate(Math.PI / 2);
+    ctx.translate(length, 0);
     ctx.scale(size, size);
     // The fingertip stays at (0, 0), even when pressed into the glass.
     ctx.scale(1, finger.pressed ? .88 : 1);
-    hand ||= new Path2D('M 0 0 L -.06 -.13 L -.16 -.18 L -1.03 -.18 L -1.08 -.49 L -1.23 -.6 L -1.4 -.57 L -1.47 -.67 L -1.67 -.64 L -1.78 -.49 L -1.94 -.43 L -2.02 -.22 L -1.99 .31 L -1.77 .52 L -1.35 .55 L -1.08 .39 L -.98 .17 L -.16 .17 L -.05 .1 Z');
+    // The index runs along the top of the hand. The other three fingers curl underneath,
+    // with their knuckles stacked down the front of the fist rather than above the index.
+    hand ||= new Path2D('M 0 0 L -.05 -.12 L -.16 -.18 L -1.28 -.18 L -1.55 -.24 L -1.88 -.18 L -2.04 -.05 L -2.06 .3 L -1.98 .57 L -1.74 .83 L -1.46 .98 L -1.02 .98 L -.86 .91 L -.83 .78 L -.9 .7 L -.76 .64 L -.72 .5 L -.8 .42 L -.68 .35 L -.68 .23 L -.8 .14 L -.16 .17 L -.05 .1 Z');
     ctx.fillStyle = '#66503d'; ctx.fill(hand);
     ctx.save();
     ctx.clip(hand);
-    ctx.fillStyle = finger.pressed ? '#dcc69b' : '#eee0bc'; ctx.fillRect(-2.04, -.64, 2.1, 1.09);
-    ctx.fillStyle = '#bca579'; ctx.fillRect(-2.1, .26, 1.14, .27);
-    ctx.fillStyle = '#fff2d2'; ctx.fillRect(-1.9, -.44, .77, .13); ctx.fillRect(-1.02, -.13, .84, .08);
-    ctx.fillStyle = '#d6c49d'; ctx.fillRect(-1.85, -.07, .76, .13);
+    ctx.fillStyle = finger.pressed ? '#dcc69b' : '#eee0bc'; ctx.fillRect(-2.1, -.26, 2.15, 1.3);
+    ctx.fillStyle = '#bca579'; ctx.fillRect(-2.1, .75, 1.3, .27);
+    ctx.fillStyle = '#fff2d2'; ctx.fillRect(-1.84, -.14, .57, .09); ctx.fillRect(-1.22, -.13, 1.04, .08);
+    ctx.fillStyle = '#d6c49d'; ctx.fillRect(-1.95, .24, .19, .37);
     ctx.restore();
     ctx.strokeStyle = '#6e5841'; ctx.lineWidth = .055; ctx.stroke(hand);
     ctx.strokeStyle = '#af956c'; ctx.lineWidth = .055;
     ctx.beginPath();
-    ctx.moveTo(-1.7, -.44); ctx.lineTo(-1.72, -.12);
-    ctx.moveTo(-1.46, -.47); ctx.lineTo(-1.49, -.15);
-    ctx.moveTo(-1.23, -.38); ctx.lineTo(-1.26, -.09);
-    // Thumb curls across the folded fingers.
-    ctx.moveTo(-1.91, .15); ctx.lineTo(-1.59, -.04); ctx.lineTo(-1.25, .03); ctx.lineTo(-1.17, .16);
+    // Horizontal creases separate the three curled fingers beneath the extended index.
+    ctx.moveTo(-1.29, .38); ctx.lineTo(-1.05, .43); ctx.lineTo(-.8, .42);
+    ctx.moveTo(-1.32, .64); ctx.lineTo(-1.13, .7); ctx.lineTo(-.9, .7);
+    ctx.moveTo(-1.42, .84); ctx.lineTo(-1.12, .9);
+    // The thumb folds diagonally across the palm, staying tucked below the index.
+    ctx.moveTo(-1.83, .1); ctx.lineTo(-1.58, .15); ctx.lineTo(-1.24, .34);
+    ctx.lineTo(-1.17, .47); ctx.lineTo(-1.27, .56); ctx.lineTo(-1.42, .53); ctx.lineTo(-1.68, .36);
     ctx.moveTo(-.4, -.08); ctx.lineTo(-.17, -.08);
     ctx.stroke();
     ctx.restore();
