@@ -307,12 +307,54 @@ WantedBy=multi-user.target
 EOF
 }
 
+render_connection_log_socket() {
+  cat <<'EOF'
+[Unit]
+Description=Helltube private connection log socket
+
+[Socket]
+ListenDatagram=/run/helltube-logging/syslog
+SocketMode=0666
+DirectoryMode=0755
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target
+EOF
+}
+
+render_connection_log_service() {
+  cat <<'EOF'
+[Unit]
+Description=Helltube sanitized connection logs
+Requires=helltube-connection-log.socket
+After=helltube-connection-log.socket
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/helltube/connection-log.py
+DynamicUser=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=helltube-connection-log
+Restart=on-failure
+RestartSec=1
+EOF
+}
+
 render_youtube_proxy_service() {
   cat <<'EOF'
 [Unit]
 Description=Helltube YouTube VPN proxy
 BindsTo=helltube-vpn.service
 After=helltube-vpn.service
+Requires=helltube-connection-log.socket
+After=helltube-connection-log.socket
 PartOf=helltube-vpn.service
 
 [Service]
@@ -322,6 +364,7 @@ Group=helltube-proxy
 NetworkNamespacePath=/run/netns/helltube-youtube
 BindReadOnlyPaths=/run/helltube-vpn/resolv.conf:/etc/resolv.conf
 BindReadOnlyPaths=/run/helltube-vpn/nsswitch.conf:/etc/nsswitch.conf
+BindReadOnlyPaths=/run/helltube-logging/syslog:/dev/log
 LoadCredential=proxy-config:/etc/helltube/youtube-proxy.conf
 ExecStart=/usr/bin/tinyproxy -d -c %d/proxy-config
 RuntimeDirectory=helltube-youtube-proxy
@@ -330,7 +373,7 @@ Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 CapabilityBoundingSet=
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
@@ -352,8 +395,8 @@ Allow 169.254.77.1
 ConnectPort 443
 Timeout 120
 MaxClients 32
-LogFile "/dev/null"
-LogLevel Critical
+Syslog On
+LogLevel Connect
 PidFile "/run/helltube-youtube-proxy/tinyproxy.pid"
 DisableViaHeader Yes
 EOF
@@ -401,7 +444,9 @@ install_youtube_proxy_apparmor() (
   trap '[[ -z $temporary ]] || rm -f -- "$temporary"' EXIT
   temporary=$(mktemp "$addon.XXXXXX") || die 'Cannot stage the AppArmor addon.'
   printf '%s\n' '/run/credentials/helltube-youtube-proxy.service/proxy-config r,' \
-    '/run/helltube-youtube-proxy/tinyproxy.pid rw,' > "$temporary" || die 'Cannot write the AppArmor addon.'
+    '/run/helltube-youtube-proxy/tinyproxy.pid rw,' \
+    '/run/helltube-logging/syslog w,' \
+    > "$temporary" || die 'Cannot write the AppArmor addon.'
   chown root:root "$temporary" && chmod 644 "$temporary" || die 'Cannot secure the AppArmor addon.'
   mv -fT -- "$temporary" "$addon" || die 'Cannot install the AppArmor addon.'
   temporary=''
@@ -453,11 +498,28 @@ map \$http_upgrade \$helltube_connection_upgrade {
     '' close;
 }
 
+# Route families avoid recording grants embedded in paths or query strings.
+map \$uri \$helltube_log_route {
+    default other;
+    ~^/api(?:/|\$) api;
+    ~^/ws\$ ws;
+    ~^/direct(?:/|\$) direct;
+    ~^/media(?:/|\$) media;
+    ~^/internal(?:/|\$) internal;
+}
+log_format helltube_connection escape=json
+    '{"timestamp":"\$time_iso8601","event":"http.request","requestId":"\$request_id",'
+    '"connection":"\$connection","route":"\$helltube_log_route","method":"\$request_method",'
+    '"status":\$status,"bytes":\$body_bytes_sent,"duration":"\$request_time",'
+    '"upstreamStatus":"\$upstream_status","upstreamConnect":"\$upstream_connect_time",'
+    '"upstreamHeader":"\$upstream_header_time","upstreamResponse":"\$upstream_response_time",'
+    '"complete":"\$request_completion"}';
+
 server {
     listen 80;
     server_name $hostname;
-    access_log off;
-    error_log /dev/null;
+    access_log /var/log/nginx/helltube-access.log helltube_connection;
+    error_log syslog:server=unix:/run/helltube-logging/syslog,tag=helltube_nginx info;
     return 301 https://$hostname\$uri;
 }
 
@@ -469,8 +531,8 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_session_cache shared:helltube_tls:10m;
     ssl_session_tickets off;
-    access_log off;
-    error_log /dev/null;
+    access_log /var/log/nginx/helltube-access.log helltube_connection;
+    error_log syslog:server=unix:/run/helltube-logging/syslog,tag=helltube_nginx info;
 
     location = /internal { return 404; }
     location ^~ /internal/ { return 404; }
@@ -484,6 +546,7 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Helltube-Request-Id \$request_id;
         proxy_cache off;
         proxy_buffering off;
         proxy_request_buffering off;
@@ -695,6 +758,13 @@ main() {
   "$NODE_BIN" --input-type=module -e 'import "node:sqlite"'
   install -d -o root -g root -m 755 /usr/local/lib/helltube
   install -o root -g root -m 755 "$source_dir/scripts/update-helltube.py" /usr/local/lib/helltube/update-helltube.py
+  install -o root -g root -m 755 "$source_dir/scripts/connection-log.py" /usr/local/lib/helltube/connection-log.py
+  render_connection_log_socket > "$WORK_DIR/helltube-connection-log.socket"
+  render_connection_log_service > "$WORK_DIR/helltube-connection-log.service"
+  install -o root -g root -m 644 "$WORK_DIR/helltube-connection-log.socket" /etc/systemd/system/helltube-connection-log.socket
+  install -o root -g root -m 644 "$WORK_DIR/helltube-connection-log.service" /etc/systemd/system/helltube-connection-log.service
+  systemctl daemon-reload
+  systemctl enable --now helltube-connection-log.socket
   [[ ! -L /etc/helltube/update.json ]] || die 'Refusing a symlinked updater config.'
   render_update_config "$NODE_BIN" "$NPM_BIN" > "$WORK_DIR/update.json"
   install -o root -g root -m 600 "$WORK_DIR/update.json" /etc/helltube/update.json

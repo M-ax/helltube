@@ -9,6 +9,7 @@ import { parseStartTime, youtubeTimeArgument } from '../shared/youtube-time.js';
 import { youtubeNetwork } from './youtube-network.js';
 import { SponsorBlock, normalizeSponsors } from './sponsorblock.js';
 import { hlsCopyQuality } from './hls-copy.js';
+import { logUpstreamFailure } from './upstream-logging.js';
 
 function videoId(url) {
   return url.hostname === 'youtu.be' ? url.pathname.slice(1)
@@ -31,8 +32,9 @@ export function youtubeURL(value) {
   throw httpError(400, 'The URL must identify a YouTube video or playlist.');
 }
 
-export function runJSON(command, args, { signal, timeout = 90000, redactErrors = false, env, provider = 'YouTube', failureMessage } = {}) {
+export function runJSON(command, args, { signal, timeout = 90000, redactErrors = false, env, provider = 'YouTube', failureMessage, diagnostics } = {}) {
   return new Promise((resolve, reject) => {
+    const started = performance.now();
     const child = spawn(command, args, { windowsHide: true, signal, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     let errors = '';
@@ -46,11 +48,22 @@ export function runJSON(command, args, { signal, timeout = 90000, redactErrors =
     child.on('error', error => { failure ||= error; });
     child.on('close', code => {
       clearTimeout(timer);
+      const logFailure = (details, extra = {}) => {
+        if (diagnostics) logUpstreamFailure('extractor.failed', details, {
+          ...diagnostics, exitCode: code, durationMs: Math.round(performance.now() - started), ...extra,
+        });
+      };
+      if (failure?.name !== 'AbortError' && (failure || code !== 0)) {
+        logFailure(failure ? `${failure.code || ''} ${failure.message}` : errors);
+      }
       if (failure) return reject(failure);
       if (code !== 0) return reject(new Error(failureMessage || (redactErrors
         ? 'YouTube extraction failed with configured cookies. Refresh the cookies and update yt-dlp; YouTube may still require bot verification. Raw diagnostics are hidden to protect credentials.'
         : errors.trim() || `yt-dlp exited with code ${code}.`)));
-      try { resolve(JSON.parse(output)); } catch { reject(new Error('yt-dlp returned invalid metadata.')); }
+      try { resolve(JSON.parse(output)); } catch {
+        logFailure('', {invalidResponse: true});
+        reject(new Error('yt-dlp returned invalid metadata.'));
+      }
     });
   });
 }
@@ -86,6 +99,8 @@ export class YouTube {
       }
       return await runJSON(this.config.ytdlp, [...this.baseArgs, ...proxyArgs, ...cookieArgs, ...args], {
         signal: controller.signal, redactErrors: !!this.config.ytdlpCookiesFile, env: network.env,
+        diagnostics: {provider: 'youtube', stage: args.includes('--flat-playlist') ? 'metadata' : 'playback',
+          cookiesConfigured: !!this.config.ytdlpCookiesFile, proxyConfigured: !!network.proxy},
       });
     } finally {
       this.pending.delete(controller);

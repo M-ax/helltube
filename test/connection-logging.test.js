@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {WebSocket} from 'ws';
 import {get} from 'svelte/store';
 import {createRealtime} from '../src/lib/realtime.js';
-import {disconnectReport} from '../server/connection-logging.js';
+import {disconnectReport, proxyRequestId} from '../server/connection-logging.js';
 import {start, until} from './helpers.js';
 
 function capture(t) {
@@ -116,7 +116,9 @@ test('server logs peer closes, heartbeat timeouts, transport errors, backpressur
 
   await connect();
   serverSockets.at(-1).alive = false;
-  intervals.find(interval => interval.ms === 15000).callback();
+  // Account-request SSE and WebSockets both have 15-second heartbeats. Advance
+  // all matching timers, as the clock would, rather than relying on their order.
+  for (const interval of intervals.filter(interval => interval.ms === 15000)) interval.callback();
   await until(() => logs.some(entry => entry.event === 'ws.disconnected' && entry.cause === 'heartbeat-timeout'));
 
   await connect();
@@ -146,10 +148,17 @@ test('server logs peer closes, heartbeat timeouts, transport errors, backpressur
 test('rejected unauthenticated handshakes log a cause without headers or request URLs', async t => {
   const logs = capture(t);
   const {url} = await start(t, {maxTranscoders: 0});
-  const ws = new WebSocket(url.replace('http', 'ws') + '/ws', {headers: {Origin: url, Cookie: 'private-cookie'}});
+  const requestId = '1234567890abcdef1234567890abcdef';
+  const ws = new WebSocket(url.replace('http', 'ws') + '/ws', {headers: {
+    Origin: url, Cookie: 'private-cookie', 'X-Helltube-Request-Id': requestId,
+  }});
   await new Promise(resolve => ws.once('error', resolve));
   const entry = logs.find(entry => entry.event === 'ws.upgrade-rejected');
   assert.equal(entry.cause, 'unauthenticated');
   assert.equal(entry.userId, null);
+  assert.equal(entry.proxyRequestId, requestId);
+  for (const value of ['secret-cookie', 'https://host/?token=secret', [requestId], requestId + '\n']) {
+    assert.equal(proxyRequestId({headers: {'x-helltube-request-id': value}}), null);
+  }
   assert.equal(JSON.stringify(logs).includes('private-cookie'), false);
 });

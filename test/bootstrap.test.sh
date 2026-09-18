@@ -55,10 +55,18 @@ for directive in 'server_name metal.example.net;' \
   'proxy_set_header Upgrade $http_upgrade;' 'proxy_set_header Connection $helltube_connection_upgrade;' \
   'proxy_set_header Host $host;' 'proxy_cache off;' 'proxy_buffering off;' \
   'proxy_set_header X-Forwarded-For $remote_addr;' 'proxy_set_header X-Real-IP $remote_addr;' \
-  'proxy_request_buffering off;' 'access_log off;' 'error_log /dev/null;' 'client_max_body_size 2m;'; do
+  'proxy_request_buffering off;' 'access_log /var/log/nginx/helltube-access.log helltube_connection;' \
+  'error_log syslog:server=unix:/run/helltube-logging/syslog,tag=helltube_nginx info;' \
+  'proxy_set_header X-Helltube-Request-Id $request_id;' \
+  'log_format helltube_connection escape=json' '"upstreamStatus":"$upstream_status"' 'client_max_body_size 2m;'; do
   assert_contains "$nginx" "$directive"
 done
 [[ $nginx != *"\$request_uri"* ]] || die 'Query-bearing request URI could leak into logs or redirects.'
+log_format=${nginx#*log_format helltube_connection}
+log_format=${log_format%%;*}
+for private in '$uri' '$args' '$http_authorization' '$http_cookie' '$http_referer' '$request"'; do
+  [[ $log_format != *"$private"* ]] || die "Private field in access logs: $private"
+done
 if (render_nginx 'example.net; include evil;') >/dev/null 2>&1; then die 'Renderer accepted config injection.'; fi
 service=$(render_service)
 for directive in 'User=helltube' 'Group=helltube' 'ProtectSystem=strict' 'ProtectHome=true' \
@@ -303,6 +311,8 @@ for directive in 'User=helltube-proxy' 'NetworkNamespacePath=/run/netns/helltube
   'BindsTo=helltube-vpn.service' 'After=helltube-vpn.service' 'NoNewPrivileges=true' \
   'BindReadOnlyPaths=/run/helltube-vpn/resolv.conf:/etc/resolv.conf' \
   'BindReadOnlyPaths=/run/helltube-vpn/nsswitch.conf:/etc/nsswitch.conf' \
+  'BindReadOnlyPaths=/run/helltube-logging/syslog:/dev/log' 'Requires=helltube-connection-log.socket' \
+  'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX' \
   'LoadCredential=proxy-config:/etc/helltube/youtube-proxy.conf' \
   'RuntimeDirectory=helltube-youtube-proxy' 'RuntimeDirectoryMode=0700' \
   'CapabilityBoundingSet=' 'ProtectSystem=strict' 'ProtectHome=true' \
@@ -312,7 +322,7 @@ for directive in 'User=helltube-proxy' 'NetworkNamespacePath=/run/netns/helltube
 done
 proxy_config=$(render_youtube_proxy_config)
 for directive in 'Listen 169.254.77.2' 'Port 8888' 'Allow 169.254.77.1' 'ConnectPort 443' \
-  'LogFile "/dev/null"' 'PidFile "/run/helltube-youtube-proxy/tinyproxy.pid"'; do
+  'Syslog On' 'LogLevel Connect' 'PidFile "/run/helltube-youtube-proxy/tinyproxy.pid"'; do
   assert_contains "$proxy_config" "$directive"
 done
 printf 'PASS: VPN service isolation, explicit proxy and no backend privileges\n'
@@ -329,7 +339,7 @@ apparmor_cases() (
   local_file=$rootfs/etc/apparmor.d/local/tinyproxy
   addon=$rootfs/etc/apparmor.d/local/helltube-youtube-proxy
   expected_include='include if exists <local/helltube-youtube-proxy>'
-  expected_rules=$'/run/credentials/helltube-youtube-proxy.service/proxy-config r,\n/run/helltube-youtube-proxy/tinyproxy.pid rw,'
+  expected_rules=$'/run/credentials/helltube-youtube-proxy.service/proxy-config r,\n/run/helltube-youtube-proxy/tinyproxy.pid rw,\n/run/helltube-logging/syslog w,'
   stat() {
     details=$(command stat "$@") || return
     if [[ $EUID != 0 && $1 == -c && $2 == '%u:%a:%h' ]]; then
@@ -380,7 +390,7 @@ apparmor_cases() (
   cp "$profile" "$workspace/original-profile"
   install_youtube_proxy_apparmor "$rootfs"
   printf '%s\n' "$expected_rules" > "$workspace/expected-addon"
-  cmp -s "$workspace/expected-addon" "$addon" || die 'Addon must contain exactly the two literal rules.'
+  cmp -s "$workspace/expected-addon" "$addon" || die 'Addon must contain exactly the scoped credential, PID and logging rules.'
   [[ $(< "$local_file") == "$expected_include" ]] || die 'Missing local file was not created with the include.'
   [[ $(command stat -c %a "$addon") == 644 && $(command stat -c %a "$local_file") == 644 ]] || die 'Wrong generated AppArmor file modes.'
   if [[ $EUID == 0 ]]; then

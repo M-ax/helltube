@@ -4,6 +4,11 @@ import {httpError} from './config.js';
 const id = value => typeof value === 'string' && /^[\w.-]{1,80}$/.test(value);
 const duration = value => value === null || (Number.isSafeInteger(value) && value >= 0);
 
+export function proxyRequestId(req) {
+  const value = req.headers['x-helltube-request-id'];
+  return typeof value === 'string' && /^[a-f0-9]{32}$/.test(value) ? value : null;
+}
+
 export function disconnectReport(value) {
   if (!value || !id(value.id) || !DISCONNECT_CAUSES.has(value.cause) ||
     !Number.isSafeInteger(value.at) || value.at < 0 ||
@@ -32,6 +37,7 @@ export function logConnection(event, ws, details = {}) {
   console.log(JSON.stringify({
     timestamp: new Date().toISOString(), event,
     connectionId: ws.id, userId: ws.userId, username: diagnosticText(ws.username, 80),
+    proxyRequestId: ws.proxyRequestId || null,
     roomId: ws.roomId || ws.lastRoomId || null,
     connectionAgeMs: Math.max(0, Math.round(performance.now() - ws.connectedAt)),
     ...details,

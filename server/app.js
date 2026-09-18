@@ -28,7 +28,7 @@ import { DesktopShares } from './desktop.js';
 import { desktopRtcConfig } from './desktop-config.js';
 import { desktopRelayOptions } from './desktop-relay.js';
 import { encryptedMediaFile, publicMediaFile, mediaContentType } from '../shared/media-files.js';
-import { disconnectReport, logConnection } from './connection-logging.js';
+import { disconnectReport, logConnection, proxyRequestId } from './connection-logging.js';
 import { diagnosticText } from '../shared/connection-diagnostics.js';
 
 export function validOrigin(origin, host, config) {
@@ -444,7 +444,7 @@ export async function createApp(overrides = {}) {
       : [...wss.clients].filter(ws => ws.userId === auth.user.id).length >= 8 ? 'user-connection-limit' : null;
     if (rejected) {
       logConnection('ws.upgrade-rejected', {id: null, userId: auth?.user.id || null,
-        username: auth?.user.username, connectedAt: performance.now()}, {cause: rejected});
+        username: auth?.user.username, connectedAt: performance.now(), proxyRequestId: proxyRequestId(req)}, {cause: rejected});
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
@@ -454,6 +454,7 @@ export async function createApp(overrides = {}) {
     ws.id = randomUUID();
     ws.userId = auth.user.id;
     ws.username = auth.user.username;
+    ws.proxyRequestId = proxyRequestId(req);
     ws.cookie = req.headers.cookie;
     ws.alive = true;
     ws.connectedAt = ws.lastPongAt = ws.lastMessageAt = performance.now();

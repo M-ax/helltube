@@ -8,6 +8,7 @@ import { sponsorPosition } from '../shared/sponsorblock.js';
 import { createProgressReader } from './media-progress.js';
 import { EncryptedFmp4 } from './encrypted-fmp4.js';
 import { encryptedMediaFile } from '../shared/media-files.js';
+import { logUpstreamFailure } from './upstream-logging.js';
 
 export function playlistProgress(contents, baseTime = 0) {
   const durations = [...contents.matchAll(/^#EXTINF:([\d.]+)/gm)].map(m => Number(m[1]));
@@ -373,6 +374,7 @@ export class Media {
   }
 
   async convert(job, args, network, reportProgress = false) {
+    const started = performance.now();
     await new Promise((resolve, reject) => {
       const command = /[\\/]/.test(this.config.ffmpeg) ? path.resolve(this.config.ffmpeg) : this.config.ffmpeg;
       job.child = spawn(command, args, { windowsHide: true, env: network.env,
@@ -386,7 +388,10 @@ export class Media {
       job.child.on('close', code => {
         if (job.cancelled) return resolve();
         if (code !== 0) {
-          console.error('FFmpeg conversion:', job.errors.replace(/https?:\/\/\S+/g, '[source]'));
+          logUpstreamFailure('media.conversion-failed', job.errors, {
+            jobId: job.id, itemId: job.item?.id, provider: job.item?.kind,
+            exitCode: code, durationMs: Math.round(performance.now() - started), proxyConfigured: !!network.proxy,
+          });
           return reject(new Error('Video conversion failed. Check the source format and server FFmpeg logs; skip to continue.'));
         }
         resolve();

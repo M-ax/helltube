@@ -34,6 +34,27 @@ Production browsers check the frontend's uncached `version.json` every 30 second
 
 Open **http://127.0.0.1:3000**. To listen on the LAN, set `$env:HOST = '0.0.0.0'` before starting. Use a TLS reverse proxy for Internet access and forward WebSocket upgrades. Set `SECURE_COOKIES=true` and `ALLOWED_ORIGINS` to your exact public origin. Do not expose this application using its seeded password.
 
+## Connection logs on metal
+
+Managed Ubuntu installs write JSON request records to `/var/log/nginx/helltube-access.log`, covered by the nginx logrotate policy. Records include route family (`api`, `ws`, `direct`, `media`, `internal`, or `other`), status, bytes, duration, upstream status/connect/header/response timings, completion, connection number and request ID. Paths, query strings, cookies, authorization, referrers and bodies are omitted. Nginx overwrites `X-Helltube-Request-Id`; backend WebSocket events retain that value as `proxyRequestId` to correlate both ends of the proxy connection. WebSocket access records appear when the connection closes.
+
+Nginx errors and Tinyproxy CONNECT events go through a private [Unix syslog socket](https://nginx.org/en/docs/syslog.html) to `helltube-connection-log.service`. The collector emits recognized failure categories, severity and numeric correlation fields. Raw messages never reach disk or the journal; unknown messages appear as `unclassified`. Tinyproxy's `/dev/log` is bound to this socket inside its service, with AppArmor and VPN isolation retained. The socket stays available during collector restarts. Access records use nginx's [JSON escaping](https://nginx.org/en/docs/http/ngx_http_log_module.html).
+
+The backend also logs `extractor.failed` and `media.conversion-failed` with provider, phase or media job, HTTP status, failure category, exit code and duration. Cookie/proxy configuration is recorded only as booleans. Raw extractor/FFmpeg diagnostics remain private, including for unknown failures; a generic extraction error does not prove expired cookies.
+
+```bash
+sudo tail -f /var/log/nginx/helltube-access.log
+sudo journalctl -u helltube-connection-log.service -f -o cat
+sudo journalctl -u helltube.service -f -o cat
+# Offline logging/configuration checks, from a trusted checkout on Linux:
+python3 test/connection-log.test.py
+python3 test/connection-log.integration.py
+bash test/bootstrap.test.sh
+bash test/bootstrap-units.test.sh
+```
+
+Automatic app updates deliver the backend diagnostics but do not replace nginx or systemd configuration. Existing installations also need the updated bootstrap renderers and `scripts/connection-log.py` installed; preserve local proxy/AppArmor drop-ins when applying them. The bootstrap enables `helltube-connection-log.socket` before starting the proxy.
+
 ## Desktop sharing
 
 Open a room, choose **Share desktop**, then **Choose screen to share**. The browser picker lets you select an entire display, a window, or a tab. Audio is optional: enable **Share audio** to include sound, or share video only. The sharing status shows whether audio is included. Chrome/Edge tab audio is an alternative when your browser or operating system cannot capture window/display audio; window sharing can include system-wide sound. No extension is required. Sharing requires HTTPS (or localhost), browser screen-capture permission, and WebRTC. Desktop sharing works without FFmpeg or MediaRecorder.
@@ -285,7 +306,7 @@ curl --fail --max-time 30 --noproxy '' --proxy http://169.254.77.2:8888 https://
 
 Confirm that IP matches your VPN provider, then add/play a video through your normal site. To verify the kill switch during a maintenance window, bring `ht-wg0` down inside `helltube-youtube` and repeat the explicit-proxy curl: it must fail, while `/api/health` and uploads remain reachable. Bring the interface back up afterward. Do not use `wg showconf` or publish profiles/dumps containing private keys.
 
-**Tinyproxy exits `70` opening its systemd credential:** Ubuntu's `/etc/apparmor.d/tinyproxy` can deny Helltube's credential/PID paths. Rerun the updated trusted bootstrap with VPN enabled. It installs `/etc/apparmor.d/local/helltube-youtube-proxy` with only credential-read and PID-read/write rules, preserves custom `local/tinyproxy` content/permissions, and reloads the profile before proxy startup. The sandbox, private paths and suppressed request logs remain unchanged. Disabled/unavailable kernel AppArmor interfaces skip reload; an enabled interface rejecting policy loading aborts with an LXC privilege diagnostic—resolve this on the host without disabling AppArmor. No-profile/no-VPN installs do not modify shared policy. Automatic app updates do not install this infrastructure fix.
+**Tinyproxy exits `70` opening its systemd credential:** Ubuntu's `/etc/apparmor.d/tinyproxy` can deny Helltube's credential/PID paths. Rerun the updated trusted bootstrap with VPN enabled. It installs `/etc/apparmor.d/local/helltube-youtube-proxy` with scoped credential-read, PID-read/write and private logging-socket rules, preserves custom `local/tinyproxy` content/permissions, and reloads the profile before proxy startup. The sandbox and private paths remain enabled. Disabled/unavailable kernel AppArmor interfaces skip reload; an enabled interface rejecting policy loading aborts with an LXC privilege diagnostic—resolve this on the host without disabling AppArmor. No-profile/no-VPN installs do not modify shared policy. Automatic app updates do not install this infrastructure fix.
 
 **CONNECT returns 200, then TLS fails with `Permission denied`:** Inspect the **Proxmox host's** kernel journal for Tinyproxy `operation="file_perm" class="net" requested="receive"` denials. A working WireGuard handshake does not rule out this failure. AppArmor's ABI 5 fine-grained socket mediation has had [kernel bugs affecting socket reads/writes](https://bugs.launchpad.net/bugs/2141298); adding network allowances or disabling the VPN firewall is not the fix. This behavior was reproduced with Ubuntu AppArmor 5.0.2 on `6.17.2-1-pve`: an enforcing ABI 4.0 profile with the same coarse network/filesystem rules restored proxy traffic. Confirm that diagnosis on the affected host rather than assuming every TLS failure has this cause.
 

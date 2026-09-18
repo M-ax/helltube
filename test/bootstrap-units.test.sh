@@ -19,7 +19,10 @@ printf 'PASS: systemd parses the rendered update service, timer and path and the
 proxy_binary=${TINYPROXY_TEST_BIN:-/usr/bin/tinyproxy}
 [[ -x $proxy_binary && $proxy_binary == /* && $proxy_binary != *'|'* ]] || die 'Set TINYPROXY_TEST_BIN to an absolute Tinyproxy executable path.'
 render_vpn_service > "$workspace/helltube-vpn.service"
+render_connection_log_socket > "$workspace/helltube-connection-log.socket"
+render_connection_log_service > "$workspace/helltube-connection-log.service"
 render_youtube_proxy_service | sed "s|ExecStart=/usr/bin/tinyproxy |ExecStart=$proxy_binary |" > "$workspace/helltube-youtube-proxy.service"
 chmod 644 "$workspace/helltube-vpn.service" "$workspace/helltube-youtube-proxy.service"
-systemd-analyze verify --man=no "$workspace/helltube-vpn.service" "$workspace/helltube-youtube-proxy.service"
+systemd-analyze verify --man=no "$workspace/helltube-vpn.service" "$workspace/helltube-youtube-proxy.service" \
+  "$workspace/helltube-connection-log.socket" "$workspace/helltube-connection-log.service"
 printf 'PASS: systemd parses the rendered VPN/proxy units and their dependencies\n'
