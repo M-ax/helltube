@@ -1,6 +1,5 @@
 <script>
     import {onMount, onDestroy, tick} from 'svelte';
-    import Hls from 'hls.js';
     import Icon from './Icon.svelte';
     import CrtScreen from './CrtScreen.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
@@ -12,7 +11,7 @@
     import MetalPipeReaction from './MetalPipeReaction.svelte';
     import FlashbangReaction from './FlashbangReaction.svelte';
     import BidenReaction from './BidenReaction.svelte';
-    import {BIDEN_LIFETIME_MS} from '../lib/biden.js';
+    import {BIDEN_LIFETIME_MS, bidenSound} from '../lib/biden.js';
     import {PIPE_LIFETIME_MS} from '../lib/metal-pipe.js';
     import {FLASH_LIFETIME_MS} from '../lib/flashbang.js';
     import {createReactionAudio} from '../lib/reaction-audio.js';
@@ -362,11 +361,16 @@
         const generation = sourceGeneration;
         sourceController = new AbortController();
         let access;
+        let Hls;
         try {
-            access = accessOverride || await delivery.resolveMediaAccess(url, {signal: sourceController.signal});
+            // Load the decoder only for HLS playback, alongside the access request.
+            [access, {default: Hls}] = await Promise.all([
+                accessOverride || delivery.resolveMediaAccess(url, {signal: sourceController.signal}),
+                import('hls.js'),
+            ]);
         } catch (error) {
             if (generation !== sourceGeneration) return;
-            playerError = error.message || 'The video access URL could not be loaded. Please retry playback.';
+            playerError = error.message || 'The video player could not be loaded. Please retry playback.';
             localBuffering = false;
             return;
         }
@@ -604,6 +608,7 @@
                 : event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
+            prepareReactionSounds(event.kind, event.id);
             if (event.kind === 'fingertap') {
                 // Pointer snapshots drive the whole-prop strike and its sound on the contact frame.
                 continue;
@@ -630,6 +635,7 @@
     async function react(kind) {
         if (!connected || !reactionsEnabled) return;
         reactionAudio?.unlock();
+        prepareReactionSounds(kind);
         if (kind === 'finger') {
             fingerArmed = !fingerArmed;
             hitmarkerArmed = false;
@@ -644,6 +650,13 @@
         } else {
             onCommand({type: 'reaction', kind, x: 0.2 + Math.random() * 0.6, y: 0.65});
         }
+    }
+
+    function prepareReactionSounds(kind, id) {
+        if (soundMuted || muted || captureMuted || volume <= 0) return;
+        const sounds = kind === 'flashbang' ? ['flashbangBounce', 'flashbangRing']
+            : kind === 'biden' ? (id ? [bidenSound(id)] : []) : [kind];
+        for (const sound of sounds) void reactionAudio?.prepare(sound);
     }
 
     function pipeImpact() {

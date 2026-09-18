@@ -201,7 +201,7 @@ test('Biden wanders in sync with local audio controls, reduced motion and no sta
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
         await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
-        await until(async () => await page.evaluate(() => window.decodedSounds === 6));
+        assert.equal(await page.evaluate(() => window.decodedSounds), 0, 'Room interaction does not preload reaction audio.');
     }
     const joe = page => page.locator('[data-reaction="biden"]');
     const button = page => page.getByRole('button', {name: 'Joe wander', exact: true});
@@ -324,7 +324,7 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
         await join(page);
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
-        await until(async () => await page.evaluate(() => window.decodedSounds === 6));
+        assert.equal(await page.evaluate(() => window.decodedSounds), 0, 'Room interaction does not preload reaction audio.');
     }
     const geometry = await a.locator('.reactions-panel').evaluate(panel => ({
         outside: !panel.closest('.player-shell'),
@@ -473,7 +473,7 @@ test('flashbang bounces and rings in sync, fades over the player, and obeys loca
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
         await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
-        await until(async () => await page.evaluate(() => window.decodedSounds === 6));
+        assert.equal(await page.evaluate(() => window.decodedSounds), 0, 'Room interaction does not preload reaction audio.');
     }
     const throwFlash = a.getByRole('button', {name: 'Flashbang', exact: true});
     const flash = page => page.locator('[data-reaction="flashbang"]');

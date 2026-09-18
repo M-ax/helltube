@@ -9,12 +9,15 @@ export function createReactionAudio() {
         flashbangRing: {url: '/sounds/csgo-flashbang-ring.mp3', gain: .5},
         bidenThing: {url: '/sounds/biden-you-know-the-thing.mp3', gain: .8},
         bidenWord: {url: '/sounds/biden-one-word.mp3', gain: .8},
+        fingertap: {gain: .8},
         fingerstatic: {gain: .4},
     };
     let destroyed = false;
     const sources = new Set();
     const slides = new Map();
     let slideBuffer;
+    let generation = 0;
+    const controller = new AbortController();
 
     function unlock() {
         if (destroyed) return;
@@ -22,21 +25,25 @@ export function createReactionAudio() {
             const AudioContext = window.AudioContext || window.webkitAudioContext;
             if (!AudioContext) return;
             context ||= new AudioContext();
-            sounds.fingertap ||= {buffer: createFingerBuffer(context), gain: .8};
-            slideBuffer ||= createFingerBuffer(context, true);
             if (context.state === 'suspended') void context.resume().catch(() => {});
-            for (const sound of Object.values(sounds)) {
-                if (!sound.url) continue;
-                sound.loading ||= fetch(sound.url).then(response => {
-                    if (!response.ok) throw new Error('Reaction sound unavailable');
-                    return response.arrayBuffer();
-                }).then(bytes => context.decodeAudioData(bytes)).then(decoded => { sound.buffer = decoded; })
-                    .catch(() => { sound.loading = null; });
-            }
         } catch { /* A blocked audio device must never interrupt the player. */ }
     }
 
+    function prepare(kind) {
+        const sound = sounds[kind];
+        if (destroyed || !context || !sound?.url || sound.buffer) return Promise.resolve();
+        // Unlocking audio is cheap; downloading and decoding waits for this reaction.
+        sound.loading ||= fetch(sound.url, {signal: controller.signal}).then(response => {
+            if (!response.ok) throw new Error('Reaction sound unavailable');
+            return response.arrayBuffer();
+        }).then(bytes => destroyed ? null : context.decodeAudioData(bytes)).then(decoded => {
+            if (!destroyed) sound.buffer = decoded;
+        }).catch(() => { sound.loading = null; });
+        return sound.loading;
+    }
+
     function stop() {
+        generation++;
         for (const source of sources) source.stop();
         sources.clear();
         slides.clear();
@@ -44,6 +51,7 @@ export function createReactionAudio() {
 
     return {
         unlock,
+        prepare,
         stop,
         slide(id, volume, speed) {
             let slide = slides.get(id);
@@ -57,7 +65,8 @@ export function createReactionAudio() {
                 return;
             }
             if (!slide) {
-                if (!slideBuffer || sources.size >= 8) return;
+                if (sources.size >= 8) return;
+                slideBuffer ||= createFingerBuffer(context, true);
                 const source = context.createBufferSource();
                 const gain = context.createGain();
                 source.buffer = slideBuffer;
@@ -77,20 +86,34 @@ export function createReactionAudio() {
         play(volume, kind = 'hitmarker', options = {}) {
             const sound = sounds[kind];
             if (destroyed || !sound || context?.state !== 'running' || volume <= 0 || sources.size >= 8) return;
-            const buffer = kind === 'fingerstatic' ? createFingerStaticBuffer(context, options.seed, options.clusters) : sound.buffer;
-            if (!buffer) return;
-            const source = context.createBufferSource();
-            const gain = context.createGain();
-            gain.gain.value = Math.min(1, volume) * sound.gain;
-            source.buffer = buffer;
-            source.connect(gain).connect(context.destination);
-            sources.add(source);
-            source.onended = () => { sources.delete(source); source.disconnect(); gain.disconnect(); };
-            source.start();
-            return () => { if (sources.has(source)) source.stop(); };
+            let source;
+            let cancelled = false;
+            const started = Date.now();
+            const playbackGeneration = generation;
+            const start = () => {
+                if (cancelled || destroyed || playbackGeneration !== generation || globalThis.document?.hidden
+                    || context.state !== 'running' || sources.size >= 8 || Date.now() - started > 150) return;
+                if (kind === 'fingertap') sound.buffer ||= createFingerBuffer(context);
+                const buffer = kind === 'fingerstatic'
+                    ? createFingerStaticBuffer(context, options.seed, options.clusters) : sound.buffer;
+                if (!buffer) return;
+                source = context.createBufferSource();
+                const gain = context.createGain();
+                gain.gain.value = Math.min(1, volume) * sound.gain;
+                source.buffer = buffer;
+                source.connect(gain).connect(context.destination);
+                sources.add(source);
+                source.onended = () => { sources.delete(source); source.disconnect(); gain.disconnect(); };
+                source.start();
+            };
+            if (sound.url && !sound.buffer) void prepare(kind).then(start);
+            else start();
+            // Callers can cancel even while the first sound is still loading.
+            return () => { cancelled = true; if (sources.has(source)) source.stop(); };
         },
         destroy() {
             destroyed = true;
+            controller.abort();
             stop();
             void context?.close().catch(() => {});
         },

@@ -62,7 +62,8 @@ done
 if (render_nginx 'example.net; include evil;') >/dev/null 2>&1; then die 'Renderer accepted config injection.'; fi
 service=$(render_service)
 for directive in 'User=helltube' 'Group=helltube' 'ProtectSystem=strict' 'ProtectHome=true' \
-  'NoNewPrivileges=true' 'ReadWritePaths=/var/lib/helltube' 'EnvironmentFile=/etc/helltube/helltube.env'; do
+  'NoNewPrivileges=true' 'ReadWritePaths=/var/lib/helltube' 'EnvironmentFile=/etc/helltube/helltube.env' \
+  'StandardOutput=journal' 'StandardError=journal' 'SyslogIdentifier=helltube'; do
   assert_contains "$service" "$directive"
 done
 printf 'PASS: nginx and service security/streaming configuration\n'

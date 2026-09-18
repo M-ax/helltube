@@ -529,6 +529,9 @@ EOF
   fi
   cat <<'EOF'
 ExecStart=/usr/local/bin/node /opt/helltube/app/server/main.js
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=helltube
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=60

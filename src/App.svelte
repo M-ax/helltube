@@ -3,9 +3,7 @@
     import Icon from './components/Icon.svelte';
     import Login from './components/Login.svelte';
     import Modal from './components/Modal.svelte';
-    import Account from './components/Account.svelte';
-    import Admin from './components/Admin.svelte';
-    import Player from './components/Player.svelte';
+    import Lazy from './components/Lazy.svelte';
     import Queue from './components/Queue.svelte';
     import Composer from './components/Composer.svelte';
     import Uploads from './components/Uploads.svelte';
@@ -505,7 +503,8 @@
                 <div class="work-grid">
                     <section class="stage" aria-label="Watch together">
                         {#key preferenceKey}
-                            <Player username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
+                            <Lazy load={() => import('./components/Player.svelte')} label="player"
+                                    username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
                                     overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
                                     captureMuted={$desktopState.hasAudio}
                                     desktopPlayback={$desktopPlayback} onRetryDesktop={desktop.retryView}
@@ -540,9 +539,11 @@
     </div>
 
     {#if modal === 'account'}
-        <Account {user} onClose={() => modal = null} onUpdate={updateUser}/>
+        <Lazy load={() => import('./components/Account.svelte')} label="account settings" dialog
+              {user} onClose={() => modal = null} onUpdate={updateUser}/>
     {:else if modal === 'admin' && user.role === 'admin'}
-        <Admin {user} onClose={() => modal = null} onUpdate={updateUser}/>
+        <Lazy load={() => import('./components/Admin.svelte')} label="account administration" dialog
+              {user} onClose={() => modal = null} onUpdate={updateUser}/>
     {:else if modal === 'room'}
         <Modal title={editingRoom ? `Manage ${editingRoom.name}` : 'Make room for a good night.'}
                subtitle="Give your gathering a name. Everyone with an account can join." onClose={() => { if (!roomBusy) modal = null; }}>

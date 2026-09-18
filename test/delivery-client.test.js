@@ -201,9 +201,10 @@ const playerAst = parse(playerSource);
 const sourceLifecycle = playerAst.instance.content.body.filter(node => node.type === 'VariableDeclaration' ||
   (node.type === 'FunctionDeclaration' && ['cleanupSource', 'attach', 'retryPlayback', 'switchToMetal',
     'reportBufferHealth', 'nativePlaybackError', 'useStandardQuality'].includes(node.id.name)))
-  .map(node => playerSource.slice(node.start, node.end)).join('\n');
+  .map(node => playerSource.slice(node.start, node.end)).join('\n')
+  .replace("import('hls.js')", 'loadHls()');
 
-function playerHarness(resolveMediaUrl, native = false) {
+function playerHarness(resolveMediaUrl, native = false, loadHls = Hls => Promise.resolve({default: Hls})) {
   const instances = [];
   const previews = [];
   class Hls {
@@ -226,7 +227,7 @@ function playerHarness(resolveMediaUrl, native = false) {
     previews.push(preview);
     return preview;
   };
-  const create = new Function('delivery', 'Hls', 'targetPosition', 'createSeekPreview', 'isSameOriginUrl',
+  const create = new Function('delivery', 'loadHls', 'targetPosition', 'createSeekPreview', 'isSameOriginUrl',
     'room', 'clockOffset', 'element', 'createBufferHealth', 'isProxyLoadFailure', 'qualityReady', `${sourceLifecycle}
     video = element;
     let connected = true;
@@ -239,10 +240,41 @@ function playerHarness(resolveMediaUrl, native = false) {
   return { ...create({ resolveMediaAccess: async (...args) => {
     const access = await resolveMediaUrl(...args);
     return typeof access === 'string' ? {url: access, fallbackUrl: null, route: 'metal'} : access;
-  } }, Hls, targetPosition, createSeekPreview,
+  } }, () => loadHls(Hls), targetPosition, createSeekPreview,
     value => isSameOriginUrl(value, appOrigin), room, 0, video, createBufferHealth, isProxyLoadFailure, qualityReady),
     instances, previews, video, room };
 }
+
+test('HLS loads only for a stream, reports chunk failures, and discards imports after leaving', async () => {
+  let loads = 0;
+  let pending;
+  const player = playerHarness(async () => directMediaUrl, false, Hls => {
+    loads++;
+    pending = Promise.withResolvers();
+    return pending.promise.then(() => ({default: Hls}));
+  });
+  await player.attach(null, null, 0);
+  await player.attach('desktop', null, 0, null, {itemId: 'desktop', stream: null});
+  assert.equal(loads, 0);
+  const first = player.attach('video', mediaPath, 5);
+  assert.equal(loads, 1);
+  pending.reject(new Error('Decoder could not be downloaded'));
+  await first;
+  assert.match(player.state().playerError, /Decoder could not be downloaded/);
+  assert.equal(player.state().localBuffering, false);
+  player.retryPlayback();
+  assert.equal(loads, 2);
+  pending.resolve();
+  await tick();
+  assert.equal(player.instances.length, 1);
+  assert.equal(player.state().playerError, '');
+  const late = player.attach('other', mediaPath, 5);
+  player.cleanupSource();
+  pending.resolve();
+  await late;
+  assert.equal(player.instances.length, 1, 'A late module import cannot reattach a removed source.');
+  assert.equal(player.instances[0].destroyed, true);
+});
 
 test('original playback errors select the ready standard quality in HLS.js and native players', async () => {
   for (const native of [false, true]) {
@@ -377,6 +409,7 @@ test('automatic metal recovery reuses the validated grant, aligns to the room, a
         frag: {url: `${appOrigin}${mediaPath.replace('index.m3u8', 'segment-000001.ts')}`}});
     }
     assert.equal(requests, 1, 'Recovery must not request another grant through the stalled proxy.');
+    await tick();
     assert.equal(player.state().mediaAccess.route, 'metal');
     assert.match(player.state().fallbackNotice, /Switched to metal/);
     assert.equal(native ? player.video.src : player.instances.at(-1).source, directMediaUrl);
@@ -404,6 +437,7 @@ test('failed direct playback exposes the existing retry UI instead of cycling th
   const player = playerHarness(async () => ({url: `${appOrigin}${mediaPath}`, fallbackUrl: directMediaUrl, route: 'cloudflare'}));
   await player.attach(player.room.current.id, mediaPath, 5);
   player.switchToMetal('Buffer stayed low');
+  await tick();
   player.instances.at(-1).events.get('error')(null, {details: 'fragLoadError', type: 'network', fatal: true,
     frag: {url: directMediaUrl.replace('index.m3u8', 'segment-000001.ts')}, response: {code: 502}});
   assert.match(player.state().playerError, /could not be loaded/);

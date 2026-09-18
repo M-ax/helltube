@@ -158,6 +158,16 @@ sudo systemctl status helltube nginx certbot.timer
 sudo journalctl -u helltube -n 100 --no-pager
 ```
 
+Connection diagnostics are written to the backend's stdout as single-line JSON; the managed `helltube.service` explicitly sends stdout and stderr to the journal. `ws.connected`, `ws.disconnected`, `ws.disconnect-requested`, `ws.error`, and `ws.upgrade-rejected` record server observations, including close codes/reasons, user and connection IDs, room, connection age, and heartbeat timing where applicable. On reconnect, `ws.client-disconnect` adds the browser's failure cause, available error/close details, online/visibility state, and timing under `report`. Match `report.connectionId` to the earlier server `connectionId`. Client timestamps are observations from the device; the outer timestamp is the server's receipt time. Browsers may expose only a generic WebSocket error, which is logged explicitly.
+
+```bash
+# View recent connection history, or follow all backend logs live.
+sudo journalctl -u helltube.service --since '24 hours ago' --grep '"event":"ws\.' --no-pager -o cat
+sudo journalctl -u helltube.service -f
+```
+
+Pending client reports are retained in the current tab until the server acknowledges them, with retries every minute while connected. The queue holds the original failure and the latest attempts, up to 20 reports, and counts omitted attempts. Reloading/closing the page or ending the session clears reports that have not reached the server; server-side disconnect logs remain available. Deploy both frontend and backend for client reports. The service directives take effect when the updated bootstrap installs the unit; existing services using systemd's default journal output also collect these logs after updating the app. Journal retention follows the host's journald configuration. To retain logs across container/host reboots, configure `[Journal]` with `Storage=persistent` in `/etc/systemd/journald.conf.d/helltube.conf`, restart `systemd-journald`, and run `sudo journalctl --flush`; disk/retention limits still apply. See the [systemd journal storage documentation](https://github.com/systemd/systemd/blob/main/man/journald.conf.xml).
+
 Rerun from the updated checkout with the same hostname to redeploy. It preserves deployed data, generated secrets, existing changed passwords, and reusable certificates, but **overwrites the managed nginx site, service unit and environment file** and stops the backend during deployment. Back up `/var/lib/helltube` with the service stopped and `/etc/helltube` before upgrades. A failed deployment exits immediately; there is no automatic rollback. Fix the reported error and rerun. Existing nginx sites are left alone; resolve conflicting hostname/listener configurations before deployment.
 
 Node and yt-dlp are not automatically upgraded when already installed. Keep them current; update the managed yt-dlp environment with `sudo /opt/helltube/tools/bin/pip install --upgrade 'yt-dlp[default]'`. Keep the Cloudflare credential file for unattended renewals and protect any backups of it. For slower DNS propagation, adjust the 60-second Certbot setting before issuance.

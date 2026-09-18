@@ -5,7 +5,7 @@ import {createRealtime} from '../src/lib/realtime.js';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture(t) {
+function fixture(t, {constructorFailures = 0} = {}) {
     t.mock.timers.enable({apis: ['setTimeout', 'setInterval', 'Date'], now: 1700000000000});
     t.mock.method(Math, 'random', () => 0);
     let monotonicTime = 0;
@@ -27,7 +27,10 @@ function fixture(t) {
         readyState = FakeWebSocket.CONNECTING;
         sent = [];
         closes = 0;
-        constructor(url) { this.url = url; sockets.push(this); }
+        constructor(url) {
+            if (constructorFailures-- > 0) throw new Error('Cannot create WebSocket');
+            this.url = url; sockets.push(this);
+        }
         send(data) {
             if (this.sendError) throw new Error('Transport failed');
             assert.equal(this.readyState, FakeWebSocket.OPEN);
@@ -37,7 +40,9 @@ function fixture(t) {
         close() { this.closes++; this.readyState = FakeWebSocket.CLOSING; }
         open() { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }
         receive(message) { this.onmessage?.({data: JSON.stringify(message)}); }
-        end(code = 1006) { this.readyState = FakeWebSocket.CLOSED; this.onclose?.({code}); }
+        end(code = 1006, reason = '', wasClean = false) {
+            this.readyState = FakeWebSocket.CLOSED; this.onclose?.({code, reason, wasClean});
+        }
         fail() { this.onerror?.(); }
         pong(offset = 0) { this.receive({type: 'pong', sentAt: Date.now(), serverTime: Date.now() + offset}); }
         room(version = 1) {
@@ -160,8 +165,10 @@ test('response timeouts reconnect without a close event, rejoin and reject stale
     h.advance(750);
     const replacement = h.sockets[1];
     replacement.open();
-    assert.deepEqual(replacement.sent.map(message => message.type), ['ping', 'join']);
-    assert.equal(replacement.sent[1].roomId, 'lobby');
+    assert.deepEqual(replacement.sent.map(message => message.type), ['ping', 'client:disconnect', 'join']);
+    assert.equal(replacement.sent[2].roomId, 'lobby');
+    assert.equal(replacement.sent[1].report.cause, 'response-timeout');
+    assert.equal(replacement.sent[1].report.lastResponseAgeMs, 15000);
     assert.equal(h.state().clockReady, false);
     assert.equal(h.client.command({type: 'control', action: 'play'}), false);
     replacement.pong(100);
@@ -306,4 +313,130 @@ test('late authentication responses cannot end a recovered or newly signed-in se
         assert.equal(h.sessionEnded(), 0);
         assert.equal(h.requests[0].signal.aborted, true);
     });
+});
+
+const reports = ws => ws.sent.filter(message => message.type === 'client:disconnect').map(message => message.report);
+
+test('disconnect reports correlate the old connection and preserve close details after an error', t => {
+    const h = fixture(t);
+    const old = h.sockets[0];
+    old.open(); old.room();
+    old.receive({type: 'rooms', rooms: [{id: 'lobby'}], clientId: 'old-connection'});
+    assert.deepEqual(reports(old), [], 'Initial connections do not claim a disconnect.');
+    h.advance(3000);
+    old.fail();
+    old.end(1013, 'Client too slow; reconnect.', true);
+    h.advance(750);
+    const next = h.sockets[1];
+    next.open();
+    const [report] = reports(next);
+    assert.equal(reports(next).length, 1, 'Error and subsequent close are one failure.');
+    assert.equal(report.connectionId, 'old-connection');
+    assert.equal(report.roomId, 'lobby');
+    assert.equal(report.cause, 'socket-error');
+    assert.match(report.error, /browser did not expose further details/);
+    assert.equal(report.code, 1013);
+    assert.equal(report.reason, 'Client too slow; reconnect.');
+    assert.equal(report.wasClean, true);
+    assert.equal(report.connectionAgeMs, 3000);
+    assert.equal(report.lastResponseAgeMs, 3000);
+    assert.equal(report.online, true);
+    assert.equal(report.visibility, 'visible');
+    assert.equal(report.at, 1700000003000);
+});
+
+test('unacknowledged reports survive another failed connection and acknowledged reports stop replaying', t => {
+    const h = fixture(t);
+    h.sockets[0].open();
+    h.sockets[0].end(1006, 'Lost transport');
+    h.advance(750);
+    h.sockets[1].open();
+    const [original] = reports(h.sockets[1]);
+    h.sockets[1].fail();
+    h.client.retry();
+    const recovered = h.sockets[2];
+    recovered.open();
+    assert.equal(reports(recovered).length, 2);
+    assert.deepEqual(reports(recovered)[0], original);
+    for (const report of reports(recovered)) recovered.receive({type: 'client:disconnect:ack', id: report.id});
+    recovered.end(1000, 'Server restart', true);
+    h.client.retry();
+    h.sockets[3].open();
+    assert.equal(reports(h.sockets[3]).length, 1);
+    assert.equal(reports(h.sockets[3])[0].reason, 'Server restart');
+});
+
+test('reports survive a failed send of the diagnostics themselves', t => {
+    const h = fixture(t);
+    h.sockets[0].fail();
+    h.advance(750);
+    const broken = h.sockets[1];
+    const send = broken.send.bind(broken);
+    broken.send = data => {
+        if (JSON.parse(data).type === 'client:disconnect') throw new Error('Report transport failed');
+        send(data);
+    };
+    broken.open();
+    h.client.retry();
+    h.sockets[2].open();
+    assert.deepEqual(reports(h.sockets[2]).map(report => report.cause), ['socket-error', 'send-error']);
+    assert.equal(reports(h.sockets[2])[1].error, 'Report transport failed');
+});
+
+test('unacknowledged diagnostics retry on a healthy socket without interrupting playback', t => {
+    const h = fixture(t);
+    h.sockets[0].fail();
+    h.client.retry();
+    const ws = h.sockets.at(-1);
+    ws.open(); ws.room();
+    ws.receive({type: 'client:disconnect:error', message: 'Too many requests.'});
+    assert.deepEqual(h.notices, [], 'Background diagnostics do not show room command errors.');
+    for (let i = 0; i < 6; i++) { h.advance(10000); ws.pong(); }
+    assert.equal(reports(ws).length, 2);
+    assert.deepEqual(reports(ws)[0], reports(ws)[1]);
+    ws.receive({type: 'client:disconnect:ack', id: reports(ws)[0].id});
+    for (let i = 0; i < 6; i++) { h.advance(10000); ws.pong(); }
+    assert.equal(reports(ws).length, 2);
+    assert.equal(h.state().joined, true);
+});
+
+test('offline events, connection deadlines, constructor exceptions and retries report their causes', async t => {
+    for (const cause of ['browser-offline', 'connection-timeout', 'connection-error', 'manual-retry']) {
+        await t.test(cause, t => {
+            const h = fixture(t, {constructorFailures: cause === 'connection-error' ? 1 : 0});
+            if (cause === 'browser-offline') {
+                h.sockets[0].open();
+                h.windowTarget.navigator.onLine = false;
+                h.documentTarget.visibilityState = 'hidden';
+                h.windowTarget.dispatchEvent(new Event('offline'));
+                h.windowTarget.navigator.onLine = true;
+            } else if (cause === 'connection-timeout') h.advance(15000);
+            h.client.retry();
+            const next = h.sockets.at(-1);
+            next.open();
+            const [report] = reports(next);
+            assert.equal(report.cause, cause);
+            if (cause === 'browser-offline') {
+                assert.equal(report.online, false);
+                assert.equal(report.visibility, 'hidden');
+            }
+            if (cause === 'connection-error') assert.equal(report.error, 'Cannot create WebSocket');
+        });
+    }
+});
+
+test('outage history is bounded, accounts for omitted failures, and cannot cross sign-ins', t => {
+    const h = fixture(t);
+    for (let i = 0; i < 30; i++) {
+        h.sockets.at(-1).fail();
+        h.client.retry();
+    }
+    h.sockets.at(-1).open();
+    const queued = reports(h.sockets.at(-1));
+    assert.equal(queued.length, 20);
+    assert.equal(queued.reduce((sum, report) => sum + report.droppedReports, 0), 10);
+    assert.match(queued[0].id, /-1$/);
+    h.client.connect('another-viewer');
+    h.sockets.at(-1).open();
+    assert.deepEqual(reports(h.sockets.at(-1)), []);
 });

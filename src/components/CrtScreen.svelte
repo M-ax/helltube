@@ -178,6 +178,15 @@
         font-style: normal;
         font-display: swap;
     }
+    /* Prefer the common terminal glyphs; the full face covers other titles/names. */
+    @font-face {
+        font-family: 'Hack Nerd Font Mono';
+        src: url('../assets/fonts/HackNerdFontMono-CRT.woff2') format('woff2');
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+        unicode-range: U+0000-024F, U+2000-206F, U+2190-21FF, U+2500-259F, U+25CF, U+E0B0, U+F115, U+F120, U+F303;
+    }
     .crt-screen {
         --phosphor: var(--accent);
         --terminal-text: #e3c49e;

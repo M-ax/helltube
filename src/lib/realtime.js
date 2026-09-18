@@ -1,10 +1,12 @@
 import {get, writable} from 'svelte/store';
 import {api} from './api.js';
+import {closeDetails, diagnosticText, MAX_DISCONNECT_REPORTS} from '../../shared/connection-diagnostics.js';
 
 const HEARTBEAT_INTERVAL = 1500;
 const RESPONSE_TIMEOUT = 15000;
 const CONNECTION_TIMEOUT = 15000;
 const SESSION_CHECK_TIMEOUT = 10000;
+const REPORT_RETRY_INTERVAL = 60000;
 
 export function createRealtime({onMessage, onSessionEnded, windowTarget = window, documentTarget = document,
     WebSocketImpl = WebSocket, now = () => performance.now(), request = api}) {
@@ -28,14 +30,52 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     let lastHeartbeat = 0;
     let storageKey;
     let samples = [];
+    let connection;
+    let reports = [];
+    let reportSequence = 0;
+    let lastReportSend = 0;
+    const reportPrefix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+    function recordFailure(cause, {event, error} = {}) {
+        if (connection?.report) return connection.report;
+        const report = {
+            id: `${reportPrefix}-${++reportSequence}`, cause, at: Date.now(),
+            connectionId: connection?.id || null, roomId: get(state).selectedRoomId,
+            connectionAgeMs: connection ? Math.max(0, Math.round(now() - connection.startedAt)) : null,
+            lastResponseAgeMs: connection?.opened ? Math.max(0, Math.round(now() - lastResponse)) : null,
+            attempt, droppedReports: 0, readyState: socket?.readyState ?? null,
+            online: typeof windowTarget.navigator.onLine === 'boolean' ? windowTarget.navigator.onLine : null,
+            visibility: documentTarget.visibilityState || 'unknown',
+            ...closeDetails(event),
+            error: diagnosticText(error?.message || (cause === 'socket-error'
+                ? 'WebSocket error; browser did not expose further details.' : '')),
+        };
+        if (connection) connection.report = report;
+        if (reports.length >= MAX_DISCONNECT_REPORTS) {
+            // Retain the original failure and the most recent attempts.
+            const removed = reports.splice(1, 1)[0];
+            report.droppedReports = removed.droppedReports + 1;
+        }
+        reports.push(report);
+        return report;
+    }
+
+    function sendReports() {
+        lastReportSend = now();
+        // A successful send is not delivery: keep each report until acknowledged.
+        for (const report of [...reports]) {
+            if (!send({type: 'client:disconnect', report})) return false;
+        }
+        return true;
+    }
 
     function send(message) {
         if (!socket || socket.readyState !== WebSocketImpl.OPEN) return false;
         try {
             socket.send(JSON.stringify(message));
             return true;
-        } catch {
-            reconnect();
+        } catch (error) {
+            reconnect('send-error', {error});
             return false;
         }
     }
@@ -47,6 +87,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         clearInterval(heartbeat);
         const previous = socket;
         socket = null;
+        connection = null;
         previous?.close();
     }
 
@@ -71,11 +112,12 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         });
     }
 
-    function reconnect(event) {
+    function reconnect(cause, details = {}) {
         if (stopped) return;
+        recordFailure(cause, details);
         // Retire the socket immediately: a broken transport may never deliver close.
         closeSocket();
-        if ([1008, 4001, 4401].includes(event?.code)) {
+        if ([1008, 4001, 4401].includes(details.event?.code)) {
             disconnect();
             onSessionEnded();
             return;
@@ -106,8 +148,8 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         }
         if (delayed) resetClock();
         lastHeartbeat = time;
-        if (time - lastResponse >= RESPONSE_TIMEOUT) reconnect();
-        else send({type: 'ping', sentAt: Date.now()});
+        if (time - lastResponse >= RESPONSE_TIMEOUT) reconnect('response-timeout');
+        else if (send({type: 'ping', sentAt: Date.now()}) && time - lastReportSend >= REPORT_RETRY_INTERVAL) sendReports();
     }
 
     function wake() {
@@ -143,16 +185,17 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
             return;
         }
         const activeGeneration = ++generation;
+        const activeConnection = connection = {id: null, startedAt: now(), opened: false, report: null};
         state.update((current) => ({...current, status: attempt ? 'reconnecting' : 'connecting', joined: false}));
         const {location} = windowTarget;
         try {
             socket = new WebSocketImpl(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
-        } catch {
-            reconnect();
+        } catch (error) {
+            reconnect('connection-error', {error});
             return;
         }
         connectionTimer = setTimeout(() => {
-            if (generation === activeGeneration && !stopped) reconnect();
+            if (generation === activeGeneration && !stopped) reconnect('connection-timeout');
         }, CONNECTION_TIMEOUT);
 
         socket.onopen = () => {
@@ -160,11 +203,13 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
             clearTimeout(connectionTimer);
             cancelSessionCheck();
             lastResponse = lastHeartbeat = now();
+            activeConnection.opened = true;
             resetClock();
             state.update((current) => ({...current, status: 'connected'}));
             clearInterval(heartbeat);
             heartbeat = setInterval(beat, HEARTBEAT_INTERVAL);
             if (!send({type: 'ping', sentAt: Date.now()})) return;
+            if (!sendReports()) return;
             const roomId = get(state).selectedRoomId;
             if (roomId) send({type: 'join', roomId});
         };
@@ -180,7 +225,9 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
             if (!message || typeof message !== 'object') return;
             lastResponse = now();
             attempt = 0;
-            if (message.type?.startsWith('desktop:')) {
+            if (message.type === 'client:disconnect:ack') {
+                reports = reports.filter(report => report.id !== message.id);
+            } else if (message.type?.startsWith('desktop:')) {
                 desktopMessages.set(message);
             } else if (message.type === 'pong') {
                 const rtt = Date.now() - message.sentAt;
@@ -190,6 +237,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
                 const best = samples.reduce((a, b) => a.rtt < b.rtt ? a : b);
                 state.update((current) => ({...current, clockOffset: best.offset, rtt, clockReady: true}));
             } else if (message.type === 'rooms') {
+                if (typeof message.clientId === 'string') activeConnection.id = message.clientId;
                 state.update((current) => ({...current, rooms: message.rooms}));
                 const selected = get(state).selectedRoomId;
                 if (selected && !message.rooms.some((room) => room.id === selected)) {
@@ -226,12 +274,15 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
             }
         };
 
-        socket.onerror = () => {
-            if (generation === activeGeneration && !stopped) reconnect();
+        socket.onerror = (event) => {
+            if (generation === activeGeneration && !stopped) reconnect('socket-error', {error: event?.error || event});
         };
         socket.onclose = (event) => {
+            // Browsers usually emit error then close. Enrich that queued report
+            // even though this socket has already been retired for recovery.
+            if (activeConnection.report) Object.assign(activeConnection.report, closeDetails(event));
             if (generation !== activeGeneration || stopped) return;
-            reconnect(event);
+            reconnect('socket-close', {event});
         };
     }
 
@@ -264,6 +315,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     }
 
     function offline() {
+        if (socket && !stopped) recordFailure('browser-offline');
         reactions.set(emptyReactions());
         closeSocket();
         cancelSessionCheck();
@@ -280,6 +332,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         documentTarget.removeEventListener('visibilitychange', wake);
         closeSocket();
         cancelSessionCheck();
+        reports = [];
         state.update((current) => ({...current, status: 'offline', joined: false}));
     }
 
@@ -296,6 +349,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
 
     function retry() {
         if (stopped) return;
+        if (socket) recordFailure('manual-retry');
         closeSocket();
         attempt = 0;
         open();

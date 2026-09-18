@@ -51,7 +51,8 @@
         </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('biden')}
                 title="Joe Biden wanders around the bottom · parody with soundbites">
-            <img class="biden-icon" src="/images/joe-biden-walking.png" alt=""/>Joe wander
+            <img class="biden-icon" src="/images/joe-biden-walking.png" alt="" width="17" height="27"
+                 loading="lazy" decoding="async" fetchpriority="low"/>Joe wander
         </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('heart')}><span aria-hidden="true">❤️</span>Love</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('laugh')}><span aria-hidden="true">😂</span>Laugh</button>

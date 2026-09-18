@@ -49,11 +49,12 @@ Direct grants are session-bound HMAC capabilities, scoped to one media job or up
 
 ## WebSocket `/ws`
 
-Authentication is the session cookie. Reconnect with exponential backoff, rejoin previous room; never replay stale commands. On connect server sends `{type:'rooms',rooms}`.
+Authentication is the session cookie. Reconnect with exponential backoff, rejoin previous room; never replay stale commands. On connect server sends `{type:'rooms',rooms,clientId}`; `clientId` is the server connection ID used to correlate disconnect logs.
 
 The browser probes every 1.5 seconds while scheduled, with a 15-second response deadline while visible and a 15-second connection-attempt deadline. Hidden tabs and callbacks delayed by suspension receive a fresh response window instead of immediately timing out; visibility, focus, pageshow and online events probe or reconnect promptly. Timeouts use a monotonic clock. A failed socket is retired before retrying, without waiting for its close handshake; late events cannot affect its replacement. Reconnects reset clock samples and require a fresh room snapshot before enabling shared commands. Session checks are bounded to 10 seconds and cancelled on recovery/disconnect. Server protocol pings run every 15 seconds independently of browser JavaScript timers.
 
 Client sends:
+- `{type:'client:disconnect',report}` reports a previous failed connection before rejoining. Reports contain `id`, client wall-clock `at`, `cause`, previous `connectionId`, `roomId`, `connectionAgeMs`, `lastResponseAgeMs`, `attempt`, `droppedReports`, `online`, `visibility`, socket `readyState`, close `code`/`reason`/`wasClean`, and available `error` text. Causes are `socket-close`, `socket-error`, `send-error`, `connection-error`, `connection-timeout`, `response-timeout`, `browser-offline`, and `manual-retry`. Browser errors without details are labeled explicitly. The tab keeps up to 20 pending reports (first failure plus latest attempts, counting evictions) in memory until acknowledged; retries occur on reconnect and every 60 seconds while connected. Signing out/session expiry or reloading clears pending reports. Error/close pairs are coalesced when the close arrives before delivery. Reports never replay room commands.
 - `{type:'join',roomId}`
 - `{type:'ping',sentAt}` -> `{type:'pong',sentAt,serverTime}` (use RTT midpoint to estimate clock offset).
 - `{type:'control',action:'play'|'pause'|'seek'|'skip'|'previous',position?:number,revision:number}`. Include latest `room.playback.revision`; stale commands are rejected. Seek is the absolute full-video position in seconds.
@@ -66,6 +67,7 @@ Client sends:
 - `{type:'reaction:pointer',x,y,finger?:{x,y,pivot:{x,y},pressed,taps}|null}` samples the cursor at 60Hz, including while stationary. Top-level coordinates remain normalized to the centered 1600×900 ball arena; both are null outside that arena. The optional finger uses normalized full-player coordinates, a fixed offscreen entry pivot, a boolean press state and a cumulative tap counter. Omitting/nulling the finger removes it; null both coordinates on leave. The server assigns socket/user identity and locks the pivot until leave. The cursor channel has its own 90 messages/second ceiling to allow 60Hz traffic and leave events without consuming the 40/second ordinary-command allowance.
 
 Server sends:
+- `{type:'client:disconnect:ack',id}` after writing a validated report to stdout as one JSON `ws.client-disconnect` journal entry with authenticated user and current connection IDs. Client-supplied fields stay nested under `report`. Reports are accepted before joining, text is bounded/sanitized, URL text is redacted, and diagnostics are limited to 60 per user per minute plus ordinary socket limits. The server deduplicates report IDs per user in memory for up to 24 hours, retaining at most 5000 IDs; retries after a backend restart may repeat an entry with the same report ID. `{type:'client:disconnect:error',message}` leaves a report pending without showing a room-command error.
 - `{type:'state',room,serverTime}` every 750ms and immediately after mutations. No per-client ended command; server advances the authoritative timeline.
 - `{type:'rooms',rooms}` on membership / room changes.
 - `{type:'error'|'notice',message}`

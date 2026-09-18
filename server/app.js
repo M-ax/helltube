@@ -26,6 +26,8 @@ import { DesktopShares } from './desktop.js';
 import { desktopRtcConfig } from './desktop-config.js';
 import { desktopRelayOptions } from './desktop-relay.js';
 import { encryptedMediaFile, publicMediaFile, mediaContentType } from '../shared/media-files.js';
+import { disconnectReport, logConnection } from './connection-logging.js';
+import { diagnosticText } from '../shared/connection-diagnostics.js';
 
 export function validOrigin(origin, host, config) {
   return !origin || origin === `http://${host}` || origin === `https://${host}` || config.origins.includes(origin);
@@ -81,6 +83,7 @@ export async function createApp(overrides = {}) {
   const app = express();
   const server = createServer(app);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024, perMessageDeflate: false });
+  const reportedDisconnects = new Map();
   const desktop = new DesktopShares(rooms, send, {rtcConfig, config, maxViewers: config.desktopMaxViewers});
   const reactions = new Reactions({ broadcast(roomId, message) {
     for (const ws of wss.clients) if (ws.roomId === roomId) send(ws, message);
@@ -379,8 +382,17 @@ export async function createApp(overrides = {}) {
 
   function send(ws, value) {
     if (ws.readyState !== WebSocket.OPEN) return;
-    if (ws.bufferedAmount > 1024 * 1024) return ws.close(1013, 'Client too slow; reconnect.');
+    if (ws.bufferedAmount > 1024 * 1024) return closeConnection(ws, 'slow-client', 1013, 'Client too slow; reconnect.');
     ws.send(JSON.stringify(value));
+  }
+  function closeConnection(ws, cause, code, reason) {
+    if (!ws.disconnectCause) {
+      ws.disconnectCause = cause;
+      logConnection('ws.disconnect-requested', ws, {cause, code: code ?? null, reason: reason || '',
+        bufferedAmount: ws.bufferedAmount, lastPongAgeMs: Math.max(0, Math.round(performance.now() - ws.lastPongAt))});
+    }
+    if (code === undefined) ws.terminate();
+    else ws.close(code, reason);
   }
   function broadcastRooms() { for (const ws of wss.clients) send(ws, { type: 'rooms', rooms: rooms.list() }); }
   function broadcastState(room) {
@@ -399,7 +411,11 @@ export async function createApp(overrides = {}) {
   }
   function expireSockets() {
     for (const ws of wss.clients) {
-      if (!accounts.authenticate(ws.cookie)) { send(ws, { type: 'session-ended' }); leave(ws); ws.close(1008, 'Session expired'); }
+      if (!accounts.authenticate(ws.cookie)) {
+        send(ws, { type: 'session-ended' });
+        closeConnection(ws, 'session-expired', 1008, 'Session expired');
+        leave(ws);
+      }
     }
   }
   rooms.on('state', broadcastState);
@@ -413,8 +429,13 @@ export async function createApp(overrides = {}) {
   });
   server.on('upgrade', (req, socket, head) => {
     const auth = accounts.authenticate(req.headers.cookie);
-    if (req.url !== '/ws' || !auth || !req.headers.origin || !validOrigin(req.headers.origin, req.headers.host, config) ||
-      wss.clients.size >= 500 || [...wss.clients].filter(ws => ws.userId === auth.user.id).length >= 8) {
+    const rejected = req.url !== '/ws' ? 'invalid-path' : !auth ? 'unauthenticated'
+      : !req.headers.origin || !validOrigin(req.headers.origin, req.headers.host, config) ? 'invalid-origin'
+      : wss.clients.size >= 500 ? 'server-connection-limit'
+      : [...wss.clients].filter(ws => ws.userId === auth.user.id).length >= 8 ? 'user-connection-limit' : null;
+    if (rejected) {
+      logConnection('ws.upgrade-rejected', {id: null, userId: auth?.user.id || null,
+        username: auth?.user.username, connectedAt: performance.now()}, {cause: rejected});
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
@@ -423,11 +444,15 @@ export async function createApp(overrides = {}) {
   wss.on('connection', (ws, req, auth) => {
     ws.id = randomUUID();
     ws.userId = auth.user.id;
+    ws.username = auth.user.username;
     ws.cookie = req.headers.cookie;
     ws.alive = true;
-    ws.on('pong', () => { ws.alive = true; });
-    send(ws, { type: 'rooms', rooms: rooms.list() });
+    ws.connectedAt = ws.lastPongAt = ws.lastMessageAt = performance.now();
+    logConnection('ws.connected', ws);
+    ws.on('pong', () => { ws.alive = true; ws.lastPongAt = performance.now(); });
+    send(ws, { type: 'rooms', rooms: rooms.list(), clientId: ws.id });
     ws.on('message', async (bytes, binary) => {
+      ws.lastMessageAt = performance.now();
       let message;
       try {
         const current = accounts.authenticate(ws.cookie);
@@ -443,11 +468,23 @@ export async function createApp(overrides = {}) {
         limit(`${bucket}:${ws.id}`, bucket === 'signal' ? 80 : bucket === 'pointer' ? 90 : 40, 1000);
         if (message.type !== 'desktop:request' && bytes.length > 8192) throw httpError(400, 'Room command is too large.');
         if (message.type === 'ping') return send(ws, { type: 'pong', sentAt: message.sentAt, serverTime: Date.now() });
+        if (message.type === 'client:disconnect') {
+          const report = disconnectReport(message.report);
+          limit(`diagnostics:${ws.userId}`, 60, 60000);
+          const key = `${ws.userId}:${report.id}`;
+          if (!reportedDisconnects.has(key)) {
+            logConnection('ws.client-disconnect', ws, {report});
+            reportedDisconnects.set(key, Date.now());
+            if (reportedDisconnects.size > 5000) reportedDisconnects.delete(reportedDisconnects.keys().next().value);
+          }
+          return send(ws, {type: 'client:disconnect:ack', id: report.id});
+        }
         if (message.type === 'join') {
           const room = rooms.get(message.roomId);
           if (ws.roomId === room.id) return;
           leave(ws);
           ws.roomId = room.id;
+          ws.lastRoomId = room.id;
           room.members.set(ws.id, current.user);
           broadcastState(room);
           broadcastRooms();
@@ -478,21 +515,35 @@ export async function createApp(overrides = {}) {
         else if (message.type === 'history:play') rooms.replay(room, message.itemId);
         else throw httpError(400, 'Unknown message type.');
       } catch (error) {
+        if (message?.type === 'client:disconnect') {
+          return send(ws, {type: 'client:disconnect:error', message: error.status ? error.message : 'Invalid disconnect report.'});
+        }
         send(ws, { type: typeof message?.type === 'string' && message.type.startsWith('desktop:') ? 'desktop:error' : 'error',
           requestId: message?.requestId, rpcId: message?.rpcId, message: error.status ? error.message : 'Invalid room command.' });
       }
     });
-    ws.on('close', () => {
+    ws.on('close', (code, reason) => {
+      logConnection('ws.disconnected', ws, {code, reason: diagnosticText(reason.toString(), 123),
+        cause: ws.disconnectCause || 'peer-close', bufferedAmount: ws.bufferedAmount,
+        lastMessageAgeMs: Math.max(0, Math.round(performance.now() - ws.lastMessageAt)),
+        lastPongAgeMs: Math.max(0, Math.round(performance.now() - ws.lastPongAt))});
       leave(ws);
       for (const prefix of ['socket', 'ws', 'reaction', 'pointer', 'signal', 'watch']) limits.delete(`${prefix}:${ws.id}`);
     });
-    ws.on('error', () => ws.terminate());
+    ws.on('error', error => {
+      logConnection('ws.error', ws, {error: diagnosticText(error.message), errorCode: diagnosticText(error.code, 80)});
+      closeConnection(ws, 'socket-error');
+    });
   });
   const tick = setInterval(() => { expireSockets(); desktop.tick(); rooms.tick(); }, 750);
   const stopReactionTick = startPointerTicker(() => reactions.tick());
   const heartbeat = setInterval(() => {
-    for (const ws of wss.clients) { if (!ws.alive) ws.terminate(); else { ws.alive = false; ws.ping(); } }
+    for (const ws of wss.clients) {
+      if (!ws.alive) closeConnection(ws, 'heartbeat-timeout');
+      else { ws.alive = false; ws.ping(); }
+    }
     for (const [key, value] of limits) if (value.until < Date.now()) limits.delete(key);
+    for (const [key, at] of reportedDisconnects) if (Date.now() - at > 24 * 60 * 60 * 1000) reportedDisconnects.delete(key);
     directAccess.prune();
   }, 15000);
   tick.unref();
@@ -525,7 +576,7 @@ export async function createApp(overrides = {}) {
         clearInterval(heartbeat);
         clearInterval(housekeeping);
         const stopped = server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve();
-        for (const ws of wss.clients) { desktop.stop(ws); ws.terminate(); }
+        for (const ws of wss.clients) { desktop.stop(ws); closeConnection(ws, 'server-shutdown'); }
         wss.close();
         await desktop.close();
         for (const room of rooms.rooms.values()) {
