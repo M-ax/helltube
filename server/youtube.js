@@ -82,7 +82,7 @@ export class YouTube {
     this.baseArgs = ['--ignore-config', '--no-warnings', '--socket-timeout', '20', '--js-runtimes', 'node'];
   }
 
-  async extract(args) {
+  async extract(args, { signal, timeout } = {}) {
     if (this.pending.size >= 4) throw httpError(429, 'YouTube is busy. Try again shortly.');
     const controller = new AbortController();
     this.pending.add(controller);
@@ -108,7 +108,8 @@ export class YouTube {
         }
       }
       return await runJSON(this.config.ytdlp, [...this.baseArgs, ...proxyArgs, ...cookieArgs, ...args], {
-        signal: controller.signal, redactErrors: !!this.config.ytdlpCookiesFile, env: network.env,
+        signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal, timeout,
+        redactErrors: !!this.config.ytdlpCookiesFile, env: network.env,
         diagnostics: {provider: 'youtube', stage: args.includes('--flat-playlist') ? 'metadata' : 'playback',
           cookiesConfigured: !!this.config.ytdlpCookiesFile, proxyConfigured: !!network.proxy},
       });
@@ -160,6 +161,33 @@ export class YouTube {
     });
     const duration = Number(data.duration) || null;
     return { inputs, duration, copyQuality: hlsCopyQuality(formats, {allowFiles: true}), sponsorSegments: normalizeSponsors(segments, duration) };
+  }
+
+  async liveStreams(channels, { signal } = {}) {
+    const results = await Promise.allSettled(channels.map(async channel => {
+      const data = await this.extract(['--flat-playlist', '--playlist-end', '12', '--ignore-errors',
+        '--dump-single-json', '--', channel.url], { signal, timeout: 30000 });
+      return (data.entries || []).filter(entry => entry &&
+        (entry.live_status === 'is_live' || entry.is_live === true) && /^[\w-]{11}$/.test(entry.id))
+        .map(entry => ({ id: entry.id, channel: channel.name, title: String(entry.title || channel.name).slice(0, 200),
+          url: `https://www.youtube.com/watch?v=${entry.id}`, thumbnail: `https://i.ytimg.com/vi/${entry.id}/mqdefault.jpg` }));
+    }));
+    signal?.throwIfAborted();
+    return [...new Map(results.flatMap(result => result.status === 'fulfilled' ? result.value : [])
+      .map(stream => [stream.id, stream])).values()];
+  }
+
+  async resolveLive(url, { signal } = {}) {
+    const data = await this.extract(['--no-playlist', '--no-live-from-start', '-f', 'bv[height<=720]/b[height<=720]/b',
+      '--dump-single-json', '--', youtubeURL(url)], { signal, timeout: 30000 });
+    if (data.live_status !== 'is_live' && data.is_live !== true) throw new Error('This cartoon is no longer live.');
+    const format = data.requested_formats?.[0] || data;
+    const source = new URL(format.url);
+    if (source.protocol !== 'https:' || source.username || source.password || source.port ||
+      !['googlevideo.com', 'youtube.com'].some(host => source.hostname === host || source.hostname.endsWith(`.${host}`))) {
+      throw new Error('YouTube returned an unsupported live media host.');
+    }
+    return { inputs: [{ url: source.href, headers: format.http_headers || data.http_headers || {} }] };
   }
 
   close() {

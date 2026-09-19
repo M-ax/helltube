@@ -36,6 +36,7 @@ export class DesktopShares {
   }
 
   async start(room, ws, user, message) {
+    this.rooms.requireManual(room);
     if (!validRequest(message.requestId)) throw httpError(400, 'Invalid sharing request.');
     if (message.transport !== 'mediasoup') throw httpError(400, 'Reload the page to use metal desktop sharing.');
     if (this.closed || this.sessions.has(ws.id)) {

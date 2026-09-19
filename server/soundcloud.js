@@ -7,7 +7,7 @@ import { soundcloudURL } from '../shared/media-source.js';
 export class SoundCloud {
   constructor(config) { this.config = config; this.pending = new Set(); }
 
-  async extract(url, playlist = false) {
+  async extract(url, playlist = false, { signal, timeout } = {}) {
     if (this.pending.size >= 4) throw httpError(429, 'SoundCloud is busy. Try again shortly.');
     const controller = new AbortController();
     this.pending.add(controller);
@@ -15,7 +15,7 @@ export class SoundCloud {
       return await runJSON(this.config.ytdlp, ['--ignore-config', '--no-warnings', '--socket-timeout', '20',
         ...(playlist ? ['--flat-playlist', '--playlist-end', '200'] : ['--no-playlist']),
         '-f', 'bestaudio/best', '--dump-single-json', '--', soundcloudURL(url)], {
-        signal: controller.signal, provider: 'SoundCloud',
+        signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal, timeout, provider: 'SoundCloud',
         failureMessage: 'Could not load this SoundCloud track. Use a public track or playlist and update yt-dlp. Private and subscription-only audio may be unavailable.',
       });
     } catch (error) { throw httpError(502, error.message); }
@@ -53,9 +53,12 @@ export class SoundCloud {
     return items;
   }
 
-  async resolve(url) {
-    const data = await this.extract(url);
+  async resolve(url, { signal, fullTrack = false } = {}) {
+    const data = await this.extract(url, false, { signal, timeout: fullTrack ? 30000 : undefined });
     const formats = data.requested_formats || [data];
+    if (fullTrack && (Number(data.duration) <= 45 || formats.some(format => /preview|snip/i.test(`${format.format_id} ${format.format_note}`)))) {
+      throw new Error('This SoundCloud track is only available as a preview.');
+    }
     const inputs = formats.map(format => {
       const source = new URL(format.url);
       const trustedHost = source.hostname.endsWith('.sndcdn.com') || source.hostname === 'playback.media-streaming.soundcloud.cloud';

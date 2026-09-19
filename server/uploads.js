@@ -131,6 +131,7 @@ export class Uploads {
   }
 
   async createBatch(room, user, body, beforeCommit = () => {}) {
+    this.rooms.requireManual(room);
     if (!Array.isArray(body.files) || !body.files.length || body.files.length > 100) {
       throw httpError(400, 'Choose between 1 and 100 videos per upload batch.');
     }

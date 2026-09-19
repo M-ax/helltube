@@ -18,39 +18,53 @@ test('bass processing distorts real samples, attenuates after clipping, and rest
     await page.goto(url);
     const results = await page.evaluate(async () => {
         const {createBassBoost} = await import('/media-reactions.js');
-        const results = [];
-        for (const volume of [1, .25, 0]) {
+        async function render({frequency = 60, amplitude = 1, volume = 1, enabled = true} = {}) {
             const context = new OfflineAudioContext(1, 48000, 48000);
             const source = context.createOscillator();
-            source.frequency.value = 60;
-            source.connect(context.destination);
-            const effect = createBassBoost(context, source);
+            const input = context.createGain();
+            source.frequency.value = frequency;
+            input.gain.value = amplitude;
+            source.connect(input).connect(context.destination);
+            const effect = createBassBoost(context, input);
             effect.set(true, volume);
+            if (!enabled) effect.set(false, volume);
             source.start();
             const buffer = await context.startRendering();
             const samples = buffer.getChannelData(0).slice(24000);
             const peak = Math.max(...samples.map(Math.abs));
-            // Projection onto the third harmonic measures actual nonlinear distortion.
-            const harmonic = Math.abs(samples.reduce((sum, value, i) => sum + value * Math.sin(2 * Math.PI * 180 * i / 48000), 0)) * 2 / samples.length;
-            results.push({volume, peak, harmonic});
+            const rms = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
+            // Measure both phases so bass-filter phase shift cannot hide distortion.
+            const magnitude = hz => {
+                let real = 0, imaginary = 0;
+                samples.forEach((value, i) => {
+                    real += value * Math.cos(2 * Math.PI * hz * i / 48000);
+                    imaginary += value * Math.sin(2 * Math.PI * hz * i / 48000);
+                });
+                return Math.hypot(real, imaginary) * 2 / samples.length;
+            };
+            const fundamental = magnitude(frequency);
+            const harmonic = magnitude(frequency * 3);
+            return {frequency, volume, peak, rms, fundamental, harmonic};
         }
-        const context = new OfflineAudioContext(1, 48000, 48000);
-        const source = context.createOscillator();
-        source.frequency.value = 60;
-        source.connect(context.destination);
-        const effect = createBassBoost(context, source);
-        effect.set(true, 1);
-        effect.set(false, 1);
-        source.start();
-        const clean = await context.startRendering();
-        results.push({cleanPeak: Math.max(...clean.getChannelData(0).slice(24000).map(Math.abs))});
-        return results;
+        const levels = [];
+        for (const volume of [1, .25, 0]) levels.push(await render({volume}));
+        const spectrum = [];
+        for (const frequency of [60, 1000, 4000]) spectrum.push(await render({frequency, amplitude: .04}));
+        return {levels, spectrum, clean: await render({enabled: false}),
+            quietBass: await render({frequency: 60, amplitude: .002}),
+            quietMid: await render({frequency: 1000, amplitude: .002})};
     });
-    for (const {volume, peak, harmonic} of results.slice(0, 3)) {
+    for (const {volume, peak, harmonic} of results.levels) {
         assert.ok(peak <= BASS_BOOST_OUTPUT_GAIN * volume + .00001, `Processed peak ${peak} respects volume ${volume}`);
         if (volume) assert.ok(harmonic > .005 * volume, 'The effect adds distorted harmonics.');
     }
-    assert.ok(results[3].cleanPeak > .99, 'Disabling the effect restores the clean signal.');
+    for (const {frequency, peak, fundamental, harmonic} of results.spectrum) {
+        assert.ok(harmonic / fundamental > .15, `${frequency} Hz is heavily distorted even at a modest input level.`);
+        assert.ok(peak <= BASS_BOOST_OUTPUT_GAIN + .00001, `${frequency} Hz remains attenuated after processing.`);
+    }
+    assert.ok(results.quietBass.rms > results.quietMid.rms * 3, 'Bass retains extra emphasis at low input levels.');
+    assert.ok(results.clean.peak > .99, 'Disabling the effect restores the clean signal.');
+    assert.ok(results.clean.harmonic < .0001, 'Disabling the effect removes distortion.');
     const streamResult = await page.evaluate(async () => {
         const {createAudioAnalysis} = await import('/audio-visualizations.js');
         const analysis = createAudioAnalysis();

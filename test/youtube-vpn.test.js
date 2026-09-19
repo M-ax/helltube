@@ -139,6 +139,29 @@ test('real FFmpeg HTTPS requests reach the proxy despite no_proxy; refusal fails
   assert.deepEqual(targets, ['video.invalid:443']);
 });
 
+test('automatic cartoon mixes proxy only YouTube and require the separate SoundCloud audio track', async t => {
+  const {media, job} = await mediaFixture(t, 'youtube');
+  job.item.source = {...job.item.source, benZone: true, soundtrackUrl: 'https://soundcloud.com/test/song', maxDuration: 360};
+  job.resolveController = new AbortController();
+  media.youtube.resolveLive = async () => ({inputs: [{url: 'https://video.googlevideo.com/live', headers: {}}]});
+  media.soundcloud = {resolve: async () => ({inputs: [{url: 'https://media.sndcdn.com/song.mp3', headers: {}}], duration: 180})};
+  let args;
+  t.mock.method(media, 'convert', async (_job, commandArgs) => {args = commandArgs; job.cancelled = true;});
+  await media.run(job);
+  const inputs = args.flatMap((value, index) => value === '-i' ? [index] : []);
+  assert.equal(inputs.length, 2);
+  const videoInput = args.slice(0, inputs[0]);
+  const audioInput = args.slice(inputs[0] + 2, inputs[1]);
+  assert.equal(videoInput[videoInput.indexOf('-http_proxy') + 1], proxy);
+  assert.equal(audioInput.includes('-http_proxy'), false);
+  assert.ok(audioInput[audioInput.indexOf('-format_whitelist') + 1].split(',').includes('mp3'));
+  const mappings = args.flatMap((value, index) => value === '-map' ? [args[index + 1]] : []);
+  assert.deepEqual(mappings, ['0:v:0', '1:a:0']);
+  assert.equal(args[args.indexOf('-t') + 1], '180');
+  assert.ok(args.includes('-shortest'));
+  assert.equal(job.original, undefined);
+});
+
 test('real FFmpeg HLS segment requests inherit the input proxy', { timeout: 15000 }, async t => {
   const targets = [];
   const server = http.createServer((request, response) => {

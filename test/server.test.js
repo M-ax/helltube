@@ -5,6 +5,7 @@ import { Rooms, makeItem } from '../server/rooms.js';
 
 test('The Ben Zone is pinned first over HTTP and WebSocket and can be joined by ordinary users', async t => {
   const { instance, api, connect } = await start(t, { maxTranscoders: 0 });
+  t.mock.method(instance.youtube, 'liveStreams', async () => []);
   await instance.accounts.create({ username: 'benzonefan', password: 'benzone-password', role: 'user' });
   const login = await api('/api/login', { method: 'POST', body: { username: 'benzonefan', password: 'benzone-password' } });
   const auth = login.response.headers.get('set-cookie').split(';')[0];

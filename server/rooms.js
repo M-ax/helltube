@@ -150,6 +150,7 @@ export class Rooms extends EventEmitter {
   }
 
   add(room, items, insertAt = room.queue.length, persistItems = () => {}) {
+    this.requireManual(room);
     if (this.get(room.id) !== room) throw httpError(404, 'Room not found.');
     if (!Number.isInteger(insertAt) || insertAt < 0 || insertAt > room.queue.length) {
       throw httpError(400, 'Invalid queue insertion position.');
@@ -177,6 +178,7 @@ export class Rooms extends EventEmitter {
   }
 
   advance(room) {
+    if (room.automation) { this.emit('automation:advance', room, 'skip'); return; }
     // Consecutive Spotify entries share one VM capture and the same subscriptions.
     room.desktops = this.spotifyDesktopEnabled && room.current?.kind === 'spotify' && room.queue[0]?.kind === 'spotify'
       ? room.desktops.filter(item => item.provider === 'spotify') : [];
@@ -193,6 +195,7 @@ export class Rooms extends EventEmitter {
   }
 
   replay(room, itemId) {
+    this.requireManual(room);
     if (room.current?.kind === 'desktop') throw httpError(409, 'Stop desktop sharing before playing a video from history.');
     const index = room.history.findIndex(i => i.id === itemId);
     if (index < 0) throw httpError(404, 'This video is no longer in the recent history.');
@@ -209,6 +212,11 @@ export class Rooms extends EventEmitter {
   control(room, message) {
     if (message.revision !== room.playback.revision) throw httpError(409, 'Playback changed. Please try again.');
     const { action } = message;
+    if (room.automation) {
+      if (!['skip', 'next-cartoon'].includes(action)) throw httpError(409, 'This room plays automatically. Skip the song or change the cartoon.');
+      this.emit('automation:advance', room, action);
+      return;
+    }
     if (action === 'skip') return this.advance(room);
     if (room.current?.kind === 'desktop') throw httpError(409, 'Desktop sharing is live. Stop or skip the share to return to videos.');
     if (action === 'previous') {
@@ -253,6 +261,7 @@ export class Rooms extends EventEmitter {
   }
 
   mutateQueue(room, message) {
+    this.requireManual(room);
     const index = room.queue.findIndex(i => i.id === message.itemId);
     if (message.type === 'queue:remove-playlist') {
       if (!message.playlistId || !room.queue.some(i => i.playlistId === message.playlistId)) {
@@ -321,7 +330,11 @@ export class Rooms extends EventEmitter {
     return [...this.rooms.values()].sort((a, b) => Number(b.pinned) - Number(a.pinned))
       .map(room => ({ id: room.id, name: room.name, ownerId: room.ownerId, pinned: room.pinned, description: room.description,
       memberCount: new Set([...room.members.values()].map(u => u.id)).size,
-      currentTitle: roomNowPlayingTitle(room), currentKind: room.current?.kind || null }));
+      currentTitle: roomNowPlayingTitle(room) || room.automation?.message || null, currentKind: room.current?.kind || null }));
+  }
+
+  requireManual(room) {
+    if (room.automation) throw httpError(409, 'The Ben Zone selects cartoons and music automatically. Use another room for your own queue.');
   }
 
   snapshot(room) {
@@ -332,6 +345,7 @@ export class Rooms extends EventEmitter {
         hasOriginalStream: item.kind !== 'upload' && !!sourceKind(source?.url) };
     };
     return { id: room.id, name: room.name, ownerId: room.ownerId, pinned: room.pinned, description: room.description, version: room.version,
+      ...(room.automation ? { automation: room.automation } : {}),
       members: [...new Map([...room.members.values()].map(u => [u.id, { id: u.id, displayName: u.displayName }])).values()],
       current: expose(room.current), desktops: room.desktops.map(expose), queue: room.queue.map(expose), history: room.history.map(expose),
       preparation: room.preparations?.values().next().value || null,

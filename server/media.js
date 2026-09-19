@@ -145,12 +145,12 @@ export class Media {
 
   schedule() {
     if (this.closed || !this.listening) return;
-    const allRooms = [...this.rooms.rooms.values()];
-    const wanted = [...allRooms.map(r => r.current), ...allRooms.map(r => r.queue[0])].filter(Boolean);
+    const allRooms = [...this.rooms.rooms.values()].filter(room => !room.automation || room.members.size);
+    const wanted = [...allRooms.map(r => r.current), ...allRooms.filter(room => !room.automation).map(r => r.queue[0])].filter(Boolean);
     const wantedIds = new Set(wanted.map(i => i.id));
     const referenced = new Set(this.rooms.allItems().map(i => i.id));
     for (const job of this.jobs.values()) {
-      if (!referenced.has(job.item.id)) this.dispose(job);
+      if (!referenced.has(job.item.id) || (job.item.source?.benZone && !wantedIds.has(job.item.id))) this.dispose(job);
       else if (job.restored && wantedIds.has(job.item.id)) {
         const room = allRooms.find(room => room.current?.id === job.item.id);
         const position = room ? this.rooms.position(room) : job.item.resumeAt ?? job.item.startAt ?? 0;
@@ -204,7 +204,8 @@ export class Media {
     if (item.kind === 'desktop') return; // Desktop media is delivered exclusively over WebRTC.
     const id = randomUUID();
     const job = { id, item, baseTime, dir: path.join(this.dir, id), child: null, done: false, cancelled: false,
-      key: randomBytes(16), keyDir: path.join(this.keyDir, id), lastProgress: Date.now(), lastBuffered: baseTime, errors: '' };
+      key: randomBytes(16), keyDir: path.join(this.keyDir, id), lastProgress: Date.now(), lastBuffered: baseTime, errors: '',
+      resolveController: new AbortController() };
     if (original) job.original = original;
     this.jobs.set(item.id, job);
     item.status = 'processing';
@@ -228,6 +229,7 @@ export class Media {
       job.done = true;
       item.status = 'error';
       item.error = error.message;
+      if (item.source.benZone) item.automationFailure = error.benZoneSource || 'playback';
       for (const room of this.rooms.rooms.values()) {
         if (room.current?.id === item.id) {
           room.resumeWhenReady = false;
@@ -262,7 +264,27 @@ export class Media {
     const args = ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y'];
     let inputs;
     let copyQuality;
-    if (['youtube', 'twitch', 'soundcloud'].includes(item.kind)) {
+    const autoMix = item.source.benZone === true;
+    if (autoMix) {
+      const signal = job.resolveController.signal;
+      const resolve = async (provider, operation) => {
+        try { return await operation(); }
+        catch (error) { error.benZoneSource = provider; throw error; }
+      };
+      let cartoon, track;
+      try {
+        [cartoon, track] = await Promise.all([
+          resolve('cartoon', () => this.youtube.resolveLive(item.source.url, { signal })),
+          resolve('track', () => this.soundcloud.resolve(item.source.soundtrackUrl, { signal, fullTrack: true })),
+        ]);
+      } catch (error) { job.resolveController.abort(); throw error; }
+      if (job.cancelled) return;
+      if (cartoon.inputs.length !== 1 || track.inputs.length !== 1) throw new Error('The mix needs one video and one audio source.');
+      item.duration = Math.min(item.source.maxDuration, track.duration || item.source.maxDuration);
+      // Proxy the YouTube input only; SoundCloud uses its ordinary direct route.
+      inputs = [cartoon.inputs[0], { ...track.inputs[0], direct: true }];
+      baseTime = job.baseTime = 0;
+    } else if (['youtube', 'twitch', 'soundcloud'].includes(item.kind)) {
       const resolved = await this[item.kind].resolve(item.source.url);
       if (job.cancelled) return;
       if (resolved.duration) item.duration = resolved.duration;
@@ -312,13 +334,14 @@ export class Media {
     if (job.cancelled) return;
     item.preparation = { stage: 'transcoding', baseTime, seconds: 0 };
     const inputFormats = item.kind === 'http' ? HOSTED_INPUT_FORMATS
-      : item.kind === 'soundcloud' ? `${HOSTED_INPUT_FORMATS},hls` : FILE_INPUT_FORMATS +
+      : item.kind === 'soundcloud' || autoMix ? `${HOSTED_INPUT_FORMATS},hls` : FILE_INPUT_FORMATS +
         (item.kind === 'youtube' || item.kind === 'twitch' ? ',hls' : '');
     const inputArgs = (start) => {
       const result = [];
       for (const input of inputs) {
         if (start > 0) result.push('-ss', String(start));
-        if (network.proxy) result.push('-http_proxy', network.proxy);
+        if (autoMix) result.push('-readrate', '1');
+        if (network.proxy && !input.direct) result.push('-http_proxy', network.proxy);
         const headers = Object.entries(input.headers).filter(([key, value]) =>
           /^[a-zA-Z-]+$/.test(key) && !/[\r\n]/.test(String(value))).map(([k, v]) => `${k}: ${v}\r\n`).join('');
         if (headers) result.push('-headers', headers);
@@ -362,7 +385,9 @@ export class Media {
     }
     args.push(...inputArgs(baseTime));
     args.push('-progress', 'pipe:1', '-stats_period', '0.5', '-nostats',
-      '-map', ['http', 'soundcloud'].includes(item.kind) ? '0:v:0?' : '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
+      '-map', ['http', 'soundcloud'].includes(item.kind) ? '0:v:0?' : '0:v:0',
+      '-map', autoMix ? '1:a:0' : inputs.length > 1 ? '1:a:0?' : '0:a:0?',
+      ...(autoMix ? ['-t', String(item.duration), '-shortest', '-af', 'aresample=async=1:first_pts=0'] : []),
       '-vf', 'scale=w=min(1280\\,iw):h=min(720\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '3000k', '-bufsize', '6000k',
       '-threads', '2', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
@@ -505,6 +530,7 @@ export class Media {
   dispose(job) {
     if (job.cancelled) return;
     job.cancelled = true;
+    job.resolveController?.abort();
     job.probeController?.abort();
     job.child?.kill();
     if (job.original) {

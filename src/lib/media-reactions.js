@@ -11,7 +11,13 @@ export function createBassBoost(context, source, destination = context.destinati
     bass.type = 'lowshelf';
     bass.frequency.value = 180;
     bass.gain.value = 18;
-    distortion.curve = Float32Array.from({length: 4097}, (_, index) => Math.tanh((index / 2048 - 1) * 6));
+    // Overdrive the entire signal, then hard-clip and crush its amplitude steps.
+    // The shelf makes bass hit the clipper harder without sparing mids or highs.
+    distortion.curve = Float32Array.from({length: 4097}, (_, index) => {
+        const driven = (index / 2048 - 1) * 64;
+        const clipped = Math.max(-1, Math.min(1, driven));
+        return Math.round(clipped * 16) / 16;
+    });
     output.gain.value = 0;
     dry.connect(destination);
     bass.connect(distortion).connect(output).connect(destination);

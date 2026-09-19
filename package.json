@@ -16,6 +16,7 @@
     "start": "node server/main.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:media": "node --test test/media.integration.js",
+    "test:ben-zone": "npm run build && node --test --test-concurrency=1 test/ben-zone.test.js test/ben-zone-media.integration.js test/ben-zone.browser.integration.js",
     "test:browser": "npm run build && node --test --test-concurrency=1 test/browser.integration.js test/reactions.browser.integration.js test/jpeg.browser.integration.js test/media-reactions.browser.integration.js test/whiteboard.browser.integration.js test/desktop.browser.integration.js test/deployment.browser.integration.js test/frontend-loading.browser.integration.js test/account-requests.browser.integration.js",
     "test:whiteboard": "npm run build && node --test --test-concurrency=1 test/whiteboard.test.js test/whiteboard.browser.integration.js",
     "test:desktop": "npm run build && node --test test/desktop.browser.integration.js",

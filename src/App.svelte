@@ -5,6 +5,7 @@
     import Modal from './components/Modal.svelte';
     import Lazy from './components/Lazy.svelte';
     import Queue from './components/Queue.svelte';
+    import BenZonePanel from './components/BenZonePanel.svelte';
     import Composer from './components/Composer.svelte';
     import Uploads from './components/Uploads.svelte';
     import {api} from './lib/api.js';
@@ -525,8 +526,10 @@
                                     {theaterMode} onTheaterToggle={toggleTheater}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
-                        <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify} {desktop}
-                                  onPreparation={value => preparation = value}/>
+                        {#if !room?.automation}
+                            <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify} {desktop}
+                                      onPreparation={value => preparation = value}/>
+                        {/if}
                         <Uploads {manager}/>
                         <section class="room-company" aria-label="People in this room">
                             <div class="section-heading">
@@ -547,7 +550,11 @@
                         <footer class="stage-footer"><span><Icon name="flame" size={15}/>HELLTUBE</span><span>A LITTLE LESS ALONE ON THE INTERNET.</span>
                         </footer>
                     </section>
-                    <Queue {room} {connected} onCommand={client.command} onAdd={focusComposer}/>
+                    {#if room?.automation}
+                        <BenZonePanel {room} {connected} onCommand={client.command}/>
+                    {:else}
+                        <Queue {room} {connected} onCommand={client.command} onAdd={focusComposer}/>
+                    {/if}
                 </div>
             {/if}
         </main>

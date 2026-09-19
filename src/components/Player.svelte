@@ -127,6 +127,7 @@
     const VOLUME_CURVE = 100;
 
     $: item = room?.current;
+    $: automated = !!room?.automation;
     $: sharedSpotify = item?.kind === 'spotify' && !!room.spotifyDesktop;
     $: sharedDesktop = sharedSpotify ? room.desktops?.find(desktop => desktop.provider === 'spotify' || desktop.id === item.id) : null;
     $: live = item?.kind === 'desktop' || !!sharedDesktop;
@@ -590,6 +591,7 @@
     }
 
     function control(action, value) {
+        if (automated && !['skip', 'next-cartoon'].includes(action)) return;
         if (!connected || (live && action !== 'skip' && !(sharedSpotify && ['play', 'pause', 'spotify-previous', 'spotify-next'].includes(action)))) return;
         onCommand({type: 'control', action, ...(value !== undefined ? {position: value} : {})});
     }
@@ -916,7 +918,10 @@
         <div class="screen-topline"><span class="screen-brand"><Icon name="flame" size={16}/>HELLTUBE CINEMA</span><span
                 class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : sharedSpotify ? 'SPOTIFY · SHARED DESKTOP' : live ? `${desktops.length} LIVE ${desktops.length === 1 ? 'DESKTOP' : 'DESKTOPS'}` : spotify ? 'SPOTIFY · LOCAL PLAYBACK' : room.playback.paused ? 'PAUSED TOGETHER' : audioOnly ? 'LISTENING TOGETHER' : 'WATCHING TOGETHER'}</span>
         </div>
-        {#if crtVisible}
+        {#if crtVisible && automated && !item}
+            <div class="screen-message" role="status"><Icon name="music" size={30}/>
+                <h3>Tuning The Ben Zone.</h3><p>{room.automation.message}</p></div>
+        {:else if crtVisible}
             <CrtScreen {username} {item} {connected} {onAdd} onSkip={() => control('skip')}
                        pending={item ? null : room?.preparation || (preparation?.roomId === room?.id ? preparation : null)}/>
         {:else if !live && (item.status === 'error' || playerError)}
@@ -966,7 +971,7 @@
                     <span class="controls-blur"></span><span class="controls-blur"></span>
                 </div>
             {/if}
-            {#if !live && !spotify}
+            {#if !live && !spotify && !automated}
             <div class="seek-track" style={`--progress: ${progress}%; --buffered: ${buffered}%`}>
                 <input type="range" min="0" max={seekMax} step="0.1" value={displayedPosition}
                        disabled={!connected || !media || live} aria-label="Seek shared video"
@@ -979,22 +984,22 @@
                 <div class="shared-controls">
                     {#if !live && !sharedSpotify}
                     <button class="icon-button" title="Play previous video for everyone"
-                            aria-label="Play previous video for everyone" disabled={!connected || !room?.history?.length || live}
+                            aria-label="Play previous video for everyone" disabled={!connected || !room?.history?.length || live || automated}
                             on:click={() => control('previous')}>
                         <Icon name="previous" size={19}/>
                     </button>
                     {#if !spotify}<button class="play-button"
                             aria-label={room?.playback.paused ? 'Play for everyone' : 'Pause for everyone'}
-                            disabled={!connected || !media || item?.status === 'error' || live}
+                            disabled={!connected || !media || item?.status === 'error' || live || automated}
                             on:click={() => control(room.playback.paused ? 'play' : 'pause')}>
                         <Icon name={room?.playback.paused || !item ? 'play' : 'pause'} size={21}/>
                     </button>{/if}
                     {/if}
-                    <button class="icon-button" title={sharedSpotify ? 'Skip this Spotify entry in the Helltube queue for everyone' : 'Skip video for everyone'} aria-label="Skip video for everyone"
+                    <button class="icon-button" title={automated ? 'Next song for everyone' : sharedSpotify ? 'Skip this Spotify entry in the Helltube queue for everyone' : 'Skip video for everyone'} aria-label={automated ? 'Next song for everyone' : 'Skip video for everyone'}
                             disabled={!connected || !item} on:click={() => control('skip')}>
                         <Icon name="next" size={19}/>
                     </button>
-                    <span class="time-display">{#if live}LIVE{:else if spotify}SPOTIFY{:else}{time(displayedPosition)}<span> / {time(duration)}</span>{/if}</span>
+                    <span class="time-display">{#if live || automated}LIVE{:else if spotify}SPOTIFY{:else}{time(displayedPosition)}<span> / {time(duration)}</span>{/if}</span>
                 </div>
                 {#if sharedSpotify}
                     <div class="spotify-controls" role="group" aria-label="Spotify playback controls">
@@ -1014,7 +1019,7 @@
                         </button>
                     </div>
                 {/if}
-                {#if !live && !spotify}<div class="relative-seek-control">
+                {#if !live && !spotify && !automated}<div class="relative-seek-control">
                     {#key `${room?.id}|${sourceKey}`}
                         <SeekJoystick disabled={!connected || !media || !!playerError || item?.status === 'error' || live}
                                       onSeek={seekRelative} onPreview={previewRelative}/>
@@ -1078,9 +1083,9 @@
            onSoundToggle={() => { soundMuted = !soundMuted; reactionAudio?.unlock(); }}/>
 <div class="now-playing">
     {#if captureMuted}<p class="field-help" role="status">Your player is muted while sharing to prevent audio feedback. Viewers receive your shared audio.</p>{/if}
-    <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
+    <div class="now-playing-title"><p class="eyebrow">{automated ? 'AUTOMATIC CARTOON RADIO' : item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
         <div class="now-playing-heading">
-            <h2 title={roomNowPlayingTitle(room) || undefined}>{roomNowPlayingTitle(room) || 'A little less scrolling. A little more watching.'}</h2>
+            <h2 title={roomNowPlayingTitle(room) || undefined}>{roomNowPlayingTitle(room) || (automated ? 'Finding the next mix.' : 'A little less scrolling. A little more watching.')}</h2>
             {#if item?.hasOriginalStream}
                 <a class="icon-button bordered"
                    href={`/api/rooms/${encodeURIComponent(room.id)}/items/${encodeURIComponent(item.id)}/original`}
@@ -1092,10 +1097,10 @@
         </div>
         <div class="media-meta">
             {#if item}<span><Icon name={sourceIcons[item.kind] || 'file'}
-                                  size={15}/>{sourceLabels[item.kind] || 'Video'}</span>
+                                  size={15}/>{automated ? 'YouTube Live × SoundCloud' : sourceLabels[item.kind] || 'Video'}</span>
                 {#if item.artist}<span>{item.artist}</span>{/if}
                 {#if duration}<span>{time(duration)}</span>{/if}<span
-                        class:status-error={item.status === 'error'}>{item.status}</span>{:else}<span>Everyone in the room can add videos and control playback.</span>{/if}
+                        class:status-error={item.status === 'error'}>{item.status}</span>{:else}<span>{automated ? 'Cartoons and songs start automatically while you’re here.' : 'Everyone in the room can add videos and control playback.'}</span>{/if}
             {#if item?.kind === 'youtube' && item.sponsorSegments?.length}
                 <a href="https://sponsor.ajay.app/" target="_blank" rel="noreferrer" title="Sponsor segments are skipped for everyone in the room">SponsorBlock</a>
             {/if}

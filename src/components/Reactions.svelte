@@ -70,7 +70,7 @@
             <span aria-hidden="true">🍳</span>Deep fried
         </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled || !bassAvailable} on:click={() => onReact('bassboost')}
-                title={bassAvailable ? 'Five seconds of bass distortion with quieter output' : 'Bass boost needs playable room audio; Spotify embeds do not share their audio'}>
+                title={bassAvailable ? 'Five seconds of full-spectrum distortion with extra bass and quieter output' : 'Bass boost needs playable room audio; Spotify embeds do not share their audio'}>
             <span aria-hidden="true">🔊</span>Bass boosted
         </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('heart')}><span aria-hidden="true">❤️</span>Love</button>

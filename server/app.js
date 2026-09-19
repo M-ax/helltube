@@ -11,6 +11,7 @@ import { Accounts, publicUser } from './auth.js';
 import { AccountRequests } from './account-requests.js';
 import { accountRequestRoutes } from './account-request-routes.js';
 import { Rooms } from './rooms.js';
+import { BenZone } from './ben-zone.js';
 import { Reactions } from './reactions.js';
 import { Whiteboards } from './whiteboard.js';
 import { startPointerTicker } from '../shared/reaction-pointer.js';
@@ -72,6 +73,7 @@ export async function createApp(overrides = {}) {
   let rooms;
   let uploads;
   let media;
+  let benZone;
   try {
     await deployment.init();
     await accounts.init();
@@ -79,6 +81,7 @@ export async function createApp(overrides = {}) {
     rooms = new Rooms({ ...config, store });
     uploads = new Uploads(config, rooms, store);
     media = new Media(config, rooms, uploads, youtube, twitch, soundcloud);
+    benZone = new BenZone(rooms, youtube, media, config.benZone);
     await uploads.init();
     await media.init();
   } catch (error) {
@@ -292,6 +295,7 @@ export async function createApp(overrides = {}) {
   app.post(['/api/rooms/:id/youtube', '/api/rooms/:id/media'], async (req, res) => {
     limit(`submissions:${req.auth.user.id}`, 12);
     const room = membership(req);
+    rooms.requireManual(room);
     const url = text(req.body.url, 'URL', 8192);
     const kind = req.path.endsWith('/youtube') ? 'youtube' : sourceKind(url);
     if (!kind) throw httpError(400, 'Enter a YouTube, Twitch VOD, SoundCloud, Spotify, or HTTP/HTTPS media URL.');
@@ -425,6 +429,7 @@ export async function createApp(overrides = {}) {
     if (!ws.roomId) return;
     const room = rooms.get(ws.roomId);
     room.members.delete(ws.id);
+    benZone.membershipChanged(room);
     reactions.leave(room.id, ws.id, room.members.size === 0);
     whiteboards.leave(room.id, ws.id, room.members.size === 0);
     ws.roomId = null;
@@ -511,6 +516,7 @@ export async function createApp(overrides = {}) {
           ws.roomId = room.id;
           ws.lastRoomId = room.id;
           room.members.set(ws.id, current.user);
+          benZone.membershipChanged(room);
           broadcastState(room);
           broadcastRooms();
           send(ws, {...reactions.snapshot(room.id), clientId: ws.id});
@@ -539,6 +545,7 @@ export async function createApp(overrides = {}) {
         } else if (message.type === 'whiteboard') {
           if (!whiteboards.command(room.id, ws.id, current.user, message)) send(ws, whiteboards.snapshot(room.id));
         } else if (message.type === 'control') {
+          if (room.automation) limit(`automatic-control:${room.id}`, 4, 10000);
           if (!await spotifyDesktop.control(room, message)) rooms.control(room, message);
         }
         else if (message.type?.startsWith('queue:')) rooms.mutateQueue(room, message);
@@ -569,7 +576,7 @@ export async function createApp(overrides = {}) {
       closeConnection(ws, 'socket-error');
     });
   });
-  const tick = setInterval(() => { expireSockets(); desktop.tick(); rooms.tick(); }, 750);
+  const tick = setInterval(() => { expireSockets(); desktop.tick(); rooms.tick(); benZone.tick(); }, 750);
   const stopReactionTick = startPointerTicker(() => reactions.tick());
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
@@ -594,7 +601,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, accountRequests, rooms, reactions, whiteboards, desktop, spotifyDesktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
+  return { app, server, accounts, accountRequests, rooms, benZone, reactions, whiteboards, desktop, spotifyDesktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;
@@ -611,6 +618,7 @@ export async function createApp(overrides = {}) {
         clearInterval(heartbeat);
         clearInterval(housekeeping);
         closeAccountRequests();
+        await benZone.close();
         const stopped = server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve();
         for (const ws of wss.clients) { desktop.stop(ws); closeConnection(ws, 'server-shutdown'); }
         wss.close();
