@@ -116,8 +116,9 @@
     const VOLUME_CURVE = 100;
 
     $: item = room?.current;
-    $: live = item?.kind === 'desktop';
-    $: spotify = item?.kind === 'spotify';
+    $: sharedSpotify = item?.kind === 'spotify' && !!room.spotifyDesktop;
+    $: live = item?.kind === 'desktop' || (sharedSpotify && room.desktops?.some(desktop => desktop.id === item.id));
+    $: spotify = item?.kind === 'spotify' && !live;
     $: spotifyCollection = spotify && /\/(album|playlist|show|artist)\//.test(item.embed || '');
     $: audioOnly = !live && (!!item?.audioOnly || (!!media && hasFrame && nativeAudioOnly));
     $: updateAnalysis(audioOnly && !spotify, video, audioAnalysis);
@@ -564,7 +565,7 @@
     }
 
     function control(action, value) {
-        if (!connected || (live && action !== 'skip')) return;
+        if (!connected || (live && action !== 'skip' && !(sharedSpotify && ['play', 'pause'].includes(action)))) return;
         onCommand({type: 'control', action, ...(value !== undefined ? {position: value} : {})});
     }
 
@@ -806,7 +807,9 @@
         <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
                 class:video-visible={webglEffectsActive && (crtVisible || !!media || live || spotify)} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
-        {#if spotify && connected && !captureMuted}
+        {#if sharedSpotify && !live && connected}
+            <div class="screen-message" role="status"><p>{room.spotifyDesktop.message}</p></div>
+        {:else if spotify && connected && !captureMuted}
             <div class="spotify-player" class:spotify-collection={spotifyCollection}>
                 {#key item.id}
                     <iframe title="Spotify player" src={item.embed} width="100%" height={spotifyCollection ? '352' : '152'}
@@ -852,7 +855,7 @@
             <div class="seek-preview-label">Seek preview · {time(previewPosition)}</div>
         {/if}
         <div class="screen-topline"><span class="screen-brand"><Icon name="flame" size={16}/>HELLTUBE CINEMA</span><span
-                class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : live ? `${desktops.length} LIVE ${desktops.length === 1 ? 'DESKTOP' : 'DESKTOPS'}` : spotify ? 'SPOTIFY · LOCAL PLAYBACK' : room.playback.paused ? 'PAUSED TOGETHER' : audioOnly ? 'LISTENING TOGETHER' : 'WATCHING TOGETHER'}</span>
+                class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : sharedSpotify ? 'SPOTIFY · SHARED DESKTOP' : live ? `${desktops.length} LIVE ${desktops.length === 1 ? 'DESKTOP' : 'DESKTOPS'}` : spotify ? 'SPOTIFY · LOCAL PLAYBACK' : room.playback.paused ? 'PAUSED TOGETHER' : audioOnly ? 'LISTENING TOGETHER' : 'WATCHING TOGETHER'}</span>
         </div>
         {#if crtVisible}
             <CrtScreen {username} {item} {connected} {onAdd} onSkip={() => control('skip')}
@@ -917,6 +920,12 @@
             {/if}
             <div class="transport-row" bind:clientHeight={transportRowHeight}>
                 <div class="shared-controls">
+                    {#if sharedSpotify && live}
+                        <button class="play-button" aria-label={room?.playback.paused ? 'Play Spotify for everyone' : 'Pause Spotify for everyone'}
+                                disabled={!connected} on:click={() => control(room.playback.paused ? 'play' : 'pause')}>
+                            <Icon name={room?.playback.paused ? 'play' : 'pause'} size={21}/>
+                        </button>
+                    {/if}
                     {#if !live}
                     <button class="icon-button" title="Play previous video for everyone"
                             aria-label="Play previous video for everyone" disabled={!connected || !room?.history?.length || live}

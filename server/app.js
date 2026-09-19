@@ -28,6 +28,7 @@ import { DirectAccess, equalSecret } from './direct-access.js';
 import { deploymentOrigin, securityHeaders, normalizeCommit } from '../shared/deployment.js';
 import { Deployment } from './deployment.js';
 import { DesktopShares } from './desktop.js';
+import { SpotifyDesktop } from './spotify-desktop.js';
 import { desktopRtcConfig } from './desktop-config.js';
 import { desktopRelayOptions } from './desktop-relay.js';
 import { encryptedMediaFile, publicMediaFile, mediaContentType } from '../shared/media-files.js';
@@ -96,6 +97,7 @@ export async function createApp(overrides = {}) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024, perMessageDeflate: false });
   const reportedDisconnects = new Map();
   const desktop = new DesktopShares(rooms, send, {rtcConfig, config, maxViewers: config.desktopMaxViewers});
+  const spotifyDesktop = new SpotifyDesktop(rooms, desktop, config);
   const reactions = new Reactions({ broadcast(roomId, message) {
     for (const ws of wss.clients) if (ws.roomId === roomId) send(ws, message);
   } });
@@ -536,7 +538,9 @@ export async function createApp(overrides = {}) {
           reactions.pointer(room.id, ws.id, message, current.user.id);
         } else if (message.type === 'whiteboard') {
           if (!whiteboards.command(room.id, ws.id, current.user, message)) send(ws, whiteboards.snapshot(room.id));
-        } else if (message.type === 'control') rooms.control(room, message);
+        } else if (message.type === 'control') {
+          if (!await spotifyDesktop.control(room, message)) rooms.control(room, message);
+        }
         else if (message.type?.startsWith('queue:')) rooms.mutateQueue(room, message);
         else if (message.type === 'history:play') rooms.replay(room, message.itemId);
         else throw httpError(400, 'Unknown message type.');
@@ -590,12 +594,13 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, accountRequests, rooms, reactions, whiteboards, desktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
+  return { app, server, accounts, accountRequests, rooms, reactions, whiteboards, desktop, spotifyDesktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;
       media.listening = true;
       media.schedule();
+      spotifyDesktop.start();
       return `http://${config.host}:${media.port}`;
     },
     async close() {
@@ -609,6 +614,7 @@ export async function createApp(overrides = {}) {
         const stopped = server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve();
         for (const ws of wss.clients) { desktop.stop(ws); closeConnection(ws, 'server-shutdown'); }
         wss.close();
+        await spotifyDesktop.close();
         await desktop.close();
         for (const room of rooms.rooms.values()) {
           room.resumeWhenReady ||= !room.playback.paused;

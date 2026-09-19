@@ -308,6 +308,9 @@ export class Rooms extends EventEmitter {
       members: [...new Map([...room.members.values()].map(u => [u.id, { id: u.id, displayName: u.displayName }])).values()],
       current: expose(room.current), desktops: room.desktops.map(expose), queue: room.queue.map(expose), history: room.history.map(expose),
       preparation: room.preparations?.values().next().value || null,
+      ...(room.current?.kind === 'spotify' && this.spotifyDesktopEnabled ? {
+        spotifyDesktop: room.spotifyDesktop || {state: 'starting', message: 'Connecting to the shared Spotify desktop…'},
+      } : {}),
       playback: { ...room.playback } };
   }
 

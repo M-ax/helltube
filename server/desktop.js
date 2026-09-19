@@ -1,4 +1,4 @@
-import {randomUUID} from 'node:crypto';
+import {randomUUID, randomInt} from 'node:crypto';
 import {makeItem} from './rooms.js';
 import {httpError} from './config.js';
 import {DesktopRelay, desktopRelayOptions} from './desktop-relay.js';
@@ -21,7 +21,8 @@ export class DesktopShares {
     rooms.on('state', room => {
       for (const session of this.sessions.values()) {
         if (session.room !== room || session.starting) continue;
-        if (!room.desktops.some(item => item.id === session.item.id)) this.stop(session.ws);
+        if (session.external && room.current?.id !== session.item.id) this.stop(session.ws);
+        else if (!room.desktops.some(item => item.id === session.item.id)) this.stop(session.ws);
         else if (session.item.status === 'error') this.stop(session.ws, session.item.error);
       }
     });
@@ -81,6 +82,58 @@ export class DesktopShares {
   connection(session, peer) {
     return {requestId: peer.requestId, peerId: peer.id, routerRtpCapabilities: session.router.rtpCapabilities,
       transportOptions: transportOptions(peer.transport), rtcConfig: this.rtcConfig(peer.ws.id)};
+  }
+
+  // Trusted server-side capture only. RTP stays on loopback; viewers use the
+  // same authenticated WebRTC subscriptions as ordinary desktop shares.
+  async prepareExternal(room, sourceItem) {
+    const ws = {id: randomUUID()};
+    const item = makeItem({kind: 'desktop'}, {id: sourceItem.id, title: `Spotify · ${sourceItem.title}`,
+      addedBy: sourceItem.addedBy, status: 'ready', transport: 'mediasoup'});
+    const session = {room, ws, item, external: true, requestId: randomUUID(), started: this.now(), starting: true,
+      publisher: endpoint(ws, randomUUID()), producers: new Map(), viewers: new Map()};
+    this.sessions.set(ws.id, session);
+    const check = () => {
+      this.active(session);
+      if (room.current !== sourceItem || !this.rooms.rooms.has(room.id)) throw httpError(409, 'Spotify playback changed.');
+    };
+    try {
+      check();
+      const router = await this.relay.createRouter();
+      session.router = router;
+      check();
+      const targets = {};
+      for (const [kind, mimeType, payloadType] of [['video', 'video/H264', 102], ['audio', 'audio/opus', 111]]) {
+        const transport = await router.createPlainTransport({listenInfo: {protocol: 'udp', ip: '127.0.0.1'},
+          rtcpMux: false, comedia: true});
+        check();
+        const codec = router.rtpCapabilities.codecs.find(value => value.mimeType === mimeType &&
+          (kind !== 'video' || value.parameters['profile-level-id'] === '42e01f'));
+        const ssrc = randomInt(1, 2147483647);
+        const producer = await transport.produce({kind, rtpParameters: {
+          codecs: [{mimeType, payloadType, clockRate: codec.clockRate,
+            ...(codec.channels ? {channels: codec.channels} : {}), parameters: codec.parameters,
+            rtcpFeedback: []}], encodings: [{ssrc}], rtcp: {cname: 'spotify-desktop'},
+        }});
+        check();
+        session.producers.set(kind, producer);
+        targets[kind] = {port: transport.tuple.localPort, rtcpPort: transport.rtcpTuple.localPort, ssrc};
+      }
+      return {session, targets};
+    } catch (error) {
+      this.stop(ws);
+      session.router?.close(); // Also release a router that arrived after cancellation.
+      throw error;
+    }
+  }
+
+  activateExternal(session) {
+    this.active(session);
+    if (session.room.current?.id !== session.item.id || !session.external) throw httpError(409, 'Spotify playback changed.');
+    session.ready = true;
+    session.starting = false;
+    session.room.desktops.push(session.item);
+    this.rooms.changed(session.room);
   }
 
   async createTransport(session, peer) {
@@ -276,7 +329,8 @@ export class DesktopShares {
     const included = room.desktops.some(item => item.id === session.item.id);
     room.desktops = room.desktops.filter(item => item.id !== session.item.id);
     if (this.rooms.rooms.has(room.id) && included) {
-      if (!room.desktops.length) this.rooms.advance(room);
+      if (session.external) this.rooms.changed(room);
+      else if (!room.desktops.length) this.rooms.advance(room);
       else {
         if (room.current?.id === session.item.id) room.current = room.desktops[0];
         this.rooms.changed(room);
