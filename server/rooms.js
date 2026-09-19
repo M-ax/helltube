@@ -5,6 +5,18 @@ import { sponsorPosition } from '../shared/sponsorblock.js';
 import { sourceKind, spotifyLink } from '../shared/media-source.js';
 import { roomNowPlayingTitle } from '../shared/room-title.js';
 
+const BEN_ZONE = {
+  id: 'the-ben-zone', name: 'The Ben Zone', pinned: true,
+  description: 'Children’s cartoons overdubbed with hardcore gangster rap, Russian hardbass, Dutch hardstyle, and drift music.',
+};
+
+function makeRoom(name, id, ownerId, now) {
+  return { id, ownerId, name: text(name, 'Room name', 50), pinned: false, description: '',
+    members: new Map(), current: null, desktops: [], queue: [], history: [],
+    playback: { paused: true, position: 0, updatedAt: now, revision: 0 },
+    version: 0, resumeWhenReady: false };
+}
+
 export function makeItem(source, extra = {}) {
   return { id: randomUUID(), title: 'Untitled video', duration: null, thumbnail: null,
     addedBy: '', kind: source.kind, source, playlistId: null, playlistTitle: null,
@@ -21,7 +33,7 @@ export class Rooms extends EventEmitter {
     this.saved = new Map();
     this.rooms = new Map();
     for (const saved of store?.load('rooms') || []) {
-      const room = { ownerId: null, ...saved, desktops: [], members: new Map() };
+      const room = { ownerId: null, pinned: false, description: '', ...saved, desktops: [], members: new Map() };
       for (const item of [room.current, ...room.queue, ...room.history].filter(Boolean)) {
         item.media = null;
         item.preparation = null;
@@ -33,8 +45,21 @@ export class Rooms extends EventEmitter {
       if (room.current) room.current.source.startAt = room.playback.position;
       this.rooms.set(room.id, room);
     }
-    if (!this.rooms.size && !store?.load('settings').some(setting => setting.id === 'rooms-initialized')) this.create('The living room', 'lobby');
+    const settings = store?.load('settings') || [];
+    if (!this.rooms.size && !settings.some(setting => setting.id === 'rooms-initialized')) this.create('The living room', 'lobby');
     store?.save('settings', 'rooms-initialized', { id: 'rooms-initialized' });
+    if (!settings.some(setting => setting.id === 'the-ben-zone-initialized')) {
+      // Seed existing installations too, even when their room limit is full.
+      // Keep this migration separate from the initial lobby and preserve admin deletion.
+      const room = this.rooms.get(BEN_ZONE.id) || { ...makeRoom(BEN_ZONE.name, BEN_ZONE.id, null, this.now()), ...BEN_ZONE };
+      const save = () => {
+        this.persist(room);
+        store?.save('settings', 'the-ben-zone-initialized', { id: 'the-ben-zone-initialized' });
+      };
+      if (store) store.transaction(save);
+      else save();
+      this.rooms.set(room.id, room);
+    }
   }
 
   persist(room) {
@@ -47,7 +72,8 @@ export class Rooms extends EventEmitter {
         playback: {...room.playback, paused: true, position: current?.resumeAt ?? current?.startAt ?? 0}};
     }
     const itemState = item => item ? { ...item, media: null, preparation: null } : null;
-    const state = { id: room.id, name: room.name, ownerId: room.ownerId, current: itemState(room.current),
+    const state = { id: room.id, name: room.name, ownerId: room.ownerId, pinned: room.pinned, description: room.description,
+      current: itemState(room.current),
       queue: room.queue.map(itemState), history: room.history.map(itemState), version: room.version,
       resumeWhenReady: room.resumeWhenReady,
       playback: { ...room.playback, position: this.position(room),
@@ -67,9 +93,7 @@ export class Rooms extends EventEmitter {
 
   create(name, id = randomUUID(), ownerId = null) {
     if (this.rooms.size >= this.maxRooms) throw httpError(409, 'Room limit reached.');
-    const room = { id, ownerId, name: text(name, 'Room name', 50), members: new Map(), current: null,
-      desktops: [], queue: [], history: [], playback: { paused: true, position: 0, updatedAt: this.now(), revision: 0 },
-      version: 0, resumeWhenReady: false };
+    const room = makeRoom(name, id, ownerId, this.now());
     this.rooms.set(id, room);
     this.persist(room);
     this.emit('rooms');
@@ -294,7 +318,8 @@ export class Rooms extends EventEmitter {
   }
 
   list() {
-    return [...this.rooms.values()].map(room => ({ id: room.id, name: room.name, ownerId: room.ownerId,
+    return [...this.rooms.values()].sort((a, b) => Number(b.pinned) - Number(a.pinned))
+      .map(room => ({ id: room.id, name: room.name, ownerId: room.ownerId, pinned: room.pinned, description: room.description,
       memberCount: new Set([...room.members.values()].map(u => u.id)).size,
       currentTitle: roomNowPlayingTitle(room), currentKind: room.current?.kind || null }));
   }
@@ -306,7 +331,7 @@ export class Rooms extends EventEmitter {
       return { ...safe, ...(item.kind === 'spotify' ? {embed: spotifyLink(source.url).embed} : {}),
         hasOriginalStream: item.kind !== 'upload' && !!sourceKind(source?.url) };
     };
-    return { id: room.id, name: room.name, ownerId: room.ownerId, version: room.version,
+    return { id: room.id, name: room.name, ownerId: room.ownerId, pinned: room.pinned, description: room.description, version: room.version,
       members: [...new Map([...room.members.values()].map(u => [u.id, { id: u.id, displayName: u.displayName }])).values()],
       current: expose(room.current), desktops: room.desktops.map(expose), queue: room.queue.map(expose), history: room.history.map(expose),
       preparation: room.preparations?.values().next().value || null,

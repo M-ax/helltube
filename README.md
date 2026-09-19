@@ -19,6 +19,8 @@ npm run dev
 
 Open **http://127.0.0.1:5173**. Vite proxies the API, media, and WebSockets to port 3000. In WebStorm, run `dev` from `package.json`, or run the same commands in its terminal.
 
+**The Ben Zone** is pinned at the top of the room list: children’s cartoons overdubbed with hardcore gangster rap, Russian hardbass, Dutch hardstyle, and drift music. Add premixed videos using the shared queue’s links or file uploads. The room is added once on new and existing installations, starts with an empty queue, and preserves its pin, description, and playback state across restarts. Administrators can rename or delete it; deleted rooms are not recreated.
+
 Initial account: **`admin` / `garbageTime_`**. Open Account and change this password before sharing the server. Admins can create accounts, change roles, reset passwords, and delete users. New guests can choose **Request an account** on the sign-in page and submit a username, display name and password. Admins approve or deny the live queue under **Manage users → Account requests**. Approval creates an ordinary user account and signs the waiting browser in immediately; guests who closed the page can sign in with their chosen credentials later. Passwords are hashed on submission and never shown to admins. Requests survive restarts and page refreshes, and expire after seven days. Everyone can create/join rooms and control playback; accounts are not room access-control lists.
 
 For a production build:

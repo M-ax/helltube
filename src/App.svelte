@@ -363,9 +363,9 @@
                     <div class="room-navigation-row">
                     <button class="room-button" class:active={$realtimeState.selectedRoomId === entry.id}
                             aria-current={$realtimeState.selectedRoomId === entry.id ? 'page' : undefined}
-                            on:click={() => joinRoom(entry.id)}><span class="room-hash"><Icon name="room"
+                            on:click={() => joinRoom(entry.id)}><span class="room-hash" class:pinned={entry.pinned} title={entry.pinned ? 'Pinned room' : undefined}><Icon name={entry.pinned ? 'pin' : 'room'}
                                                                                               size={20}/></span><span
-                            class="room-button-copy"><strong>{entry.name}</strong><span class:desktop-title={entry.currentKind === 'desktop'} title={entry.currentTitle || undefined}>{entry.currentTitle || 'Ready for a good watch'}</span></span><span
+                            class="room-button-copy"><strong>{entry.name}{#if entry.pinned}<span class="sr-only"> (Pinned room)</span>{/if}</strong><span class:desktop-title={entry.currentKind === 'desktop'} title={entry.currentTitle || entry.description || undefined}>{entry.currentTitle || entry.description || 'Ready for a good watch'}</span></span><span
                             class="member-count" title={`${entry.memberCount} in room`}><Icon name="users"
                                                                                               size={11}/>{entry.memberCount}</span>
                     </button>
@@ -433,9 +433,9 @@
                             aria-expanded={sidebarOpen} on:click={() => sidebarOpen = !sidebarOpen}>
                         <Icon name="list" size={22}/>
                     </button>
-                    <span class="header-room-icon"><Icon name={room ? 'room' : 'film'} size={24}/></span>
+                    <span class="header-room-icon"><Icon name={room?.pinned ? 'pin' : room ? 'room' : 'film'} size={24}/></span>
                     <div>
-                        <p class="eyebrow">{room ? 'SETTLE IN. YOU’RE IN GOOD COMPANY.' : 'A SHARED SCREEN. A BETTER EVENING.'}</p>
+                        <p class="eyebrow">{room?.pinned ? 'PINNED ROOM' : room ? 'SETTLE IN. YOU’RE IN GOOD COMPANY.' : 'A SHARED SCREEN. A BETTER EVENING.'}</p>
                         <h1>{room?.name || ($realtimeState.selectedRoomId ? 'Joining your room…' : 'Welcome to the good part.')}</h1>
                     </div>
                 </div>
@@ -494,8 +494,8 @@
                     <div class="room-cards">
                         {#each $realtimeState.rooms as entry (entry.id)}
                             <button class="room-card" on:click={() => joinRoom(entry.id)}><span class="room-card-icon"><Icon
-                                    name="room" size={25}/></span><span
-                                    class="room-card-info"><strong>{entry.name}</strong><span class:desktop-title={entry.currentKind === 'desktop'} title={entry.currentTitle || undefined}>{entry.currentTitle || 'Nothing on screen yet. Bring the first pick.'}</span></span><span
+                                    name={entry.pinned ? 'pin' : 'room'} size={25}/></span><span
+                                    class="room-card-info"><strong>{entry.name}{#if entry.pinned}<small class="room-pin-label">Pinned</small>{/if}</strong><span class:desktop-title={entry.currentKind === 'desktop'} title={entry.currentTitle || entry.description || undefined}>{entry.currentTitle || entry.description || 'Nothing on screen yet. Bring the first pick.'}</span></span><span
                                     class="room-card-footer"><span><Icon name="users"
                                                                          size={15}/>{entry.memberCount} {entry.memberCount === 1 ? 'person' : 'people'}</span><span>Join room<Icon
                                     name="chevron" size={16}/></span></span></button>
@@ -513,6 +513,7 @@
             {:else}
                 <div class="work-grid">
                     <section class="stage" aria-label="Watch together">
+                        {#if room?.description}<p class="room-description">{room.description}</p>{/if}
                         {#key preferenceKey}
                             <Lazy load={() => import('./components/Player.svelte')} label="player"
                                     username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}

@@ -31,7 +31,7 @@ test('audio-only HLS uses the player WebGL, switches MilkDrop presets, and keeps
     await page.getByLabel('Username', {exact: true}).fill('admin');
     await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
-    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.locator('#youtube-url').fill('https://soundcloud.com/test/audio');
     await page.getByRole('button', {name: 'Add to queue', exact: true}).click();
     const room = instance.rooms.get('lobby');

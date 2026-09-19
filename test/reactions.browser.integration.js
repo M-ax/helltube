@@ -63,7 +63,7 @@ test('pointing fingers track locally, stream at 60Hz, tap and slide together, an
         await page.getByLabel('Username', {exact: true}).fill('admin');
         await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
-        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
     }
     const finger = page => page.locator('.pointing-fingers');
@@ -199,7 +199,7 @@ test('Biden wanders in sync with local audio controls, reduced motion and no sta
         await page.getByLabel('Username', {exact: true}).fill('admin');
         await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
-        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
         assert.equal(await page.evaluate(() => window.decodedSounds), 0, 'Room interaction does not preload reaction audio.');
     }
@@ -294,7 +294,7 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
     const errors = [];
     const messages = new Map([[a, []], [b, []]]);
     const join = async page => {
-        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
         await page.getByRole('region', {name: 'Reactions', exact: true}).waitFor();
     };
     for (const page of [a, b]) {
@@ -476,7 +476,7 @@ test('flashbang bounces and rings in sync, fades over the player, and obeys loca
         await page.getByLabel('Username', {exact: true}).fill('admin');
         await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
-        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
         assert.equal(await page.evaluate(() => window.decodedSounds), 0, 'Room interaction does not preload reaction audio.');
     }

@@ -6,7 +6,7 @@ export function createReactionAudio() {
     const sounds = {
         hitmarker: {url: '/sounds/mw2-hitmarker.mp3', gain: 0.65},
         metalpipe: {url: '/sounds/metal-pipe.mp3', gain: 1},
-        jpeg: {url: '/sounds/hank-jpeg.mp3', gain: .8},
+        jpeg: {url: '/sounds/hank-jpeg.mp3', gain: 1.6},
         flashbangBounce: {url: '/sounds/csgo-flashbang-bounce.mp3', gain: .7},
         flashbangRing: {url: '/sounds/csgo-flashbang-ring.mp3', gain: .5},
         ...Object.fromEntries(Object.entries(BIDEN_SOUNDS).map(([kind, url]) => [kind, {url, gain: .8}])),

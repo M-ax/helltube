@@ -1,4 +1,5 @@
 <script>
+    import {onMount, onDestroy} from 'svelte';
     import Icon from './Icon.svelte';
     import {waitForDesktopFrame} from '../lib/desktop-video-ready.js';
 
@@ -8,6 +9,8 @@
     export let volume = 0.8;
     export let muted = false;
     export let captureMuted = false;
+    export let audioAnalysis;
+    export let bassBoost = false;
     export let inputDisabled = false;
     export let visualized = false;
     export let nativeControls = true;
@@ -25,25 +28,60 @@
     let error = '';
     let generation = 0;
     let videoReady = false;
+    let boostedStream = null;
+    let originalAudioStream = null;
+    let audioGeneration = 0;
+    let hidden = false;
 
     $: forcedMute = captureMuted || !!playback?.local;
     $: if (video) video.volume = volume;
     $: if (video) video.muted = muted || forcedMute;
+    $: updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !hidden, audioAnalysis);
+    $: renderedStream = boostedStream && boostedStream.original === playback?.stream ? boostedStream.stream : playback?.stream;
+
+    async function updateBassBoost(stream, enabled, analysis, gesture = false) {
+        const version = ++audioGeneration;
+        if (stream !== originalAudioStream) {
+            analysis?.releaseStream(originalAudioStream);
+            originalAudioStream = stream;
+            boostedStream = null;
+        }
+        if (!stream || !analysis) return;
+        try {
+            const processed = await analysis.boostStream(stream, enabled, gesture);
+            if (version === audioGeneration) boostedStream = {original: stream, stream: processed};
+        } catch { /* Keep native desktop playback when Web Audio is unavailable. */ }
+    }
+
+    onMount(() => {
+        const visibility = () => hidden = document.hidden;
+        const gesture = () => void updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !document.hidden, audioAnalysis, true);
+        document.addEventListener('visibilitychange', visibility);
+        document.addEventListener('pointerdown', gesture);
+        document.addEventListener('keydown', gesture);
+        visibility();
+        return () => {
+            document.removeEventListener('visibilitychange', visibility);
+            document.removeEventListener('pointerdown', gesture);
+            document.removeEventListener('keydown', gesture);
+        };
+    });
+    onDestroy(() => { audioGeneration++; audioAnalysis?.releaseStream(originalAudioStream); });
 
     function watchVideoFrame(node, initial) {
         let previousStream;
         let previousEnabled;
         let cancel;
-        function update({stream, enabled}) {
+        function update({stream, enabled, original}) {
             if (stream === previousStream && enabled === previousEnabled) return;
             previousStream = stream;
             previousEnabled = enabled;
             cancel?.();
             videoReady = false;
-            onVideoReady?.(false, stream);
+            onVideoReady?.(false, original);
             if (stream && enabled) cancel = waitForDesktopFrame(node, () => {
                 videoReady = true;
-                onVideoReady?.(true, stream);
+                onVideoReady?.(true, original);
             });
         }
         update(initial);
@@ -103,8 +141,8 @@
 
 <div class="desktop-tile" class:visualized bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}>
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
-    <video bind:this={video} use:attachStream={{stream: playback?.stream, connected}}
-           use:watchVideoFrame={{stream: playback?.stream, enabled: videoRequested && connected && !blocked && !error && !playback?.error && !playback?.videoError}}
+    <video bind:this={video} use:attachStream={{stream: renderedStream, connected}}
+           use:watchVideoFrame={{stream: renderedStream, original: playback?.stream, enabled: videoRequested && connected && !blocked && !error && !playback?.error && !playback?.videoError}}
            controls={nativeControls && !inputDisabled && !visualized} controlslist="nofullscreen" inert={inputDisabled || visualized || !nativeControls} playsinline aria-label={`Shared desktop: ${item.title}`}
            on:dblclick|preventDefault={toggleFullscreen}
            on:volumechange={() => { if (forcedMute && video && !video.muted) video.muted = true; }}

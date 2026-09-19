@@ -38,7 +38,7 @@ async function login(page, origin) {
   await page.getByLabel('Username', { exact: true }).fill('admin');
   await page.getByLabel('Password', { exact: true }).fill('garbageTime_');
   await page.getByRole('button', { name: 'Enter Helltube' }).click();
-  await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+  await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button', {name: /^The living room(?: |$)/}).click();
   await page.getByRole('button', { name: 'Your files', exact: true }).waitFor();
 }
 

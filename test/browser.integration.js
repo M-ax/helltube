@@ -34,7 +34,7 @@ for (const codec of ['vp9', 'h264']) {
     await page.getByLabel('Username', {exact: true}).fill('admin');
     await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
-    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByRole('button', {name: 'Your files', exact: true}).waitFor();
     let room = instance.rooms.get('lobby');
     await until(() => room.members.size);
@@ -111,7 +111,7 @@ test('4K VP9 survives startup buffering and sustained stalls fall back only for 
     await page.getByLabel('Username', {exact: true}).fill('admin');
     await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
-    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByRole('button', {name: 'Your files', exact: true}).waitFor();
   }
   const room = instance.rooms.get('lobby');
@@ -173,7 +173,7 @@ test('quality selection switches encrypted renditions locally and keeps the shar
     await page.getByLabel('Username', {exact: true}).fill('admin');
     await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
-    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByRole('button', {name: 'Your files', exact: true}).waitFor();
   }
   const room = instance.rooms.get('lobby');
@@ -295,7 +295,7 @@ test('CRT startup shows metadata, measured progress, failures, and yields to rea
   await page.getByLabel('Username', {exact: true}).fill('admin');
   await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
   await page.getByRole('button', {name: 'Enter Helltube'}).click();
-  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
   await page.getByRole('heading', {name: 'NO SIGNAL'}).waitFor();
   const flameFrame = () => page.locator('.video-canvas').evaluate(canvas => {
     // Force a draw before reading a WebGL buffer that is discarded after compositing.
@@ -556,7 +556,7 @@ test('SponsorBlock fetches post-ad HLS first and skips a long sponsor window for
     await page.getByLabel('Username', { exact: true }).fill('admin');
     await page.getByLabel('Password', { exact: true }).fill('garbageTime_');
     await page.getByRole('button', { name: 'Enter Helltube' }).click();
-    await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+    await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByRole('button', { name: 'Your files', exact: true }).waitFor();
   }
   const room = instance.rooms.get('lobby');
@@ -665,7 +665,7 @@ test('uploads survive a metal restart without reselecting files and defer fronte
   await page.getByLabel('Username', { exact: true }).fill('admin');
   await page.getByLabel('Password', { exact: true }).fill('garbageTime_');
   await page.getByRole('button', { name: 'Enter Helltube' }).click();
-  await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+  await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button', {name: /^The living room(?: |$)/}).click();
   await page.getByRole('button', { name: 'Your files', exact: true }).click();
   await page.getByLabel('Select a local video to upload', { exact: true }).setInputFiles(sample);
   await until(() => saved, 10000);
@@ -797,7 +797,7 @@ test('local videos can be dropped or multi-selected as shared named playlists', 
     await client.getByLabel('Username', { exact: true }).fill('admin');
     await client.getByLabel('Password', { exact: true }).fill('garbageTime_');
     await client.getByRole('button', { name: 'Enter Helltube' }).click();
-    await client.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+    await client.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await client.getByRole('button', { name: 'Your files', exact: true }).waitFor();
   }
   const room = instance.rooms.get('lobby');
@@ -902,7 +902,7 @@ test('two Chrome users upload, watch in sync, pause, seek, reconnect and manage 
     await page.getByLabel('Username', { exact: true }).fill(username);
     await page.getByLabel('Password', { exact: true }).fill(password);
     await page.getByRole('button', { name: 'Enter Helltube' }).click();
-    await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+    await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByRole('region', { name: 'Synchronized room player' }).waitFor();
   };
   await login(admin, 'admin', 'garbageTime_');
@@ -1343,7 +1343,7 @@ test('Mix playlist switch defaults off and controls the imported queue on deskto
   await page.getByLabel('Username', {exact: true}).fill('admin');
   await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
   await page.getByRole('button', {name: 'Enter Helltube'}).click();
-  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
   const room = instance.rooms.get('lobby');
   await until(() => room.members.size);
   const input = page.getByLabel('YouTube, Twitch VOD, SoundCloud, Spotify, or hosted media URL', {exact: true});
@@ -1429,7 +1429,7 @@ test('YouTube start-time editor and joystick feed timestamped playback to two br
     await page.getByLabel('Username', { exact: true }).fill('admin');
     await page.getByLabel('Password', { exact: true }).fill('garbageTime_');
     await page.getByRole('button', { name: 'Enter Helltube' }).click();
-    await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+    await page.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByRole('region', { name: 'Synchronized room player' }).waitFor();
   }
   const room = instance.rooms.get('lobby');
@@ -1593,7 +1593,7 @@ test('overlay controls autohide accessibly and account volume survives reloads a
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   const join = async target => {
-    await target.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button').first().click();
+    await target.getByRole('navigation', { name: 'Screening rooms' }).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await target.locator('.player-shell').waitFor();
   };
   const login = async target => {

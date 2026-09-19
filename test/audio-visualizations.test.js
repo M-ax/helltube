@@ -54,6 +54,34 @@ test('analyzer never reroutes playback before an AudioContext is running and reu
     assert.equal(await analysis.sample(video, true), null);
 });
 
+test('cancelled bass effects cannot attach a source after delayed audio permission', async t => {
+    for (const action of ['disable', 'release', 'destroy']) {
+        await t.test(action, async t => {
+            const resumed = Promise.withResolvers();
+            let sources = 0;
+            class Context {
+                state = 'suspended';
+                async resume() { await resumed.promise; this.state = 'running'; }
+                close() { return Promise.resolve(); }
+                createMediaElementSource() { sources++; }
+            }
+            const original = globalThis.AudioContext;
+            globalThis.AudioContext = Context;
+            t.after(() => { if (original) globalThis.AudioContext = original; else delete globalThis.AudioContext; });
+            const analysis = createAudioAnalysis();
+            const video = {volume: .8};
+            const pending = analysis.bassBoost(video, true, true);
+            if (action === 'disable') await analysis.bassBoost(video, false);
+            else if (action === 'release') analysis.release(video);
+            else analysis.destroy();
+            resumed.resolve();
+            assert.equal(await pending, false);
+            assert.equal(sources, 0, 'An expired or cancelled effect cannot reroute playback.');
+            analysis.destroy();
+        });
+    }
+});
+
 test('visualizations use real samples, freeze while paused or reduced motion, and turn off', async () => {
     const visualization = createVisualization();
     let samples = 0;

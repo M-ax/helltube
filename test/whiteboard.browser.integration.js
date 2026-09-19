@@ -24,7 +24,7 @@ test('SVG whiteboard streams to viewers, supports every tool, and follows room a
         await page.getByLabel('Username', {exact: true}).fill(username);
         await page.getByLabel('Password', {exact: true}).fill(password);
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
-        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
         await page.getByRole('button', {name: 'Whiteboard', exact: true}).waitFor();
     }
     const marks = page => page.locator('[data-whiteboard-id]');
@@ -156,7 +156,7 @@ test('whiteboard tools autohide into the left edge without ending drawing and re
     await page.getByLabel('Username', {exact: true}).fill('admin');
     await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
-    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
     const toggle = page.getByRole('button', {name: 'Whiteboard tools', exact: true});
     const panel = page.getByRole('region', {name: 'Whiteboard controls'});
     const dock = page.locator('.whiteboard-dock');

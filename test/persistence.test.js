@@ -7,6 +7,43 @@ import { Rooms, makeItem } from '../server/rooms.js';
 import { StateStore } from '../server/store.js';
 import { start, until } from './helpers.js';
 
+test('The Ben Zone is added once to existing installations without changing their queues or requiring room capacity', async t => {
+  const { instance } = await start(t, { maxTranscoders: 0 });
+  const store = instance.store;
+  const lobby = instance.rooms.get('lobby');
+  const item = makeItem({ kind: 'youtube', url: 'https://www.youtube.com/watch?v=BaW_jenozKc' });
+  instance.rooms.add(lobby, [item]);
+  store.delete('rooms', 'the-ben-zone');
+  store.delete('settings', 'the-ben-zone-initialized');
+  const legacy = store.load('rooms').find(room => room.id === 'lobby');
+  delete legacy.pinned;
+  delete legacy.description;
+  store.save('rooms', legacy.id, legacy);
+
+  const migrated = new Rooms({ store, maxRooms: 1 });
+  const benZone = migrated.get('the-ben-zone');
+  assert.equal(benZone.name, 'The Ben Zone');
+  assert.equal(benZone.pinned, true);
+  assert.match(benZone.description, /cartoons.*gangster rap.*Russian hardbass.*Dutch hardstyle.*drift/);
+  assert.equal(migrated.list()[0].id, benZone.id);
+  assert.equal(migrated.snapshot(benZone).description, benZone.description);
+  assert.equal(migrated.get('lobby').current.id, item.id);
+  assert.equal(migrated.get('lobby').pinned, false);
+  assert.equal(migrated.get('lobby').description, '');
+  assert.throws(() => migrated.create('Over capacity'), /Room limit/);
+
+  migrated.rename(benZone.id, 'The Ben Zone After Dark', { role: 'admin' });
+  migrated.add(benZone, [makeItem({ kind: 'youtube', url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw' })]);
+  const restarted = new Rooms({ store });
+  assert.equal(restarted.list().filter(room => room.id === benZone.id).length, 1);
+  assert.equal(restarted.list()[0].id, benZone.id);
+  assert.equal(restarted.get(benZone.id).name, 'The Ben Zone After Dark');
+  assert.equal(restarted.get(benZone.id).description, benZone.description);
+  assert.equal(restarted.get(benZone.id).current.id, benZone.current.id);
+  restarted.remove(benZone.id, { role: 'admin' });
+  assert.throws(() => new Rooms({ store }).get(benZone.id), /not found/);
+});
+
 test('room ownership and edits persist, and deleting all rooms survives restart', async t => {
   const { instance, dir } = await start(t, { maxTranscoders: 0 });
   const owner = { id: 'room-owner', role: 'user' };
@@ -17,6 +54,7 @@ test('room ownership and edits persist, and deleting all rooms survives restart'
   assert.equal(restored.get(room.id).name, 'Updated');
   restored.remove(room.id, owner);
   restored.remove('lobby', { role: 'admin' });
+  restored.remove('the-ben-zone', { role: 'admin' });
   assert.throws(() => restored.add(room, [makeItem({ kind: 'youtube' })]), /not found/);
   const reopened = new StateStore(dir);
   await reopened.init();

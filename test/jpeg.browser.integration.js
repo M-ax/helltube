@@ -50,7 +50,7 @@ test('Hank JPEG shares audio and progressively compresses live video without cha
         await page.getByLabel('Username', {exact: true}).fill('admin');
         await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
-        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
         await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
         assert.equal(await page.evaluate(() => performance.getEntriesByType('resource')
             .some(entry => entry.name.endsWith('/sounds/hank-jpeg.mp3'))), false);

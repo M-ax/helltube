@@ -3,6 +3,32 @@ import assert from 'node:assert/strict';
 import { start, until } from './helpers.js';
 import { Rooms, makeItem } from '../server/rooms.js';
 
+test('The Ben Zone is pinned first over HTTP and WebSocket and can be joined by ordinary users', async t => {
+  const { instance, api, connect } = await start(t, { maxTranscoders: 0 });
+  await instance.accounts.create({ username: 'benzonefan', password: 'benzone-password', role: 'user' });
+  const login = await api('/api/login', { method: 'POST', body: { username: 'benzonefan', password: 'benzone-password' } });
+  const auth = login.response.headers.get('set-cookie').split(';')[0];
+  const listing = await api('/api/rooms', { auth });
+  const pinned = listing.data.rooms[0];
+  assert.equal(pinned.name, 'The Ben Zone');
+  assert.equal(pinned.pinned, true);
+  assert.match(pinned.description, /Children’s cartoons/);
+  assert.equal(listing.data.rooms[1].pinned, false);
+  const ws = await connect(auth);
+  await until(() => ws.messages.some(message => message.type === 'rooms'));
+  assert.equal(ws.messages.find(message => message.type === 'rooms').rooms[0].id, pinned.id);
+  ws.send(JSON.stringify({ type: 'join', roomId: pinned.id }));
+  const state = await until(() => ws.messages.find(message => message.type === 'state' && message.room.id === pinned.id));
+  assert.equal(state.room.pinned, true);
+  assert.equal(state.room.description, pinned.description);
+  for (const method of ['PATCH', 'DELETE']) {
+    assert.equal((await api(`/api/rooms/${pinned.id}`, { auth, method, body: { name: 'Changed' } })).status, 403);
+  }
+  const created = await api('/api/rooms', { auth, method: 'POST', body: { name: 'Ordinary room', pinned: true } });
+  assert.equal(created.data.room.pinned, false, 'Clients cannot set the pin through room creation.');
+  assert.equal((await api('/api/rooms')).data.rooms[0].id, pinned.id);
+});
+
 test('original streams open on demand for room members without exposing URLs in snapshots', async t => {
   const { instance, url, cookie, connect } = await start(t, { maxTranscoders: 0 });
   const room = instance.rooms.get('lobby');

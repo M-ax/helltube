@@ -21,7 +21,7 @@ test('Firefox plays native HLS video with CRT, seek previews and reactions', {ti
   await page.getByLabel('Username', {exact: true}).fill('admin');
   await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
   await page.getByRole('button', {name: 'Enter Helltube'}).click();
-  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+  await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
   await page.getByRole('heading', {name: 'NO SIGNAL'}).waitFor();
   const canvas = page.locator('.video-canvas');
   assert.equal(await canvas.evaluate(canvas => {

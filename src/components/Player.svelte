@@ -20,6 +20,7 @@
     import BidenReaction from './BidenReaction.svelte';
     import JpegReaction from './JpegReaction.svelte';
     import {JPEG_LIFETIME_MS} from '../lib/jpeg.js';
+    import {MEDIA_REACTION_LIFETIME_MS, processBassBoost} from '../lib/media-reactions.js';
     import {BIDEN_LIFETIME_MS, bidenSound} from '../lib/biden.js';
     import {PIPE_LIFETIME_MS} from '../lib/metal-pipe.js';
     import {FLASH_LIFETIME_MS} from '../lib/flashbang.js';
@@ -163,6 +164,8 @@
     $: updateReactionRoom(connected ? room?.id : null);
     $: if (renderer) renderer.setBeachBallState(beachBall ? reactions.ball : null, (Date.now() + clockOffset - reactions.serverTime) / 1000);
     $: receiveReactions(reactions, connected, room?.id, reactionsEnabled);
+    $: deepFried = activeReactions.some(reaction => reaction.kind === 'deepfried');
+    $: bassBoost = activeReactions.some(reaction => reaction.kind === 'bassboost') && !soundMuted && !muted && !captureMuted && volume > 0;
     $: if (soundMuted || muted || captureMuted || volume <= 0) reactionAudio?.stop();
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
@@ -387,7 +390,7 @@
     }
 
     function mediaElement(node) {
-        return {destroy() { cleanupSource(node); audioAnalysis?.release(node); sourceKey = ''; }};
+        return {destroy() { cleanupSource(node); sourceKey = ''; }};
     }
 
     async function attach(id, url, baseTime, accessOverride = null) {
@@ -651,7 +654,8 @@
             if (seenReactions.has(event.id)) continue;
             seenReactions.add(event.id);
             if (!enabled) continue;
-            const lifetime = event.kind === 'jpeg' ? JPEG_LIFETIME_MS : event.kind === 'biden' ? BIDEN_LIFETIME_MS : event.kind === 'flashbang' ? FLASH_LIFETIME_MS
+            const lifetime = ['deepfried', 'bassboost'].includes(event.kind) ? MEDIA_REACTION_LIFETIME_MS
+                : event.kind === 'jpeg' ? JPEG_LIFETIME_MS : event.kind === 'biden' ? BIDEN_LIFETIME_MS : event.kind === 'flashbang' ? FLASH_LIFETIME_MS
                 : event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
@@ -665,8 +669,8 @@
                     clusters: event.clusters || [{strength: event.strength ?? 1, offset: 0}]});
                 continue;
             }
-            // A new JPEG replaces the previous one, bounding encode work and voice overlap.
-            if (event.kind === 'jpeg') activeReactions = activeReactions.filter(value => value.kind !== 'jpeg');
+            // Refresh media effects instead of stacking compressors or distortion.
+            if (['jpeg', 'deepfried', 'bassboost'].includes(event.kind)) activeReactions = activeReactions.filter(value => value.kind !== event.kind);
             activeReactions = [...activeReactions.slice(-39), event];
             if (event.kind === 'hitmarker' && !soundMuted && !muted && !captureMuted) reactionAudio?.play(volume);
             const timer = setTimeout(() => {
@@ -773,9 +777,13 @@
             void updateAnalysis(sharedSpotify ? !!spotifyStream : audioOnly && !spotify, video, audioAnalysis, true, spotifyStream);
         };
         const cancelReaction = event => { if (event.key === 'Escape') { hitmarkerArmed = false; fingerArmed = false; } };
+        const hideMediaReactions = () => {
+            if (document.hidden) activeReactions = activeReactions.filter(reaction => !['deepfried', 'bassboost'].includes(reaction.kind));
+        };
         document.addEventListener('pointerdown', unlockAudio);
         document.addEventListener('keydown', unlockAudio);
         document.addEventListener('keydown', cancelReaction);
+        document.addEventListener('visibilitychange', hideMediaReactions);
         if (navigator.userActivation?.hasBeenActive) unlockAudio();
         renderer = createVideoRenderer(canvas, video, active => webglEffectsActive = active, effectsCanvas);
         const timer = setInterval(sync, 250);
@@ -785,6 +793,7 @@
             document.removeEventListener('pointerdown', unlockAudio);
             document.removeEventListener('keydown', unlockAudio);
             document.removeEventListener('keydown', cancelReaction);
+            document.removeEventListener('visibilitychange', hideMediaReactions);
             reactionAudio.destroy();
             analysisGeneration++;
             audioAnalysis.destroy();
@@ -803,7 +812,7 @@
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
          data-controls-visible={controlsVisible} data-spotify-view={sharedSpotify ? spotifyVisualization ? 'visualizations' : 'desktop' : undefined}>
-    <div class="video-viewport" class:finger-armed={fingerArmed} bind:this={videoViewport}
+    <div class="video-viewport" class:finger-armed={fingerArmed} class:deep-fried={deepFried} bind:this={videoViewport}
          use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled && !whiteboardOpen, connected,
              roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
          data-renderer="native" data-effects-renderer={webglEffectsActive ? 'webgl' : '2d'}
@@ -815,7 +824,7 @@
                  style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}`}>
                 {#each desktops as desktop (desktop.id)}
                     <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {connected} {volume} {muted}
-                                   {captureMuted} inputDisabled={reactionInputActive}
+                                   {captureMuted} {audioAnalysis} {bassBoost} inputDisabled={reactionInputActive}
                                    nativeControls={!sharedSpotify}
                                    videoRequested={sharedSpotify && spotifyView === 'desktop'}
                                    onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}
@@ -825,7 +834,8 @@
             </div>
         {:else}
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video bind:this={video} use:mediaElement playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
+        <video bind:this={video} use:mediaElement use:processBassBoost={{analysis: audioAnalysis, enabled: bassBoost && !!media && !spotify}}
+               playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
                inert={reactionInputActive}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
                on:canplay={sync} on:loadeddata={() => { hasFrame = true; nativeAudioOnly = video.videoWidth === 0; }} on:waiting={() => localBuffering = true}
@@ -836,6 +846,16 @@
         <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
                 class:video-visible={webglEffectsActive && (crtVisible || !!media || live || spotify)} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
+        <svg class="media-effect-filters" aria-hidden="true" width="0" height="0">
+            <filter id="deep-fried-colors" color-interpolation-filters="sRGB">
+                <feConvolveMatrix order="3" kernelMatrix="0 -1 0 -1 5 -1 0 -1 0" preserveAlpha="true"/>
+                <feComponentTransfer>
+                    <feFuncR type="discrete" tableValues="0 .18 .55 .9 1"/>
+                    <feFuncG type="discrete" tableValues="0 .12 .4 .8 1"/>
+                    <feFuncB type="discrete" tableValues="0 .08 .3 .7 1"/>
+                </feComponentTransfer>
+            </filter>
+        </svg>
         {#each activeReactions.filter(reaction => reaction.kind === 'jpeg') as reaction (reaction.id)}
             <JpegReaction {reaction} {clockOffset} onSound={reactionSound}/>
         {/each}
@@ -866,7 +886,14 @@
             <BidenReaction {reaction} {clockOffset} onSound={reactionSound}/>
         {/each}
         <div class="reaction-overlay" aria-hidden="true">
-            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang', 'biden', 'jpeg'].includes(reaction.kind)) as reaction (reaction.id)}
+            <div class="media-reaction-labels">
+                {#each activeReactions.filter(reaction => ['deepfried', 'bassboost'].includes(reaction.kind)) as reaction (reaction.id)}
+                    <span class="media-reaction-label" data-reaction={reaction.kind} data-reaction-id={reaction.id}>
+                        {reaction.kind === 'deepfried' ? '🍳 DEEP FRIED' : '🔊 BASS BOOSTED'}
+                    </span>
+                {/each}
+            </div>
+            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang', 'biden', 'jpeg', 'deepfried', 'bassboost'].includes(reaction.kind)) as reaction (reaction.id)}
                 <span class="player-reaction" class:hitmarker={reaction.kind === 'hitmarker'}
                       data-reaction={reaction.kind} data-reaction-id={reaction.id}
                       style={`left: ${reaction.x * 100}%; top: ${reaction.y * 100}%`}>
@@ -1046,6 +1073,7 @@
     {/if}
 </section>
 <Reactions {connected} {beachBall} {fingerArmed} {whiteboardOpen} armed={hitmarkerArmed} enabled={reactionsEnabled} {soundMuted} onReact={react}
+           bassAvailable={!spotify && (!!media || live)}
            onEnabledToggle={toggleReactions}
            onSoundToggle={() => { soundMuted = !soundMuted; reactionAudio?.unlock(); }}/>
 <div class="now-playing">
@@ -1100,6 +1128,13 @@
 {/if}
 
 <style>
+    .media-effect-filters { position: absolute; pointer-events: none; }
+    .deep-fried > video, .deep-fried > .video-canvas, .deep-fried :global(.desktop-tile video),
+    .deep-fried :global(.jpeg-reaction), .deep-fried :global(.spotify-player iframe) {
+        filter: url(#deep-fried-colors) saturate(5) contrast(2.2) brightness(1.15);
+    }
+    .media-reaction-labels { position: absolute; top: 44px; right: 14px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: calc(100% - 28px); }
+    .media-reaction-label { padding: 6px 9px; border: 1px solid #ff9d42; border-radius: 4px; background: #341409e6; color: #ffcc77; font: bold 11px var(--mono); letter-spacing: .08em; }
     .spotify-transport { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 6px; }
     .spotify-transport .shared-controls { justify-self: start; min-width: 0; }
     .spotify-transport .local-controls { justify-self: end; margin-left: 0; min-width: 0; }

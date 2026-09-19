@@ -61,7 +61,7 @@ test('Spotify visualizations, local view switching and consecutive tracks retain
     await page.getByLabel('Username', {exact: true}).fill('admin');
     await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
-    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByText('Sign into Spotify and enable Helltube sharing on the private desktop.', {exact: true}).waitFor();
     const controls = page.getByRole('group', {name: 'Spotify playback controls', exact: true});
     assert.equal(await controls.locator('button:disabled').count(), 3);
@@ -288,6 +288,18 @@ test('Spotify visualizations, local view switching and consecutive tracks retain
   assert.equal(await pages[0].locator('.player-shell').getAttribute('data-spotify-view'), 'desktop', 'The selected view survives song changes');
   await pages[0].getByRole('group', {name: 'Spotify view on this device'}).getByRole('button', {name: 'Visualizations', exact: true}).click();
   await pages[0].getByLabel('Audio visualization library').waitFor();
+  await pages[0].getByRole('button', {name: 'Bass boosted', exact: true}).click();
+  for (const page of pages) {
+    await page.locator('[data-reaction="bassboost"]').waitFor();
+    await until(() => page.locator('.desktop-tile video').evaluate(video => video.srcObject !== window.spotifyStream && !video.paused));
+    assert.equal(await page.locator('.desktop-tile video').evaluate(video => video.srcObject.getVideoTracks()[0]
+        === window.spotifyStream.getVideoTracks()[0]), true);
+  }
+  await chooseView(pages[0], 'Desktop');
+  await visibleDesktop(pages[0]);
+  await chooseView(pages[0], 'Visualizations');
+  await until(() => pages[0].locator('[data-reaction="bassboost"]').count().then(count => count === 0));
+  assert.equal(instance.spotifyDesktop.active.session, session, 'Bass processing keeps the Spotify relay session.');
   for (const width of [1440, 900, 700, 390, 320]) {
     await pages[0].setViewportSize({width, height: 900});
     for (const view of ['Desktop', 'Visualizations']) {

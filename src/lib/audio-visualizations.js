@@ -1,3 +1,5 @@
+import {createBassBoost} from './media-reactions.js';
+
 // The six built-in analyzer/oscilloscope modes mirror Winamp's classic choices.
 export const classicVisualizations = [
     {id: 'spectrum', name: 'Spectrum · normal', mode: 0},
@@ -37,6 +39,7 @@ export function createAudioAnalysis() {
     let destroyed = false;
     const sources = new Map();
     const streams = new Map();
+    const effectRequests = new WeakMap();
     async function ready(gesture) {
         if (destroyed) return false;
         if (!context) {
@@ -54,46 +57,113 @@ export function createAudioAnalysis() {
         analyser.smoothingTimeConstant = 0.8;
         return analyser;
     }
+    function mediaSource(video) {
+        if (!sources.has(video)) {
+            const analyser = createAnalyser();
+            const source = context.createMediaElementSource(video);
+            source.connect(context.destination);
+            source.connect(analyser);
+            sources.set(video, {analyser, source});
+        }
+        return sources.get(video);
+    }
+    function streamSource(stream) {
+        if (!streams.has(stream)) {
+            const analyser = createAnalyser();
+            const source = context.createMediaStreamSource(stream);
+            source.connect(analyser);
+            streams.set(stream, {analyser, source});
+        }
+        return streams.get(stream);
+    }
+    function releaseStream(stream) {
+        effectRequests.delete(stream);
+        const audio = streams.get(stream);
+        audio?.effect?.destroy();
+        audio?.source.disconnect();
+        audio?.analyser.disconnect();
+        if (audio?.playout) { audio.playout.pause(); audio.playout.srcObject = null; }
+        audio?.output?.stream.getTracks().forEach(track => track.stop());
+        if (audio?.syncVideo) {
+            stream.removeEventListener('addtrack', audio.syncVideo);
+            stream.removeEventListener('removetrack', audio.syncVideo);
+        }
+        streams.delete(stream);
+    }
     return {
         async sample(video, gesture = false) {
             if (!video || !await ready(gesture)) return null;
-            if (!sources.has(video)) {
-                const analyser = createAnalyser();
-                const source = context.createMediaElementSource(video);
-                source.connect(context.destination);
-                source.connect(analyser);
-                sources.set(video, {analyser, source});
+            return mediaSource(video).analyser;
+        },
+        async bassBoost(video, enabled, gesture = false) {
+            if (!video || destroyed) return false;
+            const request = {};
+            effectRequests.set(video, request);
+            if (!enabled) {
+                sources.get(video)?.effect?.set(false, video.volume);
+                return false;
             }
-            return sources.get(video).analyser;
+            if (!await ready(gesture) || effectRequests.get(video) !== request) return false;
+            const audio = mediaSource(video);
+            audio.effect ||= createBassBoost(context, audio.source);
+            audio.effect.set(true, video.muted ? 0 : video.volume);
+            return true;
         },
         async sampleStream(stream, gesture = false) {
             if (!stream?.getAudioTracks().length || !await ready(gesture)) return null;
-            if (!streams.has(stream)) {
-                const analyser = createAnalyser();
-                const source = context.createMediaStreamSource(stream);
-                // Tap received audio for effects only. The desktop video element
-                // remains the sole audible output and owns volume/mute controls.
-                source.connect(analyser);
-                streams.set(stream, {analyser, source});
+            return streamSource(stream).analyser;
+        },
+        async boostStream(stream, enabled, gesture = false) {
+            if (!stream || destroyed) return stream;
+            const request = {};
+            effectRequests.set(stream, request);
+            if (!enabled) {
+                const audio = streams.get(stream);
+                audio?.syncVideo?.();
+                audio?.effect?.set(false, 1);
+                return audio?.processed || stream;
             }
-            return streams.get(stream).analyser;
+            if (!stream.getAudioTracks().length || !await ready(gesture) || effectRequests.get(stream) !== request) return stream;
+            const audio = streamSource(stream);
+            if (!audio.effect) {
+                // Chromium needs a native element pulling the original remote
+                // stream for Web Audio to receive samples. Keep it inaudible.
+                audio.playout = new Audio();
+                audio.playout.volume = 0;
+                audio.playout.srcObject = stream;
+                void audio.playout.play().catch(() => {});
+                // Route processed audio back through the desktop video element:
+                // its native volume/mute controls still apply after distortion.
+                // Keep the original remote tracks alive and never double-play audio.
+                audio.output = context.createMediaStreamDestination();
+                audio.source.connect(audio.output);
+                audio.effect = createBassBoost(context, audio.source, audio.output);
+                audio.processed = new MediaStream([...stream.getVideoTracks(), ...audio.output.stream.getAudioTracks()]);
+                audio.syncVideo = () => {
+                    const tracks = stream.getVideoTracks();
+                    for (const track of audio.processed.getVideoTracks()) if (!tracks.includes(track)) audio.processed.removeTrack(track);
+                    for (const track of tracks) if (!audio.processed.getVideoTracks().includes(track)) audio.processed.addTrack(track);
+                };
+                stream.addEventListener('addtrack', audio.syncVideo);
+                stream.addEventListener('removetrack', audio.syncVideo);
+            }
+            audio.syncVideo();
+            audio.effect.set(true, 1);
+            return audio.processed;
         },
-        releaseStream(stream) {
-            const audio = streams.get(stream);
-            audio?.source.disconnect();
-            audio?.analyser.disconnect();
-            streams.delete(stream);
-        },
+        releaseStream,
         release(video) {
+            effectRequests.delete(video);
             const audio = sources.get(video);
+            audio?.effect?.destroy();
             audio?.source.disconnect();
             audio?.analyser.disconnect();
             sources.delete(video);
         },
         destroy() {
             destroyed = true;
-            for (const {source, analyser} of sources.values()) { source.disconnect(); analyser.disconnect(); }
-            for (const {source, analyser} of streams.values()) { source.disconnect(); analyser.disconnect(); }
+            for (const {source, analyser, effect} of sources.values()) { effect?.destroy(); source.disconnect(); analyser.disconnect(); }
+            for (const stream of streams.keys()) releaseStream(stream);
             sources.clear();
             streams.clear();
             context?.close().catch(() => {});

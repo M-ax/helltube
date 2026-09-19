@@ -681,8 +681,24 @@ ul, ol {
     flex-shrink: 0;
 }
 
-.active .room-hash {
+.active .room-hash, .room-hash.pinned {
     color: var(--accent);
+}
+
+.room-pin-label {
+    display: inline-block;
+    margin-left: 8px;
+    color: var(--accent);
+    font-size: 9px;
+    font-weight: 500;
+    vertical-align: middle;
+}
+
+.room-description {
+    margin: 0 0 16px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
 }
 
 .room-button-copy {

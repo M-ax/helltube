@@ -9,6 +9,7 @@
     export let whiteboardOpen = false;
     export let enabled = true;
     export let soundMuted = false;
+    export let bassAvailable = true;
     export let onReact;
     export let onEnabledToggle;
     export let onSoundToggle;
@@ -63,6 +64,14 @@
         <button type="button" class="reaction-button jpeg-button" disabled={!connected || !enabled} on:click={() => onReact('jpeg')}
                 title="Hank Hill destroys the picture quality while he asks about JPEGs">
             <span class="jpeg-icon" aria-hidden="true">JPG</span><span>do i look like i know what a jpeg is</span>
+        </button>
+        <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('deepfried')}
+                title="Fry the picture with crushed colors and contrast for five seconds">
+            <span aria-hidden="true">🍳</span>Deep fried
+        </button>
+        <button type="button" class="reaction-button" disabled={!connected || !enabled || !bassAvailable} on:click={() => onReact('bassboost')}
+                title={bassAvailable ? 'Five seconds of bass distortion with quieter output' : 'Bass boost needs playable room audio; Spotify embeds do not share their audio'}>
+            <span aria-hidden="true">🔊</span>Bass boosted
         </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('heart')}><span aria-hidden="true">❤️</span>Love</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('laugh')}><span aria-hidden="true">😂</span>Laugh</button>

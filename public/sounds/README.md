@@ -54,7 +54,9 @@ The source audio receives a constant -18.37 dB gain adjustment (approximately
 -18 LUFS overall), preserving the edit's rising distortion and relative loudness,
 and is encoded as mono 96 kbps MP3 at 44.1 kHz.
 Original audio belongs to its respective rights holders.
-It plays at 80% of the viewer's volume, 600 ms after the shared reaction timestamp.
+It plays with a 1.6× gain scaled by the viewer's volume, 600 ms after the shared
+reaction timestamp. This is a 6 dB boost over the previous playback level; the
+normalized clip retains headroom at full viewer volume.
 Live frames are JPEG-encoded locally at progressively lower quality and resolution
 during the same six-second timeline; normal video returns when it ends. No video is uploaded or transcoded
 on the server. Repeated triggers replace the active effect and voice.

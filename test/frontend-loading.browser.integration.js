@@ -29,7 +29,7 @@ test('cold login and idle rooms defer optional code, full fonts and reaction sou
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
     await page.getByRole('navigation', {name: 'Screening rooms'}).waitFor();
     assert.ok(!requests.some(path => /\/(Player|Account|Admin|hls)-/.test(path)));
-    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByRole('heading', {name: 'Reactions', exact: true}).click();
     await page.evaluate(() => document.fonts.ready);
     assert.ok(requests.some(path => /\/Player-.*\.js$/.test(path)));

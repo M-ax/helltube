@@ -17,7 +17,7 @@ async function join(page, url, username = 'admin') {
     await page.getByLabel('Username', {exact: true}).fill(username);
     await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
     await page.getByRole('button', {name: 'Enter Helltube'}).click();
-    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
     await page.getByRole('button', {name: 'Your files', exact: true}).waitFor();
 }
 
@@ -469,6 +469,40 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
         return peak;
     });
       assert.ok(audioPeak > 0.1, `Captured tone was audible in the receiving browser: ${audioPeak}`);
+      if (!split) {
+        await viewer.locator('video').evaluate(video => window.beforeBassStream = video.srcObject);
+        await viewer.getByRole('button', {name: 'Bass boosted', exact: true}).click();
+        await until(() => viewer.locator('video').evaluate(video => video.srcObject !== window.beforeBassStream
+            && video.readyState >= 2 && !video.paused));
+        const processed = await viewer.locator('video').evaluate(async video => {
+            const context = new AudioContext();
+            await context.resume();
+            const analyser = context.createAnalyser();
+            context.createMediaStreamSource(video.srcObject).connect(analyser);
+            const samples = new Float32Array(analyser.fftSize);
+            let peak = 0;
+            for (let i = 0; i < 15 && peak < .01; i++) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+                analyser.getFloatTimeDomainData(samples);
+                peak = Math.max(...samples.map(Math.abs));
+            }
+            const result = {peak,
+                sameVideo: video.srcObject.getVideoTracks()[0] === window.beforeBassStream.getVideoTracks()[0],
+                originalAlive: window.beforeBassStream.getTracks().every(track => track.readyState === 'live')};
+            window.processedBassStream = video.srcObject;
+            await context.close();
+            return result;
+        });
+        assert.ok(processed.peak > .01 && processed.peak <= .141, `Desktop distortion is attenuated: ${processed.peak}`);
+        assert.equal(processed.sameVideo, true);
+        assert.equal(processed.originalAlive, true);
+        assert.equal(await sender.locator('video').evaluate(video => video.muted), true, 'Local capture stays muted.');
+        await viewer.getByRole('button', {name: 'Bass boosted', exact: true}).click();
+        await viewer.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
+        await until(() => viewer.locator('[data-reaction="bassboost"]').count().then(count => count === 0));
+        assert.equal(await viewer.locator('video').evaluate(video => video.srcObject === window.processedBassStream && !video.paused), true,
+            'Repeated reactions and expiry retain the processed stream and continue playback.');
+      }
     }
     const latency = await viewer.locator('video').evaluate(async video => {
         const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
