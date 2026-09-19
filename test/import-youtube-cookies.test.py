@@ -19,6 +19,17 @@ USER_AGENT = b'# Helltube-User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) 
 
 
 class CookieImportTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Executable receiver needs Linux')
+    def test_installed_receiver_starts_with_its_shebang(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / 'helltube-import-cookies'
+            executable.write_bytes(Path(importer.__file__).read_bytes())
+            executable.chmod(0o700)
+            result = subprocess.run([str(executable)], input=b'private-session', capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b'')
+            self.assertEqual(result.stderr, b'Cookie import failed. Check configuration, permissions and service state.\n')
+
     def test_effective_systemd_credential_is_checked_through_dbus(self):
         expected = ['youtube-cookies', str(importer.DESTINATION)]
         for kind, entries, allowed in [('a(ss)', [expected], True), ('a(ss)', [], False),

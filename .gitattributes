@@ -1,1 +1,2 @@
 *.sh text eol=lf
+scripts/import-youtube-cookies.py text eol=lf
