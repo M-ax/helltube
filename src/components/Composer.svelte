@@ -35,12 +35,13 @@
     let dropzoneDragDepth = 0;
     $: queue = room?.queue || [];
     $: if (insertAt !== 'end' && Number(insertAt) >= queue.length) insertAt = 'end';
-    $: unavailable = !connected || !room || capabilities.ffmpeg === false;
+    $: unavailable = !connected || !room;
     $: linkKind = sourceKind(url.trim());
     $: mixVideoURL = youtubeMixVideoURL(url.trim());
-    $: providerUnavailable = (linkKind === 'youtube' || linkKind === 'twitch') && capabilities[linkKind] === false;
+    $: providerUnavailable = (['youtube', 'twitch', 'soundcloud'].includes(linkKind) && capabilities[linkKind] === false)
+        || (linkKind !== 'spotify' && capabilities.ffmpeg === false);
     $: youtubeUnavailable = unavailable || !!busy;
-    $: uploadUnavailable = unavailable || !!busy || !manager;
+    $: uploadUnavailable = unavailable || capabilities.ffmpeg === false || !!busy || !manager;
     $: if (uploadUnavailable) resetFileDrag();
     $: if (mode !== 'upload') dropzoneDragDepth = 0;
     $: resetLinkOptions(url);
@@ -96,7 +97,7 @@
         if (busy || unavailable || providerUnavailable) return;
         error = '';
         if (!linkKind) {
-            error = 'Paste a YouTube, Twitch VOD, or HTTP/HTTPS media file URL.';
+            error = 'Paste a YouTube, Twitch VOD, SoundCloud, Spotify, or HTTP/HTTPS media file URL.';
             return;
         }
         if (linkKind === 'twitch') {
@@ -116,7 +117,7 @@
             });
             url = '';
             onPreparation?.(null);
-            notify(`${result.added} ${result.added === 1 ? 'video' : 'videos'} added to ${roomName}.`, 'notice');
+            notify(`${result.added} ${result.added === 1 ? 'item' : 'items'} added to ${roomName}.`, 'notice');
         } catch (cause) {
             error = cause.message;
             onPreparation?.({...preparation, error});
@@ -218,12 +219,12 @@
 <section class="composer" bind:this={section} aria-label="Add a video">
     <div class="composer-heading">
         <div><span class="eyebrow">FOUND SOMETHING GOOD?</span>
-            <h3>Pass the popcorn. Add a video.</h3></div>
+            <h3>Pass the popcorn. Add something good.</h3></div>
         <div class="source-switch" role="group" aria-label="Video source">
             <button class:active={mode === 'youtube'} aria-pressed={mode === 'youtube'}
                     on:click={() => mode = 'youtube'}>
                 <Icon name="link" size={17}/>
-                <span>Video link</span></button>
+                <span>Media link</span></button>
             <button class:active={mode === 'upload'} class:drag-active={filesDragDepth > 0 && !uploadUnavailable}
                     aria-pressed={mode === 'upload'} title="Choose videos or drop files here"
                     on:click={() => mode = 'upload'} on:dragenter={event => dragEnter(event, 'files')}
@@ -236,11 +237,11 @@
     </div>
     {#if mode === 'youtube'}
         <form class="youtube-form" on:submit|preventDefault={addYoutube}>
-            <label for="youtube-url" class="sr-only">YouTube, Twitch VOD, or hosted media URL</label>
+            <label for="youtube-url" class="sr-only">YouTube, Twitch VOD, SoundCloud, Spotify, or hosted media URL</label>
             <div class="url-field">
                 <Icon name="link" size={18}/>
                 <input id="youtube-url" bind:this={urlInput} bind:value={url} type="url"
-                       placeholder="Paste a YouTube, Twitch VOD, or media file link" required
+                       placeholder="Paste a YouTube, SoundCloud, Spotify, Twitch, or media link" required
                        disabled={youtubeUnavailable} autocomplete="off"/></div>
             {#if mixVideoURL}
                 <div class="youtube-mix-option">
@@ -336,7 +337,7 @@
     {#if $desktopState.error}<p class="form-error" role="alert"><Icon name="warning" size={16}/>{$desktopState.error}</p>{/if}
     {#if mode !== 'desktop'}
     <div class="composer-bottom">
-        <p>{mode === 'youtube' ? 'YouTube videos and playlists, Twitch VODs, or public HTTP/HTTPS video and audio files.' : 'Playback can start while uploading, when the container allows.'}</p>
+        <p>{mode === 'youtube' ? 'YouTube, SoundCloud tracks and playlists, Spotify, Twitch VODs, or public video and audio files.' : 'Playback can start while uploading, when the container allows.'}</p>
         <label for="insert-position">Insert<select id="insert-position" bind:value={insertAt}
                                                    disabled={unavailable || !!busy}>
             <option value="end">At the end</option>
@@ -349,8 +350,8 @@
         <p class="form-error" role="alert">
             <Icon name="warning" size={16}/>{error}</p>
     {/if}
-    {#if mode === 'youtube' && providerUnavailable}<p class="inline-note">YouTube and Twitch require yt-dlp on the server.
-        Hosted media links are still available.</p>{/if}
+    {#if mode === 'youtube' && linkKind === 'spotify'}<p class="field-help">Spotify plays in its own player on each device, with previews or sign-in depending on availability. Use Skip when you’re ready for the next queue item.</p>{/if}
+    {#if mode === 'youtube' && providerUnavailable}<p class="inline-note">Media processing requires FFmpeg; YouTube, Twitch, and SoundCloud also require yt-dlp on the server. Spotify embeds remain available.</p>{/if}
     {#if mode === 'upload'}
         <details class="upload-explainer">
             <summary>How uploading and buffering work</summary>

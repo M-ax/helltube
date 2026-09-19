@@ -1346,7 +1346,7 @@ test('Mix playlist switch defaults off and controls the imported queue on deskto
   await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
   const room = instance.rooms.get('lobby');
   await until(() => room.members.size);
-  const input = page.getByLabel('YouTube, Twitch VOD, or hosted media URL', {exact: true});
+  const input = page.getByLabel('YouTube, Twitch VOD, SoundCloud, Spotify, or hosted media URL', {exact: true});
   const toggle = page.getByRole('switch', {name: 'Include Mix playlist', exact: true});
   const mix = 'https://www.youtube.com/watch?v=5WzswZXTMZQ&list=RD5WzswZXTMZQ&start_radio=1&t=10';
   const submit = async expected => {
@@ -1434,7 +1434,7 @@ test('YouTube start-time editor and joystick feed timestamped playback to two br
   }
   const room = instance.rooms.get('lobby');
   await until(() => room.members.size === 2);
-  const input = editor.getByLabel('YouTube, Twitch VOD, or hosted media URL', { exact: true });
+  const input = editor.getByLabel('YouTube, Twitch VOD, SoundCloud, Spotify, or hosted media URL', { exact: true });
   const checkbox = editor.getByRole('checkbox', { name: 'Start at', exact: true });
   const timeInput = editor.getByRole('textbox', { name: 'Video start time', exact: true });
   const joystick = editor.getByRole('slider', { name: 'Start time joystick', exact: true });

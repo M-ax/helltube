@@ -7,6 +7,8 @@ export function sourceKind(value) {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
     if (youtubeHosts.includes(url.hostname)) return 'youtube';
     if (twitchHosts.includes(url.hostname)) return 'twitch';
+    if (['soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'on.soundcloud.com', 'soundcloud.app.goo.gl'].includes(url.hostname)) return 'soundcloud';
+    if (url.hostname === 'open.spotify.com') return 'spotify';
     return 'http';
   } catch { return null; }
 }
@@ -34,5 +36,28 @@ export function twitchURL(value) {
   return `https://www.twitch.tv/videos/${id}`;
 }
 
-export const sourceLabels = { youtube: 'YouTube', twitch: 'Twitch VOD', http: 'Hosted media', upload: 'Local video', desktop: 'Live desktop' };
-export const sourceIcons = { youtube: 'youtube', twitch: 'twitch', http: 'link', upload: 'file', desktop: 'desktop' };
+export function soundcloudURL(value) {
+  const url = new URL(value);
+  const short = ['on.soundcloud.com', 'soundcloud.app.goo.gl'].includes(url.hostname);
+  if (sourceKind(value) !== 'soundcloud' || url.port || !(short
+    ? /^\/[\w-]+\/?$/.test(url.pathname)
+    : /^\/[\w-]+\/(?!sets\/?$)[\w-]+(?:\/[\w-]+)?\/?$/.test(url.pathname))) {
+    throw new Error('Paste a SoundCloud track or playlist link.');
+  }
+  url.protocol = 'https:';
+  if (!short) url.hostname = 'soundcloud.com';
+  url.search = '';
+  url.hash = '';
+  return url.href;
+}
+
+export function spotifyLink(value) {
+  const url = new URL(value);
+  const match = /^\/(?:intl-[a-z]{2}\/)?(?:embed\/)?(track|album|playlist|episode|show|artist)\/([a-zA-Z0-9]{22})\/?$/.exec(url.pathname);
+  if (sourceKind(value) !== 'spotify' || url.port || !match) throw new Error('Paste a Spotify track, album, playlist, artist, episode, or show link from open.spotify.com.');
+  const [, type, id] = match;
+  return { type, id, url: `https://open.spotify.com/${type}/${id}`, embed: `https://open.spotify.com/embed/${type}/${id}?theme=0` };
+}
+
+export const sourceLabels = { youtube: 'YouTube', twitch: 'Twitch VOD', soundcloud: 'SoundCloud', spotify: 'Spotify', http: 'Hosted media', upload: 'Local video', desktop: 'Live desktop' };
+export const sourceIcons = { youtube: 'youtube', twitch: 'twitch', soundcloud: 'music', spotify: 'music', http: 'link', upload: 'file', desktop: 'desktop' };

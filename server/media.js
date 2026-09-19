@@ -26,12 +26,13 @@ export async function available(command, args = ['-version']) {
 }
 
 export class Media {
-  constructor(config, rooms, uploads, youtube, twitch) {
+  constructor(config, rooms, uploads, youtube, twitch, soundcloud) {
     this.config = config;
     this.rooms = rooms;
     this.uploads = uploads;
     this.youtube = youtube;
     this.twitch = twitch;
+    this.soundcloud = soundcloud;
     this.sourceSecret = randomBytes(32).toString('hex');
     this.jobs = new Map();
     this.dir = path.join(config.dataDir, 'media', randomUUID());
@@ -54,6 +55,7 @@ export class Media {
     await this.cleanup();
     this.rooms.on('prepare', () => this.schedule());
     this.rooms.on('seek', (room, position) => {
+      if (room.current.kind === 'spotify') return;
       const job = this.jobs.get(room.current.id);
       const qualities = room.current.media?.qualities || [room.current.media].filter(Boolean);
       const prepared = qualities.find(quality => position >= quality.baseTime &&
@@ -185,7 +187,7 @@ export class Media {
           continue;
         }
       }
-      if (this.jobs.has(item.id) || item.status === 'error' || item.kind === 'desktop') continue;
+      if (this.jobs.has(item.id) || item.status === 'error' || ['desktop', 'spotify'].includes(item.kind)) continue;
       if (item.kind === 'upload') {
         const upload = this.uploads.uploads.get(item.source.uploadId);
         if (!upload || (!upload.complete && upload.received < 64 * 1024)) continue;
@@ -257,7 +259,7 @@ export class Media {
     const args = ['-hide_banner', '-loglevel', this.config.ffmpegLogLevel || 'warning', '-nostdin', '-y'];
     let inputs;
     let copyQuality;
-    if (item.kind === 'youtube' || item.kind === 'twitch') {
+    if (['youtube', 'twitch', 'soundcloud'].includes(item.kind)) {
       const resolved = await this[item.kind].resolve(item.source.url);
       if (job.cancelled) return;
       if (resolved.duration) item.duration = resolved.duration;
@@ -306,8 +308,9 @@ export class Media {
     }
     if (job.cancelled) return;
     item.preparation = { stage: 'transcoding', baseTime, seconds: 0 };
-    const inputFormats = item.kind === 'http' ? HOSTED_INPUT_FORMATS : FILE_INPUT_FORMATS +
-      (item.kind === 'youtube' || item.kind === 'twitch' ? ',hls' : '');
+    const inputFormats = item.kind === 'http' ? HOSTED_INPUT_FORMATS
+      : item.kind === 'soundcloud' ? `${HOSTED_INPUT_FORMATS},hls` : FILE_INPUT_FORMATS +
+        (item.kind === 'youtube' || item.kind === 'twitch' ? ',hls' : '');
     const inputArgs = (start) => {
       const result = [];
       for (const input of inputs) {
@@ -356,7 +359,7 @@ export class Media {
     }
     args.push(...inputArgs(baseTime));
     args.push('-progress', 'pipe:1', '-stats_period', '0.5', '-nostats',
-      '-map', item.kind === 'http' ? '0:v:0?' : '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
+      '-map', ['http', 'soundcloud'].includes(item.kind) ? '0:v:0?' : '0:v:0', '-map', inputs.length > 1 ? '1:a:0?' : '0:a:0?',
       '-vf', 'scale=w=min(1280\\,iw):h=min(720\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2',
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '3000k', '-bufsize', '6000k',
       '-threads', '2', '-pix_fmt', 'yuv420p', '-r', '30', '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
@@ -546,6 +549,7 @@ export class Media {
     }
     this.youtube.close();
     this.twitch?.close();
+    this.soundcloud?.close();
     for (const job of retained) {
       await job.task;
       for (const rendition of [job, job.original].filter(Boolean)) {

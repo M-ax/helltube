@@ -23,6 +23,8 @@
     "test:youtube": "node --test test/youtube.integration.js"
   },
   "dependencies": {
+    "butterchurn": "2.6.7",
+    "butterchurn-presets": "2.4.7",
     "express": "^5.1.0",
     "hls.js": "^1.6.13",
     "mediasoup": "3.27.1",

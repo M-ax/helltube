@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { httpError, text } from './config.js';
 import { sponsorPosition } from '../shared/sponsorblock.js';
-import { sourceKind } from '../shared/media-source.js';
+import { sourceKind, spotifyLink } from '../shared/media-source.js';
 import { roomNowPlayingTitle } from '../shared/room-title.js';
 
 export function makeItem(source, extra = {}) {
@@ -25,7 +25,7 @@ export class Rooms extends EventEmitter {
       for (const item of [room.current, ...room.queue, ...room.history].filter(Boolean)) {
         item.media = null;
         item.preparation = null;
-        if (item.status !== 'error') item.status = item.kind === 'upload' && !item.source.complete ? 'uploading' : 'queued';
+        if (item.status !== 'error') item.status = item.kind === 'spotify' ? 'ready' : item.kind === 'upload' && !item.source.complete ? 'uploading' : 'queued';
         item.source.startAt = item.startAt || 0;
       }
       room.resumeWhenReady = !saved.playback.paused || saved.resumeWhenReady;
@@ -190,6 +190,7 @@ export class Rooms extends EventEmitter {
       return this.replay(room, room.history[0].id);
     }
     if (!room.current) throw httpError(409, 'Add a video first.');
+    if (room.current.kind === 'spotify') throw httpError(409, 'Use the Spotify player on your device. Skip advances the shared queue.');
     if (action === 'play') {
       room.resumeWhenReady = true;
       this.stamp(room, this.position(room), !this.canPlay(room));
@@ -249,7 +250,7 @@ export class Rooms extends EventEmitter {
   tick() {
     for (const room of this.rooms.values()) {
       const item = room.current;
-      if (item?.kind === 'desktop') {
+      if (['desktop', 'spotify'].includes(item?.kind)) {
         this.persist(room);
         this.emit('state', room);
         continue;
@@ -300,7 +301,8 @@ export class Rooms extends EventEmitter {
     const expose = item => {
       if (!item) return null;
       const { source, ...safe } = item;
-      return { ...safe, hasOriginalStream: item.kind !== 'upload' && !!sourceKind(source?.url) };
+      return { ...safe, ...(item.kind === 'spotify' ? {embed: spotifyLink(source.url).embed} : {}),
+        hasOriginalStream: item.kind !== 'upload' && !!sourceKind(source?.url) };
     };
     return { id: room.id, name: room.name, ownerId: room.ownerId, version: room.version,
       members: [...new Map([...room.members.values()].map(u => [u.id, { id: u.id, displayName: u.displayName }])).values()],

@@ -6,6 +6,8 @@
     import QualitySelect from './QualitySelect.svelte';
     import DesktopStats from './DesktopStats.svelte';
     import DesktopPlayer from './DesktopPlayer.svelte';
+    import AudioVisualizations from './AudioVisualizations.svelte';
+    import {createAudioAnalysis} from '../lib/audio-visualizations.js';
     import {desktopLayout} from '../lib/desktop-layout.js';
     import {roomNowPlayingTitle} from '../../shared/room-title.js';
     import Reactions from './Reactions.svelte';
@@ -49,6 +51,10 @@
     let desktopWidth = 960;
     let desktopHeight = 480;
     let renderer;
+    let audioAnalysis;
+    let analyser = null;
+    let nativeAudioOnly = false;
+    let analysisGeneration = 0;
     let seekPreview;
     let seekCenter = null;
     let previewOffset = null;
@@ -104,11 +110,15 @@
 
     $: item = room?.current;
     $: live = item?.kind === 'desktop';
+    $: spotify = item?.kind === 'spotify';
+    $: spotifyCollection = spotify && /\/(album|playlist|show|artist)\//.test(item.embed || '');
+    $: audioOnly = !live && (!!item?.audioOnly || (!!media && hasFrame && nativeAudioOnly));
+    $: updateAnalysis(audioOnly && !spotify, video, audioAnalysis);
     $: desktops = live ? room.desktops ?? [item] : [];
     $: desktopGrid = desktopLayout(desktops.length, desktopWidth, desktopHeight);
     $: qualities = availableQualities(item?.media);
     $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
-    $: crtVisible = !live && (!media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error'));
+    $: crtVisible = !live && !spotify && (!media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error'));
     $: if (renderer) renderer.setCrtActive(crtVisible);
     $: if (renderer) renderer.setVideo(video);
     $: duration = item?.duration;
@@ -117,7 +127,7 @@
     $: progress = Math.min(100, displayedPosition / seekMax * 100);
     $: buffered = Math.min(100, Math.max(0, (media?.bufferedUntil || 0) / seekMax * 100));
     $: serverOverlay = overlay && overlay.expiresAt > now + clockOffset ? overlay.message : '';
-    $: preparing = item && !media && !live && item.status !== 'error';
+    $: preparing = item && !media && !live && !spotify && item.status !== 'error';
     $: canAutoHide = (!!media || live) && connected && playing && !room?.playback.paused && !preparing
         && !localBuffering && !blocked && !playerError && item?.status !== 'error';
     $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed;
@@ -137,6 +147,15 @@
     }
     $: if (!connected && video) video.pause();
     $: if (!connected || playerError || item?.status === 'error') previewRelative(null);
+
+    async function updateAnalysis(enabled, element, analysis, gesture = false) {
+        const version = ++analysisGeneration;
+        if (!enabled || !element || !analysis) { analyser = null; return; }
+        try {
+            const result = await analysis.sample(element, gesture);
+            if (version === analysisGeneration) analyser = result;
+        } catch { if (version === analysisGeneration) analyser = null; }
+    }
 
     function applyPreferences(next, _key) {
         volume = typeof next?.volume === 'number' && Number.isFinite(next.volume)
@@ -317,6 +336,7 @@
         bufferReport = null;
         playing = false;
         hasFrame = false;
+        nativeAudioOnly = false;
         controlsVisible = true;
         seekCenter = null;
         previewOffset = null;
@@ -336,7 +356,7 @@
     }
 
     function mediaElement(node) {
-        return {destroy() { cleanupSource(node); sourceKey = ''; }};
+        return {destroy() { cleanupSource(node); audioAnalysis?.release(node); sourceKey = ''; }};
     }
 
     async function attach(id, url, baseTime, accessOverride = null) {
@@ -710,7 +730,11 @@
 
     onMount(() => {
         reactionAudio = createReactionAudio();
-        const unlockAudio = () => reactionAudio.unlock();
+        audioAnalysis = createAudioAnalysis();
+        const unlockAudio = () => {
+            reactionAudio.unlock();
+            void updateAnalysis(audioOnly && !spotify, video, audioAnalysis, true);
+        };
         const cancelReaction = event => { if (event.key === 'Escape') { hitmarkerArmed = false; fingerArmed = false; } };
         document.addEventListener('pointerdown', unlockAudio);
         document.addEventListener('keydown', unlockAudio);
@@ -725,6 +749,8 @@
             document.removeEventListener('keydown', unlockAudio);
             document.removeEventListener('keydown', cancelReaction);
             reactionAudio.destroy();
+            analysisGeneration++;
+            audioAnalysis.destroy();
             for (const timer of reactionTimers) clearTimeout(timer);
             renderer.destroy();
             renderer = null;
@@ -760,14 +786,25 @@
         <video bind:this={video} use:mediaElement playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
                inert={reactionInputActive}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
-               on:canplay={sync} on:loadeddata={() => hasFrame = true} on:waiting={() => localBuffering = true}
+               on:canplay={sync} on:loadeddata={() => { hasFrame = true; nativeAudioOnly = video.videoWidth === 0; }} on:waiting={() => localBuffering = true}
                on:playing={() => { playing = true; localBuffering = false; }}
                on:pause={() => playing = false} on:ended={() => playing = false}
                on:error={nativePlaybackError}></video>
         {/if}
         <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
-                class:video-visible={webglEffectsActive && (crtVisible || !!media || live)} aria-hidden="true"></canvas>
+                class:video-visible={webglEffectsActive && (crtVisible || !!media || live || spotify)} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
+        {#if spotify && connected && !captureMuted}
+            <div class="spotify-player" class:spotify-collection={spotifyCollection}>
+                {#key item.id}
+                    <iframe title="Spotify player" src={item.embed} width="100%" height={spotifyCollection ? '352' : '152'}
+                            allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"></iframe>
+                {/key}
+                <p>Play and adjust volume in Spotify on each device. Playback may be a preview or require sign-in. Use Skip to advance the room.</p>
+            </div>
+        {:else if spotify && captureMuted}
+            <div class="screen-message"><p>Spotify playback is stopped while sharing to prevent audio feedback.</p></div>
+        {/if}
         {#if reactionsEnabled && connected && reactions.roomId === room?.id && (fingerArmed || reactions.fingers?.length)}
             <PointingFingers fingers={reactions.fingers || []} local={localFinger} clientId={reactions.clientId}
                              {clockOffset} onSlide={fingerSlide} onImpact={() => reactionSound('fingertap')}/>
@@ -803,7 +840,7 @@
             <div class="seek-preview-label">Seek preview · {time(previewPosition)}</div>
         {/if}
         <div class="screen-topline"><span class="screen-brand"><Icon name="flame" size={16}/>HELLTUBE CINEMA</span><span
-                class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : live ? `${desktops.length} LIVE ${desktops.length === 1 ? 'DESKTOP' : 'DESKTOPS'}` : room.playback.paused ? 'PAUSED TOGETHER' : 'WATCHING TOGETHER'}</span>
+                class="screen-tag">{!item ? 'THE SCREEN IS YOURS' : !connected ? 'CONNECTION LOST' : live ? `${desktops.length} LIVE ${desktops.length === 1 ? 'DESKTOP' : 'DESKTOPS'}` : spotify ? 'SPOTIFY · LOCAL PLAYBACK' : room.playback.paused ? 'PAUSED TOGETHER' : audioOnly ? 'LISTENING TOGETHER' : 'WATCHING TOGETHER'}</span>
         </div>
         {#if crtVisible}
             <CrtScreen {username} {item} {connected} {onAdd} onSkip={() => control('skip')}
@@ -855,7 +892,7 @@
                     <span class="controls-blur"></span><span class="controls-blur"></span>
                 </div>
             {/if}
-            {#if !live}
+            {#if !live && !spotify}
             <div class="seek-track" style={`--progress: ${progress}%; --buffered: ${buffered}%`}>
                 <input type="range" min="0" max={seekMax} step="0.1" value={displayedPosition}
                        disabled={!connected || !media || live} aria-label="Seek shared video"
@@ -872,33 +909,33 @@
                             on:click={() => control('previous')}>
                         <Icon name="previous" size={19}/>
                     </button>
-                    <button class="play-button"
+                    {#if !spotify}<button class="play-button"
                             aria-label={room?.playback.paused ? 'Play for everyone' : 'Pause for everyone'}
                             disabled={!connected || !media || item?.status === 'error' || live}
                             on:click={() => control(room.playback.paused ? 'play' : 'pause')}>
                         <Icon name={room?.playback.paused || !item ? 'play' : 'pause'} size={21}/>
-                    </button>
+                    </button>{/if}
                     {/if}
                     <button class="icon-button" title="Skip video for everyone" aria-label="Skip video for everyone"
                             disabled={!connected || !item} on:click={() => control('skip')}>
                         <Icon name="next" size={19}/>
                     </button>
-                    <span class="time-display">{#if live}LIVE{:else}{time(displayedPosition)}<span> / {time(duration)}</span>{/if}</span>
+                    <span class="time-display">{#if live}LIVE{:else if spotify}SPOTIFY{:else}{time(displayedPosition)}<span> / {time(duration)}</span>{/if}</span>
                 </div>
-                {#if !live}<div class="relative-seek-control">
+                {#if !live && !spotify}<div class="relative-seek-control">
                     {#key `${room?.id}|${sourceKey}`}
                         <SeekJoystick disabled={!connected || !media || !!playerError || item?.status === 'error' || live}
                                       onSeek={seekRelative} onPreview={previewRelative}/>
                     {/key}
                 </div>{/if}
                 <div class="local-controls"><span class="shared-label"><Icon name="users" size={13}/>Shared controls</span>
-                    {#if media}
+                    {#if media && !audioOnly}
                         {#key `${room?.id}|${item?.id}`}
                             <QualitySelect {qualities} value={media.id || 'standard'} {position} {controlsVisible}
                                            onChange={changeQuality}/>
                         {/key}
                     {/if}
-                    <button class="icon-button" aria-label={captureMuted ? 'Playback muted while sharing' : muted ? 'Unmute on this device' : 'Mute on this device'}
+                    {#if !spotify}<button class="icon-button" aria-label={captureMuted ? 'Playback muted while sharing' : muted ? 'Unmute on this device' : 'Mute on this device'}
                             disabled={captureMuted} title="Volume is just for you" on:click={toggleMute}>
                         <Icon name={muted || captureMuted || volume === 0 ? 'mute' : 'volume'} size={19}/>
                     </button>
@@ -906,7 +943,7 @@
                            value={volumePosition} aria-valuetext={`${Math.round(volumePosition * 100)}%`}
                            style={`--volume-progress: ${volumePosition * 100}%`}
                            on:input={changeVolume} on:change={commitVolume} on:blur={commitVolume}
-                           on:wheel|nonpassive|preventDefault|stopPropagation={scrollVolume}/>
+                           on:wheel|nonpassive|preventDefault|stopPropagation={scrollVolume}/>{/if}
                     <button class="icon-button" aria-label="Toggle fullscreen" on:click={fullscreen}>
                         <Icon name="fullscreen" size={18}/>
                     </button>
@@ -914,6 +951,10 @@
             </div>
         </div>
     </div>
+    {#if audioOnly}
+        <AudioVisualizations {renderer} {analyser} playing={spotify ? connected && !captureMuted : playing}
+                             external={spotify} webgl={webglEffectsActive}/>
+    {/if}
 </section>
 <Reactions {connected} {beachBall} {fingerArmed} armed={hitmarkerArmed} enabled={reactionsEnabled} {soundMuted} onReact={react}
            onEnabledToggle={toggleReactions}
@@ -935,6 +976,7 @@
         <div class="media-meta">
             {#if item}<span><Icon name={sourceIcons[item.kind] || 'file'}
                                   size={15}/>{sourceLabels[item.kind] || 'Video'}</span>
+                {#if item.artist}<span>{item.artist}</span>{/if}
                 {#if duration}<span>{time(duration)}</span>{/if}<span
                         class:status-error={item.status === 'error'}>{item.status}</span>{:else}<span>Everyone in the room can add videos and control playback.</span>{/if}
             {#if item?.kind === 'youtube' && item.sponsorSegments?.length}
@@ -944,7 +986,7 @@
     </div>
     <span class="sync-badge" class:disconnected={!connected}
           title={connected ? `Clock estimated using WebSocket round-trip midpoint${rtt !== null ? ` · RTT ${Math.round(rtt)} ms` : ''}` : 'Waiting for fresh room state'}><Icon
-            name={connected ? 'wifi' : 'offline'} size={15}/>{connected ? 'Room synced' : 'Not connected'}
+            name={connected ? 'wifi' : 'offline'} size={15}/>{connected ? spotify ? 'Queue connected' : 'Room synced' : 'Not connected'}
         {#if connected && rtt !== null}<span>{Math.round(rtt)} ms</span>{/if}</span></div>
 {#if live}
     {#each desktops as desktop (desktop.id)}

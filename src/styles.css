@@ -1092,6 +1092,22 @@ ul, ol {
     z-index: 1;
 }
 
+.spotify-player {
+    position: absolute;
+    z-index: 3;
+    inset: 54px 7% auto;
+    max-width: 720px;
+    margin: 0 auto;
+}
+
+.spotify-player iframe { display: block; border: 0; border-radius: 12px; }
+.video-viewport:has(.spotify-player) { min-height: 340px; }
+.video-viewport:has(.spotify-collection) { min-height: 540px; }
+.spotify-player p { margin: 8px 0; padding: 8px 12px; border-radius: 6px; background: #10151ce8; color: #d9dde4; font-size: 12px; line-height: 1.5; }
+.player-shell:fullscreen:has(.audio-visualizations) { overflow-y: auto; }
+.player-shell:fullscreen:has(.audio-visualizations) .video-viewport { height: 75vh; min-height: 300px; }
+@media (max-width: 520px) { .spotify-player { inset: 54px 3% auto; } }
+
 .player-effects {
     position: absolute;
     inset: 0;

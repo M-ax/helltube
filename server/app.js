@@ -17,6 +17,8 @@ import { Uploads, chunkSize } from './uploads.js';
 import { YouTube } from './youtube.js';
 import { sponsorPlaylist } from './sponsorblock.js';
 import { Twitch } from './twitch.js';
+import { SoundCloud } from './soundcloud.js';
+import { Spotify } from './spotify.js';
 import { RemoteMedia } from './remote-media.js';
 import { sourceKind } from '../shared/media-source.js';
 import { Media, available } from './media.js';
@@ -62,6 +64,8 @@ export async function createApp(overrides = {}) {
   const deployment = new Deployment(config, store);
   const youtube = new YouTube(config);
   const twitch = new Twitch(config);
+  const soundcloud = new SoundCloud(config);
+  const spotify = new Spotify();
   const remote = new RemoteMedia();
   let rooms;
   let uploads;
@@ -72,7 +76,7 @@ export async function createApp(overrides = {}) {
     accountRequests.init();
     rooms = new Rooms({ ...config, store });
     uploads = new Uploads(config, rooms, store);
-    media = new Media(config, rooms, uploads, youtube, twitch);
+    media = new Media(config, rooms, uploads, youtube, twitch, soundcloud);
     await uploads.init();
     await media.init();
   } catch (error) {
@@ -82,6 +86,8 @@ export async function createApp(overrides = {}) {
   }
   const capabilities = { ffmpeg: await available(config.ffmpeg), youtube: await available(config.ytdlp, ['--version']) };
   capabilities.twitch = capabilities.youtube;
+  capabilities.soundcloud = capabilities.youtube;
+  capabilities.spotify = true;
   capabilities.http = capabilities.ffmpeg;
   const directAccess = new DirectAccess(accounts);
   const app = express();
@@ -215,7 +221,7 @@ export async function createApp(overrides = {}) {
   app.get('/api/edge/media/:jobId/:file', async (req, res) => {
     if (!req.edge) throw httpError(403, 'Edge proxy credentials required.');
     const job = mediaJob(req.params.jobId, req.auth);
-    if (!['youtube', 'twitch', 'http'].includes(job.item.kind) || !Buffer.isBuffer(job.key) || job.key.length !== 16 ||
+    if (!['youtube', 'twitch', 'soundcloud', 'http'].includes(job.item.kind) || !Buffer.isBuffer(job.key) || job.key.length !== 16 ||
       !encryptedMediaFile.test(req.params.file)) throw httpError(403, 'This media is not edge-cacheable.');
     const file = await stat(path.join(job.dir, req.params.file)).catch(() => null);
     if (!file?.isFile()) throw httpError(404, 'Media not found.');
@@ -278,14 +284,14 @@ export async function createApp(overrides = {}) {
     res.json({ ok: true });
   });
   app.post(['/api/rooms/:id/youtube', '/api/rooms/:id/media'], async (req, res) => {
-    requireMedia();
     limit(`submissions:${req.auth.user.id}`, 12);
     const room = membership(req);
     const url = text(req.body.url, 'URL', 8192);
     const kind = req.path.endsWith('/youtube') ? 'youtube' : sourceKind(url);
-    if (!kind) throw httpError(400, 'Enter a YouTube, Twitch VOD, or HTTP/HTTPS media URL.');
-    if ((kind === 'youtube' || kind === 'twitch') && !capabilities[kind]) throw httpError(503, 'yt-dlp is missing. Install it and restart the server.');
-    const provider = { youtube, twitch, http: remote }[kind];
+    if (!kind) throw httpError(400, 'Enter a YouTube, Twitch VOD, SoundCloud, Spotify, or HTTP/HTTPS media URL.');
+    if (kind !== 'spotify') requireMedia();
+    if (['youtube', 'twitch', 'soundcloud'].includes(kind) && !capabilities[kind]) throw httpError(503, 'yt-dlp is missing. Install it and restart the server.');
+    const provider = { youtube, twitch, soundcloud, spotify, http: remote }[kind];
     const preparation = { id: randomUUID(), kind, stage: 'metadata' };
     room.preparations ||= new Map();
     room.preparations.set(preparation.id, preparation);
@@ -570,7 +576,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, accountRequests, rooms, reactions, desktop, uploads, media, youtube, twitch, remote, capabilities, store, cleanup,
+  return { app, server, accounts, accountRequests, rooms, reactions, desktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;

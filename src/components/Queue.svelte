@@ -55,7 +55,7 @@
                 <div class="current-queue-item"><span class="equalizer" class:still={room.playback.paused || !connected}
                                                       aria-hidden="true"><i></i><i></i><i></i></span>
                     <div><p class="eyebrow">ON SCREEN</p><strong class:desktop-title={room.current.kind === 'desktop'} title={currentTitle}>{currentTitle}</strong></div>
-                    <span class="tag">{room.playback.paused ? 'Paused' : 'Now'}</span></div>
+                    <span class="tag">{room.current.kind === 'spotify' ? 'Local' : room.playback.paused ? 'Paused' : 'Now'}</span></div>
             {/if}
             {#if !queue.length}
                 <div class="queue-empty"><span class="empty-lineup-art" aria-hidden="true"><Icon name="list" size={34}

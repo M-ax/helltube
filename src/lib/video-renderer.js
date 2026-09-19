@@ -2,6 +2,7 @@ import {paintBeachBall} from './beach-ball.js';
 import {advanceBeachBall, displayBeachBall} from '../../shared/beach-ball.js';
 import {crtFlameShader} from './crt-flames.js';
 import {createMarshmallowVisits, marshmallowPose, marshmallowShader} from './crt-marshmallow.js';
+import {audioVisualizationShader} from './audio-visualizations.js';
 
 // Pixel-space distances and the flame hash need more precision than 16-bit
 // mediump provides on some GPU backends. Match varying precision in both stages.
@@ -37,7 +38,12 @@ const fragmentSource = `
     varying vec2 v_uv;
     ${crtFlameShader}
     ${marshmallowShader}
+    ${audioVisualizationShader}
     void main() {
+        if (u_effect > 2.5) {
+            gl_FragColor = audioVisualization(v_uv);
+            return;
+        }
         if (u_effect > 1.5) {
             gl_FragColor = crtMarshmallow(v_uv);
             return;
@@ -94,6 +100,13 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let toastingLocation;
     let stickLocation;
     let breathPathLocation;
+    let audioTexture;
+    let visualizationTexture;
+    let audioModeLocation;
+    let audioSizeLocation;
+    let visualization = null;
+    let visualizationPlaying = false;
+    let lastVisualizationTime = 0;
     let maxSize = 4096;
     let maxTextureSize;
     let animationId = null;
@@ -133,11 +146,12 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
 
     function disposeResources() {
         if (gl && !lost) {
-            for (const resource of [emptyTexture, ghostTexture, ballTexture]) if (resource) gl.deleteTexture(resource);
+            for (const resource of [emptyTexture, ghostTexture, ballTexture, audioTexture, visualizationTexture]) if (resource) gl.deleteTexture(resource);
             if (buffer) gl.deleteBuffer(buffer);
             if (program) gl.deleteProgram(program);
         }
         emptyTexture = ghostTexture = ballTexture = buffer = program = null;
+        audioTexture = visualizationTexture = null;
         ghostDirty = !!ghost;
     }
 
@@ -200,6 +214,12 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
             toastingLocation = gl.getUniformLocation(program, 'u_toasting');
             stickLocation = gl.getUniformLocation(program, 'u_stick');
             breathPathLocation = gl.getUniformLocation(program, 'u_breathPath');
+            audioModeLocation = gl.getUniformLocation(program, 'u_audioMode');
+            audioSizeLocation = gl.getUniformLocation(program, 'u_audioSize');
+            gl.uniform1i(gl.getUniformLocation(program, 'u_audioData'), 1);
+            gl.activeTexture(gl.TEXTURE1);
+            audioTexture = createTexture();
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(256 * 2 * 4));
             gl.uniform1i(gl.getUniformLocation(program, 'u_texture'), 0);
             gl.activeTexture(gl.TEXTURE0);
             emptyTexture = createTexture();
@@ -326,6 +346,25 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
                 gl.useProgram(program);
                 gl.uniformMatrix4fv(projectionLocation, false, orthographicProjection(width, height));
                 gl.uniform1f(effectLocation, 0);
+                if (visualization) {
+                    const frame = visualization.frame(canvas.width, canvas.height, performance.now(), reducedMotion);
+                    if (frame?.canvas) {
+                        if (!visualizationTexture) visualizationTexture = createTexture();
+                        gl.bindTexture(gl.TEXTURE_2D, visualizationTexture);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame.canvas);
+                        drawTexture(visualizationTexture, [0, 0, width, height]);
+                    } else if (frame?.pixels) {
+                        gl.activeTexture(gl.TEXTURE1);
+                        gl.bindTexture(gl.TEXTURE_2D, audioTexture);
+                        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 2, gl.RGBA, gl.UNSIGNED_BYTE, frame.pixels);
+                        gl.activeTexture(gl.TEXTURE0);
+                        gl.uniform1f(effectLocation, 3);
+                        gl.uniform1f(audioModeLocation, frame.mode);
+                        gl.uniform2f(audioSizeLocation, width, height);
+                        drawTexture(emptyTexture, [0, 0, width, height]);
+                        gl.uniform1f(effectLocation, 0);
+                    }
+                }
                 if (crtActive) {
                     const controlsHeight = parseFloat(getComputedStyle(canvas.parentElement).getPropertyValue('--controls-height')) || 71;
                     const flameHeight = Math.min(height, controlsHeight + 24);
@@ -376,7 +415,8 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
         const canRender = gl && !failed && !lost;
         const animateBall = ball && !reducedMotion && hasViewport;
         const animateFlames = canRender && crtActive && !reducedMotion && hasViewport;
-        if (animateBall || animateFlames) {
+        const animateAudio = canRender && visualization && visualizationPlaying && !reducedMotion && hasViewport;
+        if (animateBall || animateFlames || animateAudio) {
             if (animationId === null) animationId = requestAnimationFrame(animate);
         } else if (animationId !== null) {
             cancelAnimationFrame(animationId);
@@ -389,6 +429,11 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     function animate(time) {
         animationId = null;
         if (destroyed || document.hidden) return;
+        if (visualization && !ball && !crtActive && time - lastVisualizationTime < 1000 / 30) {
+            schedule();
+            return;
+        }
+        lastVisualizationTime = time;
         if (crtActive && !reducedMotion) {
             if (lastFlameTime !== null) {
                 const elapsed = Math.min(0.05, Math.max(0, (time - lastFlameTime) / 1000));
@@ -464,6 +509,12 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     redraw();
 
     return {
+        setAudioVisualization(value, playing = false) {
+            if (destroyed) return;
+            visualization = value;
+            visualizationPlaying = playing;
+            redraw();
+        },
         setVideo(next) { if (next !== video) setVideo(next); },
         setCrtActive(value) {
             if (destroyed || crtActive === !!value) return;

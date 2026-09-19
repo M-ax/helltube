@@ -21,6 +21,6 @@ export function securityHeaders(bareMetalOrigin = '') {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'X-Frame-Options': 'DENY',
-    'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://i.ytimg.com https://static-cdn.jtvnw.net https://vod-secure.twitch.tv data:; media-src 'self' blob:${direct ? ` ${direct}` : ''}; worker-src 'self' blob:; connect-src 'self' ws: wss:${direct ? ` ${direct}` : ''}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
+    'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://i.ytimg.com https://static-cdn.jtvnw.net https://vod-secure.twitch.tv https://*.sndcdn.com data:; media-src 'self' blob:${direct ? ` ${direct}` : ''}; worker-src 'self' blob:; connect-src 'self' ws: wss:${direct ? ` ${direct}` : ''}; frame-src https://open.spotify.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
   };
 }

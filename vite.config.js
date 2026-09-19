@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { normalizeCommit } from './shared/deployment.js';
+import { milkdropPresets } from './scripts/milkdrop-presets.mjs';
 
 let commit = process.env.HELLTUBE_COMMIT?.trim();
 if (!commit) {
@@ -18,7 +19,7 @@ const buildId = randomUUID();
 
 export default defineConfig({
   define: { __DEPLOYED_COMMIT__: JSON.stringify(deployedCommit), __BUILD_ID__: JSON.stringify(buildId) },
-  plugins: [svelte(), {
+  plugins: [svelte(), milkdropPresets(), {
     name: 'frontend-version',
     generateBundle() {
       this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ buildId, commit: deployedCommit }) });
