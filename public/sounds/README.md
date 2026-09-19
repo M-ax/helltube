@@ -45,12 +45,16 @@ The event ID selects one of six clips per walk, beginning 600 ms after the share
 Only the selected clip is downloaded and decoded, and every clip fits inside the 12-second walk.
 Late events skip the line; muting, leaving, disabling reactions, or hiding the tab stops it.
 
-`hank-jpeg.mp3` is Hank Hill's JPEG / hot-dog line from King of the Hill,
-downloaded from [Voicemod Tuna](https://tuna.voicemod.net/sound/4ddffe3f-7e53-4424-9304-9c251f6c68e0)
-([original MP3](https://us-tuna-sounds-files.voicemod.net/4ddffe3f-7e53-4424-9304-9c251f6c68e0-1683090578683.mp3)).
-The 5.64-second excerpt is normalized to -18 LUFS / -2 dBTP and encoded as
-mono 96 kbps MP3 at 44.1 kHz. Original audio belongs to its respective rights holders.
+`hank-jpeg.mp3` is the progressively distorted **Needs More JPEG** meme edit of
+Hank Hill's JPEG / hot-dog line from King of the Hill, sourced from this
+[public reupload](https://www.youtube.com/watch?v=j5nZhf8SjXw) of
+[the original meme](https://www.youtube.com/watch?v=QEzhxP-pdos).
+Hank's voice becomes increasingly crushed and noisy throughout the six-second clip.
+The source audio receives a constant -18.37 dB gain adjustment (approximately
+-18 LUFS overall), preserving the edit's rising distortion and relative loudness,
+and is encoded as mono 96 kbps MP3 at 44.1 kHz.
+Original audio belongs to its respective rights holders.
 It plays at 80% of the viewer's volume, 600 ms after the shared reaction timestamp.
 Live frames are JPEG-encoded locally at progressively lower quality and resolution
-during the line; normal video returns when it ends. No video is uploaded or transcoded
+during the same six-second timeline; normal video returns when it ends. No video is uploaded or transcoded
 on the server. Repeated triggers replace the active effect and voice.

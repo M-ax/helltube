@@ -1,5 +1,5 @@
 export const JPEG_SOUND_MS = 600;
-export const JPEG_AUDIO_MS = 5640;
+export const JPEG_AUDIO_MS = 6000;
 export const JPEG_LIFETIME_MS = JPEG_SOUND_MS + JPEG_AUDIO_MS;
 
 export function jpegSettings(age, width, height) {
