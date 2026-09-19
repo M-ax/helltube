@@ -1,5 +1,6 @@
 import {get, writable} from 'svelte/store';
 import {api} from './api.js';
+import {emptyWhiteboard, reduceWhiteboard} from '../../shared/whiteboard.js';
 import {closeDetails, diagnosticText, MAX_DISCONNECT_REPORTS} from '../../shared/connection-diagnostics.js';
 
 const HEARTBEAT_INTERVAL = 1500;
@@ -12,6 +13,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     WebSocketImpl = WebSocket, now = () => performance.now(), request = api}) {
     const emptyReactions = () => ({roomId: null, clientId: null, ball: null, fingers: [], serverTime: 0, events: []});
     const reactions = writable(emptyReactions());
+    const whiteboard = writable(emptyWhiteboard());
     const desktopMessages = writable(null);
     const state = writable({
         status: 'offline', rooms: [], room: null, selectedRoomId: null,
@@ -128,6 +130,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         }
         state.update(current => ({...current, status: 'reconnecting', joined: false}));
         reactions.set(emptyReactions());
+        whiteboard.set(emptyWhiteboard());
         checkSession();
         const delay = Math.min(15000, 750 * 2 ** attempt++) + Math.random() * 350;
         retryTimer = setTimeout(open, delay);
@@ -169,6 +172,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
 
     function join(roomId) {
         reactions.set(emptyReactions());
+        whiteboard.set(emptyWhiteboard());
         state.update((current) => ({...current, selectedRoomId: roomId, joined: false, room: null, overlay: null}));
         try {
             windowTarget.localStorage.setItem(storageKey, roomId);
@@ -180,6 +184,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     function open() {
         if (stopped) return;
         reactions.set(emptyReactions());
+        whiteboard.set(emptyWhiteboard());
         if (windowTarget.navigator.onLine === false) {
             state.update((current) => ({...current, status: 'offline', joined: false}));
             return;
@@ -242,6 +247,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
                 const selected = get(state).selectedRoomId;
                 if (selected && !message.rooms.some((room) => room.id === selected)) {
                     reactions.set(emptyReactions());
+                    whiteboard.set(emptyWhiteboard());
                     state.update((current) => ({...current, selectedRoomId: null, room: null, joined: false}));
                 }
             } else if (message.type === 'state') {
@@ -261,6 +267,11 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
                         ball: message.ball, fingers: message.fingers || [], serverTime: message.serverTime}
                     : {...value, roomId: message.roomId,
                         events: [...value.events.filter(event => event.serverTime > message.serverTime - 2000), message].slice(-40)});
+            } else if (['whiteboard:state', 'whiteboard:event', 'whiteboard:error'].includes(message.type)) {
+                const current = get(state);
+                if (!current.joined || message.roomId !== current.selectedRoomId) return;
+                whiteboard.update(value => reduceWhiteboard(value, message));
+                if (message.type === 'whiteboard:error') onMessage(message.message, 'error');
             } else if (message.type === 'overlay') {
                 state.update((current) => ({
                     ...current,
@@ -317,6 +328,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     function offline() {
         if (socket && !stopped) recordFailure('browser-offline');
         reactions.set(emptyReactions());
+        whiteboard.set(emptyWhiteboard());
         closeSocket();
         cancelSessionCheck();
         state.update((current) => ({...current, status: 'offline', joined: false}));
@@ -324,6 +336,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
 
     function disconnect() {
         reactions.set(emptyReactions());
+        whiteboard.set(emptyWhiteboard());
         stopped = true;
         windowTarget.removeEventListener('offline', offline);
         windowTarget.removeEventListener('online', wake);
@@ -355,5 +368,5 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         open();
     }
 
-    return {state, reactions, desktopMessages, connect, disconnect, join, command, retry};
+    return {state, reactions, whiteboard, desktopMessages, connect, disconnect, join, command, retry};
 }

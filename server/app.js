@@ -12,6 +12,7 @@ import { AccountRequests } from './account-requests.js';
 import { accountRequestRoutes } from './account-request-routes.js';
 import { Rooms } from './rooms.js';
 import { Reactions } from './reactions.js';
+import { Whiteboards } from './whiteboard.js';
 import { startPointerTicker } from '../shared/reaction-pointer.js';
 import { Uploads, chunkSize } from './uploads.js';
 import { YouTube } from './youtube.js';
@@ -98,6 +99,9 @@ export async function createApp(overrides = {}) {
   const reactions = new Reactions({ broadcast(roomId, message) {
     for (const ws of wss.clients) if (ws.roomId === roomId) send(ws, message);
   } });
+  const whiteboards = new Whiteboards({broadcast(roomId, message) {
+    for (const ws of wss.clients) if (ws.roomId === roomId) send(ws, message);
+  }});
   server.requestTimeout = 120000;
   server.headersTimeout = 20000;
   app.disable('x-powered-by');
@@ -420,6 +424,7 @@ export async function createApp(overrides = {}) {
     const room = rooms.get(ws.roomId);
     room.members.delete(ws.id);
     reactions.leave(room.id, ws.id, room.members.size === 0);
+    whiteboards.leave(room.id, ws.id, room.members.size === 0);
     ws.roomId = null;
     broadcastState(room);
     broadcastRooms();
@@ -436,6 +441,7 @@ export async function createApp(overrides = {}) {
   rooms.on('state', broadcastState);
   rooms.on('deleted', room => {
     reactions.leave(room.id, null, true);
+    whiteboards.leave(room.id, null, true);
     for (const ws of wss.clients) if (ws.roomId === room.id) ws.roomId = null;
   });
   rooms.on('rooms', broadcastRooms);
@@ -480,8 +486,9 @@ export async function createApp(overrides = {}) {
         if (bytes.length > 65536) throw httpError(400, 'Room command is too large.');
         message = JSON.parse(bytes.toString());
         if (!message || typeof message !== 'object') throw httpError(400, 'Invalid message.');
-        const bucket = message.type === 'desktop:request' ? 'signal' : message.type === 'reaction:pointer' ? 'pointer' : 'ws';
-        limit(`${bucket}:${ws.id}`, bucket === 'signal' ? 80 : bucket === 'pointer' ? 90 : 40, 1000);
+        const bucket = message.type === 'desktop:request' ? 'signal' : message.type === 'reaction:pointer' ? 'pointer'
+          : message.type === 'whiteboard' ? 'whiteboard' : 'ws';
+        limit(`${bucket}:${ws.id}`, bucket === 'signal' ? 80 : bucket === 'pointer' || bucket === 'whiteboard' ? 90 : 40, 1000);
         if (message.type !== 'desktop:request' && bytes.length > 8192) throw httpError(400, 'Room command is too large.');
         if (message.type === 'ping') return send(ws, { type: 'pong', sentAt: message.sentAt, serverTime: Date.now() });
         if (message.type === 'client:disconnect') {
@@ -505,6 +512,7 @@ export async function createApp(overrides = {}) {
           broadcastState(room);
           broadcastRooms();
           send(ws, {...reactions.snapshot(room.id), clientId: ws.id});
+          send(ws, whiteboards.snapshot(room.id));
           return;
         }
         if (!ws.roomId) throw httpError(403, 'Join a room first.');
@@ -526,11 +534,17 @@ export async function createApp(overrides = {}) {
           reactions.react(room.id, current.user.id, message);
         } else if (message.type === 'reaction:pointer') {
           reactions.pointer(room.id, ws.id, message, current.user.id);
+        } else if (message.type === 'whiteboard') {
+          if (!whiteboards.command(room.id, ws.id, current.user, message)) send(ws, whiteboards.snapshot(room.id));
         } else if (message.type === 'control') rooms.control(room, message);
         else if (message.type?.startsWith('queue:')) rooms.mutateQueue(room, message);
         else if (message.type === 'history:play') rooms.replay(room, message.itemId);
         else throw httpError(400, 'Unknown message type.');
       } catch (error) {
+        if (message?.type === 'whiteboard') {
+          return send(ws, {type: 'whiteboard:error', roomId: ws.roomId, id: message.id,
+            message: error.status ? error.message : 'Invalid whiteboard command.'});
+        }
         if (message?.type === 'client:disconnect') {
           return send(ws, {type: 'client:disconnect:error', message: error.status ? error.message : 'Invalid disconnect report.'});
         }
@@ -544,7 +558,7 @@ export async function createApp(overrides = {}) {
         lastMessageAgeMs: Math.max(0, Math.round(performance.now() - ws.lastMessageAt)),
         lastPongAgeMs: Math.max(0, Math.round(performance.now() - ws.lastPongAt))});
       leave(ws);
-      for (const prefix of ['socket', 'ws', 'reaction', 'pointer', 'signal', 'watch']) limits.delete(`${prefix}:${ws.id}`);
+      for (const prefix of ['socket', 'ws', 'reaction', 'pointer', 'whiteboard', 'signal', 'watch']) limits.delete(`${prefix}:${ws.id}`);
     });
     ws.on('error', error => {
       logConnection('ws.error', ws, {error: diagnosticText(error.message), errorCode: diagnosticText(error.code, 80)});
@@ -576,7 +590,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, accountRequests, rooms, reactions, desktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
+  return { app, server, accounts, accountRequests, rooms, reactions, whiteboards, desktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;

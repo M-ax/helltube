@@ -53,6 +53,7 @@
     const desktopState = desktop.state;
     const desktopPlayback = desktop.playback;
     const reactions = client.reactions;
+    const whiteboard = client.whiteboard;
     $: room = $realtimeState.room;
     $: if (!$realtimeState.selectedRoomId) theaterMode = false;
     $: connected = $realtimeState.status === 'connected' && $realtimeState.joined && browserOnline;
@@ -515,7 +516,8 @@
                         {#key preferenceKey}
                             <Lazy load={() => import('./components/Player.svelte')} label="player"
                                     username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
-                                    overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
+                                    overlay={$realtimeState.overlay} reactions={$reactions} whiteboard={$whiteboard} userId={user.id}
+                                    onCommand={client.command} onAdd={focusComposer}
                                     captureMuted={$desktopState.hasAudio}
                                     desktopPlayback={$desktopPlayback} onRetryDesktop={desktop.retryView}
                                     {theaterMode} onTheaterToggle={toggleTheater}

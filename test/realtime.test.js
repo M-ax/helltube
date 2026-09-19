@@ -115,6 +115,28 @@ test('finger snapshots preserve the local socket identity, ignore other rooms an
     assert.equal(get(h.client.reactions).clientId, null);
 });
 
+test('whiteboard snapshots and deltas stay in their room and reset across clear and reconnect', t => {
+    const h = fixture(t);
+    const ws = h.sockets[0];
+    const snapshot = {type: 'whiteboard:state', roomId: 'lobby', epoch: 'first', revision: 0, shapes: []};
+    ws.open();
+    ws.receive(snapshot);
+    assert.equal(get(h.client.whiteboard).roomId, null, 'Wait for room membership.');
+    ws.room(); ws.receive(snapshot);
+    const event = {type: 'whiteboard:event', roomId: 'lobby', epoch: 'first', revision: 1, action: 'begin',
+        shape: {id: 'one', tool: 'pen', points: [[.1, .2]], complete: false}};
+    ws.receive(event); ws.receive(event);
+    assert.equal(get(h.client.whiteboard).shapes.length, 1);
+    ws.receive({...event, roomId: 'elsewhere', revision: 2, action: 'erase', removed: ['one']});
+    assert.equal(get(h.client.whiteboard).shapes.length, 1);
+    ws.receive({...snapshot, epoch: 'second'});
+    ws.receive({...event, revision: 3});
+    assert.equal(get(h.client.whiteboard).shapes.length, 0, 'Clearing rejects stale epoch events.');
+    ws.fail();
+    assert.equal(get(h.client.whiteboard).epoch, null);
+    assert.equal(get(h.client.whiteboard).roomId, null);
+});
+
 test('hidden tabs and suspended callbacks probe before applying a fresh visible deadline', t => {
     const h = fixture(t);
     const ws = h.sockets[0];

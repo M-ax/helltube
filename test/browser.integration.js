@@ -1650,6 +1650,9 @@ test('overlay controls autohide accessibly and account volume survives reloads a
   const reveal = () => viewport.hover({ position: { x: 30, y: 70 } });
   await until(async () => room.current.media?.complete && await page.locator('video').evaluate(video => !video.paused && video.readyState >= 2), 20000);
   await reveal();
+  // Playback preparation can outlast autohide; wait for the reveal animation.
+  await until(() => viewport.evaluate(node => node.querySelector('.transport-row').getBoundingClientRect().bottom
+    <= node.getBoundingClientRect().bottom + 1));
   const layout = await viewport.evaluate(node => {
     const video = node.getBoundingClientRect();
     const controls = node.querySelector('.transport-row').getBoundingClientRect();

@@ -45,7 +45,7 @@ export function trackReactionPointer(node, initial) {
     function move(event) {
         if (event.isPrimary === false || (pointerId !== null && event.pointerId !== pointerId)) return;
         if (!options.connected || !options.enabled || document.hidden
-            || event.target.closest('.player-controls, button:not(.hitmarker-target), input, a, select, textarea')) return clear(false);
+            || event.target.closest('.player-controls, .whiteboard-tools, button:not(.hitmarker-target), input, a, select, textarea')) return clear(false);
         const {rect, x, y} = coordinates(event);
         if (x < 0 || x > 1 || y < 0 || y > 1 || !rect.width || !rect.height) return clear();
         entry ||= fingerPivot(x, y, rect.width, rect.height);

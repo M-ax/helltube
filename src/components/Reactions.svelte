@@ -1,10 +1,12 @@
 <script>
     import FlashbangGrenade from './FlashbangGrenade.svelte';
+    import Icon from './Icon.svelte';
 
     export let connected = false;
     export let beachBall = false;
     export let armed = false;
     export let fingerArmed = false;
+    export let whiteboardOpen = false;
     export let enabled = true;
     export let soundMuted = false;
     export let onReact;
@@ -29,6 +31,10 @@
         </div>
     </div>
     <div class="reaction-buttons">
+        <button type="button" class="reaction-button" disabled={!connected || !enabled} aria-pressed={whiteboardOpen}
+                on:click={() => onReact('whiteboard')} title="Draw on the picture with everyone in the room">
+            <Icon name="pen" size={20}/>Whiteboard
+        </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} aria-pressed={fingerArmed}
                 on:click={() => onReact('finger')} title="Point at the picture · click to tap · hold and drag on the glass">
             <svg class="finger-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 29l13-13" stroke="#ada99e" stroke-width="4"/><path d="m13 15 2-5 3-1 1-3 3 1 5-5 3 3-8 9-1 5-4 1z" fill="#eee0bc" stroke="#8e7655" stroke-width="1.5"/></svg>
@@ -58,7 +64,8 @@
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('laugh')}><span aria-hidden="true">😂</span>Laugh</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('clap')}><span aria-hidden="true">👏</span>Applause</button>
     </div>
-    <p class="reaction-help" role="status">{!enabled ? 'Reactions are off on this device.' : !connected ? 'Reconnect to send reactions.' : fingerArmed
+    <p class="reaction-help" role="status">{!enabled ? 'Reactions are off on this device.' : !connected ? 'Reconnect to send reactions.' : whiteboardOpen
+        ? 'Choose a tool on the left and draw on the picture. The whole room sees your marks. Escape closes the tools.' : fingerArmed
         ? 'Point at the picture. Click to tap; hold and move to slide on the glass. Escape puts it away.' : armed
         ? 'Click anywhere on the picture to place a hit marker. Escape cancels.'
         : beachBall ? 'Move your cursor into the ball to bump it. Everyone can play.'

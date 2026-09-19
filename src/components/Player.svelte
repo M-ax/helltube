@@ -11,6 +11,8 @@
     import {desktopLayout} from '../lib/desktop-layout.js';
     import {roomNowPlayingTitle} from '../../shared/room-title.js';
     import Reactions from './Reactions.svelte';
+    import Whiteboard from './Whiteboard.svelte';
+    import {emptyWhiteboard} from '../../shared/whiteboard.js';
     import PointingFingers from './PointingFingers.svelte';
     import {trackReactionPointer} from '../lib/reaction-pointer.js';
     import MetalPipeReaction from './MetalPipeReaction.svelte';
@@ -30,12 +32,14 @@
     import {availableQualities, qualityReady, selectQuality} from '../lib/media-quality.js';
 
     export let username = 'guest';
+    export let userId = null;
     export let room = null;
     export let connected = false;
     export let clockOffset = 0;
     export let rtt = null;
     export let overlay = null;
     export let reactions = {roomId: null, ball: null, serverTime: 0, events: []};
+    export let whiteboard = emptyWhiteboard();
     export let onCommand;
     export let onAdd;
     export let preparation = null;
@@ -63,6 +67,7 @@
     let previewPosition = null;
     let hitmarkerArmed = false;
     let fingerArmed = false;
+    let whiteboardOpen = false;
     let localFinger = null;
     let hitmarkerTarget;
     let aim = {x: 0.5, y: 0.5};
@@ -132,9 +137,10 @@
     $: preparing = item && !media && !live && !spotify && item.status !== 'error';
     $: canAutoHide = (!!media || live) && connected && playing && !room?.playback.paused && !preparing
         && !localBuffering && !blocked && !playerError && item?.status !== 'error';
-    $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed;
+    $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed || whiteboardOpen;
     $: beachBall = reactionsEnabled && connected && reactions.roomId === room?.id && !!reactions.ball;
-    $: reactionInputActive = connected && reactionsEnabled && (fingerArmed || hitmarkerArmed || beachBall);
+    $: reactionInputActive = connected && reactionsEnabled && (fingerArmed || hitmarkerArmed || beachBall || whiteboardOpen);
+    $: if (whiteboardOpen) { fingerArmed = false; hitmarkerArmed = false; }
     $: updateReactionRoom(connected ? room?.id : null);
     $: if (renderer) renderer.setBeachBallState(beachBall ? reactions.ball : null, (Date.now() + clockOffset - reactions.serverTime) / 1000);
     $: receiveReactions(reactions, connected, room?.id, reactionsEnabled);
@@ -233,9 +239,9 @@
         }
 
         function canToggleFullscreen(event) {
-            return !hitmarkerArmed && !fingerArmed && !beachBall
+            return !hitmarkerArmed && !fingerArmed && !beachBall && !whiteboardOpen
                 && event.target.closest('.video-viewport')
-                && !event.target.closest('.desktop-tile, .player-controls, button, input, a, select, textarea, [role="button"]');
+                && !event.target.closest('.desktop-tile, .player-controls, .whiteboard-tools, button, input, a, select, textarea, [role="button"]');
         }
 
         function updateFocus() {
@@ -600,6 +606,7 @@
     function clearActiveReactions() {
         hitmarkerArmed = false;
         fingerArmed = false;
+        whiteboardOpen = false;
         localFinger = null;
         activeReactions = [];
         reactionAudio?.stop();
@@ -651,12 +658,15 @@
 
     async function react(kind) {
         if (!connected || !reactionsEnabled) return;
+        if (kind === 'whiteboard') { whiteboardOpen = !whiteboardOpen; return; }
         reactionAudio?.unlock();
         prepareReactionSounds(kind);
         if (kind === 'finger') {
+            whiteboardOpen = false;
             fingerArmed = !fingerArmed;
             hitmarkerArmed = false;
         } else if (kind === 'hitmarker') {
+            whiteboardOpen = false;
             fingerArmed = false;
             hitmarkerArmed = !hitmarkerArmed;
             aim = {x: 0.5, y: 0.5};
@@ -768,8 +778,8 @@
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
          data-controls-visible={controlsVisible}>
-    <div class="video-viewport" class:finger-armed={fingerArmed}
-         use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled, connected,
+    <div class="video-viewport" class:finger-armed={fingerArmed} class:whiteboard-open={whiteboardOpen}
+         use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled && !whiteboardOpen, connected,
              roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
          data-renderer="native" data-effects-renderer={webglEffectsActive ? 'webgl' : '2d'}
          data-preview-time={previewPosition} data-beach-ball={beachBall}
@@ -887,6 +897,8 @@
                 <Icon name="info" size={20}/>
                 <span>{serverOverlay}</span></div>
         {/if}
+        <Whiteboard board={whiteboard} roomId={room?.id} {userId} {connected} enabled={reactionsEnabled}
+                    bind:open={whiteboardOpen} {onCommand}/>
         <div class="player-controls transport" role="group" aria-label="Playback controls">
             {#if canAutoHide}
                 <div class="controls-backdrop" aria-hidden="true">
@@ -963,7 +975,7 @@
                              external={spotify} webgl={webglEffectsActive}/>
     {/if}
 </section>
-<Reactions {connected} {beachBall} {fingerArmed} armed={hitmarkerArmed} enabled={reactionsEnabled} {soundMuted} onReact={react}
+<Reactions {connected} {beachBall} {fingerArmed} {whiteboardOpen} armed={hitmarkerArmed} enabled={reactionsEnabled} {soundMuted} onReact={react}
            onEnabledToggle={toggleReactions}
            onSoundToggle={() => { soundMuted = !soundMuted; reactionAudio?.unlock(); }}/>
 <div class="now-playing">

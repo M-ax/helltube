@@ -55,6 +55,14 @@ bash test/bootstrap-units.test.sh
 
 Automatic app updates deliver the backend diagnostics but do not replace nginx or systemd configuration. Existing installations also need the updated bootstrap renderers and `scripts/connection-log.py` installed; preserve local proxy/AppArmor drop-ins when applying them. The bootstrap enables `helltube-connection-log.socket` before starting the proxy.
 
+## Live whiteboard reactions
+
+Choose **Whiteboard** in the reactions row, or the pen tab on the left of the player, to open the drawing flyout. Use the pen, line, arrow, rectangle, circle, colors, and stroke sizes to draw directly over the picture. Marks stream as SVG coordinates while you draw, and everyone in the room sees them immediately. Mouse, touch, and pen input work in the regular player, theater mode, and fullscreen, including desktop shares.
+
+The eraser removes whole marks for everyone. **Undo mine** (Ctrl/⌘ Z while drawing) removes your most recent finished mark; **Clear all** clears the room's board. Escape closes the tools and restores normal player interaction while leaving the marks visible. Turning reactions off hides drawings only on your device.
+
+Late joiners and reconnecting viewers receive the current board. Drawings are kept in memory until the room empties, is deleted, the server restarts, or someone clears them. The board retains up to 200 recent marks and 16,384 points; older finished marks are removed as needed. Run `npm run test:whiteboard` for protocol and two-browser coverage, including live strokes, erasing, late joins, fullscreen, and touch input.
+
 ## Desktop sharing
 
 Open a room, choose **Share desktop**, then **Choose screen to share**. The browser picker lets you select an entire display, a window, or a tab. Audio is optional: enable **Share audio** to include sound, or share video only. The sharing status shows whether audio is included. Chrome/Edge tab audio is an alternative when your browser or operating system cannot capture window/display audio; window sharing can include system-wide sound. No extension is required. Sharing requires HTTPS (or localhost), browser screen-capture permission, and WebRTC. Desktop sharing works without FFmpeg or MediaRecorder.

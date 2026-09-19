@@ -1061,6 +1061,12 @@ ul, ol {
     aspect-ratio: auto;
 }
 
+@media (max-width: 600px) {
+    .player-shell:not(:fullscreen) .video-viewport.whiteboard-open {
+        min-height: min(480px, 75dvh);
+    }
+}
+
 .video-viewport > video, .video-canvas {
     position: absolute;
     inset: 0;
