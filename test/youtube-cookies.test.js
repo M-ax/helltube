@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { YouTube, runJSON } from '../server/youtube.js';
+import { youtubeCookies } from '../tools/cookie-helper/core.mjs';
 
 const cookieText = '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\ttest-secret-cookie\n';
 const extractor = `
@@ -17,12 +18,18 @@ const extractor = `
   const contents = file ? await readFile(file, 'utf8') : null;
   const mode = file ? (await stat(file)).mode & 0o777 : null;
   const directoryMode = file ? (await stat(path.dirname(file))).mode & 0o777 : null;
+  const headerIndex = args.indexOf('--add-headers');
+  const userAgent = headerIndex < 0 ? null : args[headerIndex + 1].slice('User-Agent:'.length);
   if (file) await writeFile(file, '# rewritten by extractor\\n');
   const data = { args, file, contents, mode, directoryMode,
     id: 'jNQXAC9IVRw', title: 'Test video', duration: 19,
-    url: 'https://test.googlevideo.com/video' };
+    url: 'https://test.googlevideo.com/video', http_headers: userAgent ? { 'User-Agent': userAgent } : {} };
   if (args.includes('--require-cookies') && !file) {
     process.stderr.write('Missing cookies');
+    process.exit(1);
+  }
+  if (args.includes('--require-user-agent') && !userAgent) {
+    process.stderr.write('Missing browser user agent');
     process.exit(1);
   }
   if (args.includes('--fixture-fail')) {
@@ -75,6 +82,7 @@ test('anonymous extraction does not create or pass a cookie file', async t => {
   assert.equal(result.file, null);
   assert.ok(result.args.includes('--ignore-config'));
   assert.ok(!result.args.includes('--cookies'));
+  assert.ok(!result.args.includes('--add-headers'));
   assert.deepEqual(await readdir(f.temporary), []);
   assert.equal(f.youtube.pending.size, 0);
 });
@@ -85,6 +93,7 @@ test('each concurrent extraction gets a private writable copy and preserves the 
   assert.notEqual(results[0].file, results[1].file);
   for (const result of results) {
     assert.equal(result.contents, cookieText);
+    assert.ok(!result.args.includes('--add-headers'), 'Legacy exports retain the yt-dlp default.');
     assert.notEqual(result.file, f.source);
     assert.ok(result.file.startsWith(f.temporary + path.sep));
     assert.ok(!result.args.includes(f.source));
@@ -110,6 +119,45 @@ test('cookies reach both queue metadata and playback URL extraction', async t =>
   const stream = await f.youtube.resolve(url);
   assert.equal(stream.inputs[0].url, 'https://test.googlevideo.com/video');
   assert.deepEqual(await readdir(f.temporary), []);
+});
+
+test('helper exports pass the captured user agent to metadata, playback and downstream media headers', async t => {
+  const f = await fixture(t);
+  t.mock.method(f.youtube.sponsorBlock, 'segments', async () => []);
+  f.youtube.baseArgs.push('--require-cookies', '--require-user-agent');
+  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/153.0.0.0 Safari/537.36';
+  const makeExport = (value, agent) => youtubeCookies([{ domain: '.youtube.com', path: '/', secure: true,
+    httpOnly: true, expires: 2147483647, name: 'SID', value }], { userAgent: agent }).text;
+  await chmod(f.source, 0o600);
+  const contents = makeExport('test-secret-cookie', userAgent);
+  await writeFile(f.source, contents);
+  const results = await Promise.all([f.youtube.extract(['first']), f.youtube.extract(['second'])]);
+  for (const result of results) {
+    assert.equal(result.args[result.args.indexOf('--add-headers') + 1], `User-Agent:${userAgent}`);
+    assert.equal(result.contents, contents);
+    assert.ok(!result.args.join(' ').includes('test-secret-cookie'));
+  }
+  const url = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+  assert.equal((await f.youtube.items(url, { displayName: 'Viewer' }))[0].title, 'Test video');
+  assert.equal((await f.youtube.resolve(url)).inputs[0].headers['User-Agent'], userAgent);
+  const nextAgent = userAgent.replace('153.', '154.');
+  await writeFile(f.source, makeExport('updated-cookie', nextAgent));
+  const refreshed = await f.youtube.extract([]);
+  assert.equal(refreshed.http_headers['User-Agent'], nextAgent);
+  assert.match(refreshed.contents, /updated-cookie/);
+  assert.deepEqual(await readdir(f.temporary), []);
+});
+
+test('malformed user agent metadata fails closed, is redacted and removes the working directory', async t => {
+  const f = await fixture(t);
+  await chmod(f.source, 0o600);
+  for (const metadata of ['# Helltube-User-Agent: invalid\rprivate-session', '# Helltube-User-Agent: ',
+    '# Helltube-User-Agent: one\n# Helltube-User-Agent: two', '# Helltube-User-Agent: ' + 'x'.repeat(1025)]) {
+    await writeFile(f.source, cookieText + metadata + '\n');
+    await assert.rejects(f.youtube.extract([]), error => /user agent/.test(error.message) && !error.message.includes('private-session'));
+    assert.deepEqual(await readdir(f.temporary), []);
+    assert.equal(f.youtube.pending.size, 0);
+  }
 });
 
 test('a missing configured secret fails closed without starting anonymous extraction', async t => {

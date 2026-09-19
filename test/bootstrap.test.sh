@@ -166,6 +166,9 @@ cookie_cases() (
   valid_youtube_cookies "$workspace/crlf.txt" || die 'Rejected CRLF or HttpOnly cookies.'
   import_youtube_cookies "$workspace/crlf.txt" "$destination"
   cmp -s "$workspace/crlf.txt" "$destination" || die 'CRLF import changed the file.'
+  printf '%s\n%s\n%s\n' "$header" '# Helltube-User-Agent: Mozilla/5.0 Chrome/153.0.0.0' "$record" > "$workspace/browser.txt"
+  import_youtube_cookies "$workspace/browser.txt" "$destination"
+  cmp -s "$workspace/browser.txt" "$destination" || die 'Import lost the matching browser user agent.'
   printf '# HTTP Cookie File\nyoutube.com\tFALSE\t/\tFALSE\t\tSID\t\n' > "$workspace/session.txt"
   valid_youtube_cookies "$workspace/session.txt" || die 'Rejected session cookies or an empty value.'
   printf '%s\n#HttpOnly_.www.youtube.com\tTRUE\t/path\tTRUE\t0\tSID\tvalue\n' "$header" > "$workspace/subdomain.txt"

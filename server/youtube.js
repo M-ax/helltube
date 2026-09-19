@@ -10,6 +10,7 @@ import { youtubeNetwork } from './youtube-network.js';
 import { SponsorBlock, normalizeSponsors } from './sponsorblock.js';
 import { hlsCopyQuality } from './hls-copy.js';
 import { logUpstreamFailure } from './upstream-logging.js';
+import { cookieUserAgent } from '../shared/youtube-cookie-metadata.js';
 
 function videoId(url) {
   return url.hostname === 'youtu.be' ? url.pathname.slice(1)
@@ -95,11 +96,15 @@ export class YouTube {
           cookieDir = await mkdtemp(path.join(os.tmpdir(), 'helltube-youtube-'));
           await chmod(cookieDir, 0o700);
           const cookieFile = path.join(cookieDir, 'cookies.txt');
+          // Read once so an atomic helper refresh cannot mix cookies and browser identity.
+          const contents = await readFile(this.config.ytdlpCookiesFile);
+          const userAgent = cookieUserAgent(contents.toString('utf8'));
           // yt-dlp rewrites its cookie jar; never share it between concurrent extractions.
-          await writeFile(cookieFile, await readFile(this.config.ytdlpCookiesFile), { mode: 0o600, flag: 'wx' });
+          await writeFile(cookieFile, contents, { mode: 0o600, flag: 'wx' });
           cookieArgs.push('--cookies', cookieFile);
+          if (userAgent) cookieArgs.push('--add-headers', `User-Agent:${userAgent}`);
         } catch {
-          throw new Error('Cannot prepare YouTube cookies. Check YTDLP_COOKIES_FILE is readable and the temporary directory is writable.');
+          throw new Error('Cannot prepare YouTube cookies. Check YTDLP_COOKIES_FILE is readable, any browser user agent is valid, and the temporary directory is writable.');
         }
       }
       return await runJSON(this.config.ytdlp, [...this.baseArgs, ...proxyArgs, ...cookieArgs, ...args], {

@@ -7,6 +7,8 @@
     "node": ">=22.13"
   },
   "scripts": {
+    "cookie-helper": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/cookie-helper/start.ps1",
+    "test:cookie-helper": "node --test test/cookie-helper.test.js test/cookie-helper-identity.test.js",
     "dev": "concurrently -k -n server,web \"node --watch server/main.js\" \"vite --host 127.0.0.1\"",
     "build": "vite build",
     "dev:worker": "wrangler dev",
