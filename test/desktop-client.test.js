@@ -221,7 +221,8 @@ function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilitie
         commands.push(message);
         if (respond) queueMicrotask(() => {
             const data = message.action === 'produce' ? {id: message.kind + '-producer'} :
-                message.action === 'consume' ? {id: 'consumer', kind: 'video', producerId: message.producerId, rtpParameters: {}} : {};
+                message.action === 'consume' ? {id: `${message.producerId}-consumer`,
+                    kind: message.producerId === 'audio' ? 'audio' : 'video', producerId: message.producerId, rtpParameters: {}} : {};
             events.push(message.action);
             client.desktopMessages.set({type: 'desktop:response', requestId: message.requestId, rpcId: message.rpcId, data});
         });
@@ -422,6 +423,18 @@ test('late producer announcements install each consumer once before resuming; au
     h.client.desktopMessages.set({type: 'desktop:producer-closed', requestId: 'capture', producerId: 'video'});
     assert.equal(h.received().getTracks().length, 0);
     assert.equal(h.consumed[0].closed, true);
+});
+
+test('receivers reserve audio jitter headroom and keep both tracks in the same synchronized stream', async t => {
+    const h = relayHarness(t);
+    h.connection.producers.push({id: 'video', kind: 'video'}, {id: 'audio', kind: 'audio'});
+    await h.peer.start();
+    h.client.desktopMessages.set({type: 'desktop:available', requestId: 'capture', producers: h.connection.producers});
+    await flush();
+    assert.deepEqual(h.consumed.map(value => [value.kind, value.rtpReceiver.jitterBufferTarget]),
+        [['video', 0], ['audio', 100]]);
+    assert.ok(h.consumed.every(value => value.streamId === h.connection.itemId));
+    assert.deepEqual(h.received().getTracks().map(track => track.kind), ['video', 'audio']);
 });
 
 test('closing during device loading or an RPC rejects pending work and releases transport resources', async t => {

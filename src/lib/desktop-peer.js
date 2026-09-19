@@ -105,7 +105,11 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
                     if (closed || removed.has(producer.id)) { consumer.close(); continue; }
                     consumers.set(producer.id, consumer);
                     try {
-                        if ('jitterBufferTarget' in consumer.rtpReceiver) consumer.rtpReceiver.jitterBufferTarget = 0;
+                        // Music needs enough headroom for capture/network jitter;
+                        // starving the audio buffer causes audible time stretching.
+                        if ('jitterBufferTarget' in consumer.rtpReceiver) {
+                            consumer.rtpReceiver.jitterBufferTarget = consumer.kind === 'audio' ? 100 : 0;
+                        }
                     } catch { /* Optional browser API. */ }
                     received.addTrack(consumer.track);
                     onStream(received);

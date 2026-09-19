@@ -41,6 +41,12 @@ loopback-only mediasoup transports on metal. Existing authenticated WebRTC room
 subscriptions deliver the stream to viewers. Video and audio are encoded once;
 no media file is recorded.
 
+Audio capture requests 20 ms PulseAudio fragments and uses PCM sample counts for
+continuous Opus timestamps, preserving the initial video/audio offset. Pulse's
+latency updates no longer become gaps or overlaps in encoded audio. Receivers request
+100 ms of audio jitter buffering, and the raw video queue is limited to eight
+frames (about 28 MiB) so capture stalls cannot fill the guest's RAM.
+
 One VM/account serves one room at a time. Other rooms display a waiting message.
 Play/pause control the Spotify application for everyone; volume stays local to
 each viewer. Skip releases the desktop and advances the room queue. A single track
@@ -74,6 +80,10 @@ Provisioning sources are under `/opt/helltube-spotify-vm`. Re-running `provision
 retains an existing disk; cloud-init does not reinstall an already initialized guest.
 Changes to `bridge.py` must also be copied to `/opt/helltube/bridge.py` in the guest.
 The restricted SSH command is `/usr/local/bin/helltube-spotify-bridge`.
+An already connected bridge keeps its loaded code; end that bridge connection
+after installing an update so the backend reconnects with the new capture settings.
+This briefly interrupts playback. Frontend buffering changes require the normal
+application deployment and a viewer reload as well.
 
 The backend needs a dedicated private key whose matching public key is installed
 in the guest `spotify` user's `authorized_keys` with `restrict` and the forced

@@ -54,17 +54,23 @@ def capture_args(video, audio):
     video_target, audio_target = destination(video), destination(audio)
     video_ssrc, audio_ssrc = [str(integer(track.get("ssrc"), 2147483647)) for track in (video, audio)]
     return ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
-            "-thread_queue_size", "512", "-f", "x11grab", "-framerate", "30",
+            # Raw 720p frames are 3.5 MiB each; 512 queued frames can OOM the VM.
+            "-thread_queue_size", "8", "-f", "x11grab", "-framerate", "30",
             "-video_size", "1280x720", "-i", ":0.0",
-            "-thread_queue_size", "512", "-f", "pulse", "-i", "helltube.monitor",
+            # Read 20 ms of stereo s16 PCM per fragment, matching an Opus packet.
+            "-thread_queue_size", "64", "-f", "pulse", "-sample_rate", "48000",
+            "-channels", "2", "-fragment_size", "3840", "-i", "helltube.monitor",
             "-map", "0:v:0", "-an", "-c:v", "libx264", "-threads", "2",
             "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline",
             "-level", "3.1", "-pix_fmt", "yuv420p", "-b:v", "2500k",
             "-maxrate", "3000k", "-bufsize", "1500k", "-g", "30",
             "-keyint_min", "30", "-sc_threshold", "0", "-f", "rtp",
             "-payload_type", "102", "-ssrc", video_ssrc, video_target,
-            "-map", "1:a:0", "-vn", "-c:a", "libopus", "-b:a", "128k",
-            "-ac", "2", "-ar", "48000", "-application", "lowdelay", "-f", "rtp",
+            # Pulse's wall-clock latency corrections can move timestamps backward.
+            # Count PCM samples instead, retaining the initial audio/video offset.
+            "-map", "1:a:0", "-vn", "-af", "asetpts=N/SR/TB+STARTPTS",
+            "-c:a", "libopus", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+            "-application", "lowdelay", "-frame_duration", "20", "-flush_packets", "1", "-f", "rtp",
             "-payload_type", "111", "-ssrc", audio_ssrc, audio_target]
 
 
