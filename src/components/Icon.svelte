@@ -35,6 +35,7 @@
         volume: 'M11 4 6 8H2v8h4l5 4ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14',
         mute: 'M11 4 6 8H2v8h4l5 4ZM16 9l6 6M16 15l6-6',
         fullscreen: 'M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5',
+        theater: 'M3 5h18v14H3ZM3 8h18M3 16h18',
         check: 'm5 12 4 4L19 6',
         warning: 'm12 3 10 18H2ZM12 9v5M12 17h.01',
         info: 'M12 11v6M12 7h.01M22 12A10 10 0 1 1 2 12a10 10 0 0 1 20 0Z',

@@ -45,6 +45,8 @@
     export let captureMuted = false;
     export let desktopPlayback = {};
     export let onRetryDesktop;
+    export let theaterMode = false;
+    export let onTheaterToggle;
     let video;
     let canvas;
     let effectsCanvas;
@@ -944,6 +946,11 @@
                            style={`--volume-progress: ${volumePosition * 100}%`}
                            on:input={changeVolume} on:change={commitVolume} on:blur={commitVolume}
                            on:wheel|nonpassive|preventDefault|stopPropagation={scrollVolume}/>{/if}
+                    <button class="icon-button theater-toggle" type="button" aria-label="Theater mode"
+                            aria-pressed={theaterMode} title={theaterMode ? 'Exit theater mode' : 'Enter theater mode'}
+                            on:click={onTheaterToggle}>
+                        <Icon name="theater" size={18}/>
+                    </button>
                     <button class="icon-button" aria-label="Toggle fullscreen" on:click={fullscreen}>
                         <Icon name="fullscreen" size={18}/>
                     </button>
@@ -963,7 +970,7 @@
     {#if captureMuted}<p class="field-help" role="status">Your player is muted while sharing to prevent audio feedback. Viewers receive your shared audio.</p>{/if}
     <div class="now-playing-title"><p class="eyebrow">{item ? 'NOW ON SCREEN' : 'UP NEXT: YOUR PICK'}</p>
         <div class="now-playing-heading">
-            <h2>{roomNowPlayingTitle(room) || 'A little less scrolling. A little more watching.'}</h2>
+            <h2 title={roomNowPlayingTitle(room) || undefined}>{roomNowPlayingTitle(room) || 'A little less scrolling. A little more watching.'}</h2>
             {#if item?.hasOriginalStream}
                 <a class="icon-button bordered"
                    href={`/api/rooms/${encodeURIComponent(room.id)}/items/${encodeURIComponent(item.id)}/original`}

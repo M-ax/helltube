@@ -1,5 +1,5 @@
 <script>
-    import {onMount, onDestroy} from 'svelte';
+    import {onMount, onDestroy, tick} from 'svelte';
     import Icon from './components/Icon.svelte';
     import Login from './components/Login.svelte';
     import Modal from './components/Modal.svelte';
@@ -38,6 +38,7 @@
     let roomsLoading = false;
     let signingOut = false;
     let sidebarOpen = false;
+    let theaterMode = false;
     let browserOnline = navigator.onLine;
     let toasts = [];
     let nextToastId = 0;
@@ -53,6 +54,7 @@
     const desktopPlayback = desktop.playback;
     const reactions = client.reactions;
     $: room = $realtimeState.room;
+    $: if (!$realtimeState.selectedRoomId) theaterMode = false;
     $: connected = $realtimeState.status === 'connected' && $realtimeState.joined && browserOnline;
     $: if (connected) manager?.reconnect();
     $: if (user && user.role !== 'admin' && modal === 'admin') modal = null;
@@ -180,6 +182,7 @@
         modal = null;
         toasts = [];
         sidebarOpen = false;
+        theaterMode = false;
         sessionMessage = 'Your session has ended. Sign in again to rejoin your room.';
     }
 
@@ -265,7 +268,14 @@
         user = {...updated, preferences: playerPreferences};
     }
 
-    function focusComposer() {
+    function toggleTheater() {
+        theaterMode = !theaterMode;
+        sidebarOpen = false;
+    }
+
+    async function focusComposer() {
+        theaterMode = false;
+        await tick();
         void composer?.focus();
     }
 
@@ -328,7 +338,7 @@
     <Login onLogin={authenticated} {sessionMessage}/>
 {:else}
     <a href="#main-content" class="skip-link">Skip to the screening room</a>
-    <div class="app-shell">
+    <div class="app-shell" class:theater-mode={theaterMode}>
         {#if sidebarOpen}
             <button class="sidebar-scrim" aria-label="Close room navigation"
                     on:click={() => sidebarOpen = false}></button>
@@ -508,6 +518,7 @@
                                     overlay={$realtimeState.overlay} reactions={$reactions} onCommand={client.command} onAdd={focusComposer}
                                     captureMuted={$desktopState.hasAudio}
                                     desktopPlayback={$desktopPlayback} onRetryDesktop={desktop.retryView}
+                                    {theaterMode} onTheaterToggle={toggleTheater}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
                         <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify} {desktop}

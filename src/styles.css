@@ -1861,6 +1861,85 @@ ul, ol {
     margin: -10px 0 22px;
 }
 
+body:has(.theater-mode) {
+    overflow: hidden;
+}
+
+.app-shell.theater-mode {
+    position: fixed;
+    inset: 0;
+    display: block;
+    height: 100dvh;
+    overflow: hidden;
+    background: var(--bg);
+}
+
+.theater-mode > .sidebar,
+.theater-mode > .sidebar-scrim,
+.theater-mode .workspace > :not(.work-grid),
+.theater-mode .work-grid > :not(.stage),
+.theater-mode .stage > :not(.player-shell, .now-playing, .playback-health),
+.theater-mode .now-playing > :not(.now-playing-title),
+.theater-mode .now-playing-title > :not(.now-playing-heading),
+.theater-mode .now-playing-heading > :not(h2),
+.theater-mode .screen-topline,
+.theater-mode .audio-visualizations {
+    display: none;
+}
+
+.theater-mode .workspace,
+.theater-mode .work-grid {
+    display: block;
+    height: 100%;
+    max-width: none;
+    padding: 0;
+}
+
+.theater-mode .stage {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.theater-mode .player-shell {
+    flex: 1 1 0;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.theater-mode .player-shell .video-viewport {
+    height: 100%;
+    min-height: 0;
+    aspect-ratio: auto;
+}
+
+.theater-mode .now-playing {
+    display: block;
+    flex: 0 0 auto;
+    padding: 10px 16px;
+}
+
+.theater-mode .now-playing h2 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 15px;
+}
+
+.theater-mode .playback-health {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0 16px 10px;
+}
+
+.theater-toggle[aria-pressed='true'] {
+    color: var(--accent);
+    background: var(--accent-dim);
+}
+
 .composer {
     background: linear-gradient(110deg, #201c1d, #1c1b20);
     border: 1px solid #3b3031;
