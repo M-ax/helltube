@@ -1,15 +1,29 @@
 export const BIDEN_LIFETIME_MS = 12000;
 export const BIDEN_SOUND_MS = 600;
 
+export const BIDEN_SOUNDS = {
+    bidenWord: '/sounds/biden-one-word.mp3',
+    bidenThing: '/sounds/biden-you-know-the-thing.mp3',
+    bidenComeOn: '/sounds/biden-come-on-man.mp3',
+    bidenChocolate: '/sounds/biden-chocolate-chip.mp3',
+    bidenCornPop: '/sounds/biden-corn-pop.mp3',
+    bidenIceCream: '/sounds/biden-ice-cream.mp3',
+};
+const soundKinds = Object.keys(BIDEN_SOUNDS);
+
 // A shared event ID picks the same route and soundbite on every viewer's device.
-export function bidenVariant(id) {
+function bidenHash(id) {
     let hash = 0;
     for (const character of id) hash = (Math.imul(hash, 31) + character.charCodeAt(0)) >>> 0;
-    return hash % 2;
+    return hash;
+}
+
+export function bidenVariant(id) {
+    return bidenHash(id) % 2;
 }
 
 export function bidenSound(id) {
-    return bidenVariant(id) ? 'bidenThing' : 'bidenWord';
+    return soundKinds[bidenHash(id) % soundKinds.length];
 }
 
 export function bidenPose(age, startX = .5, variant = 0, reducedMotion = false) {

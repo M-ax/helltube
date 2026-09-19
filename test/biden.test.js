@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {BIDEN_LIFETIME_MS, bidenPose, bidenSound, bidenVariant} from '../src/lib/biden.js';
+import {BIDEN_LIFETIME_MS, BIDEN_SOUNDS, bidenPose, bidenSound, bidenVariant} from '../src/lib/biden.js';
 
 test('Biden wanders inside the player before his exit, changes direction, pauses, bobs and expires', () => {
     for (const variant of [0, 1]) {
@@ -38,8 +38,11 @@ test('Biden walks past the edge on his final leg without fading out', () => {
 
 test('a shared event chooses a stable sound and reduced motion keeps the cutout still', () => {
     const sounds = new Set();
-    for (const id of ['shared-event-a', 'shared-event-b']) {
+    for (let index = 0; index < 120; index++) {
+        const id = `shared-event-${index}`;
         sounds.add(bidenSound(id));
+        assert.equal(bidenSound(id), bidenSound(String(id)), 'Viewers select the same sound from the event ID.');
+        assert.ok([0, 1].includes(bidenVariant(id)), 'More soundbites keep the two walking routes.');
         for (const age of [0, 500, 2000, 4000, 8000, 11900]) {
             const pose = bidenPose(age, .4, bidenVariant(id), true);
             assert.equal(pose.x, .4);
@@ -50,7 +53,7 @@ test('a shared event chooses a stable sound and reduced motion keeps the cutout 
             assert.equal(pose.walking, false);
         }
     }
-    assert.deepEqual([...sounds].sort(), ['bidenThing', 'bidenWord']);
+    assert.deepEqual([...sounds].sort(), Object.keys(BIDEN_SOUNDS).sort(), 'Every clip can be selected.');
     assert.equal(bidenPose(BIDEN_LIFETIME_MS - 250, .4, 0, true).opacity, .5);
     assert.equal(bidenPose(BIDEN_LIFETIME_MS, .4, 0, true).opacity, 0);
 });

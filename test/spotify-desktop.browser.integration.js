@@ -142,7 +142,22 @@ test('Spotify visualizations, local view switching and consecutive tracks retain
   const chooseView = (page, name) => page.getByRole('group', {name: 'Spotify view on this device'})
     .getByRole('button', {name, exact: true}).click();
   const visibleDesktop = page => until(() => page.locator('.desktop-tile video').evaluate(video =>
-    video.videoWidth === 1920 && video.videoHeight === 1080 && video.readyState >= 2 && !video.paused), 10000);
+    video.videoWidth === 1920 && video.videoHeight === 1080 && video.readyState >= 2 && !video.paused &&
+    video.closest('.player-shell').dataset.spotifyView === 'desktop'), 10000);
+  const checkLoading = async page => {
+    await page.getByText('Loading desktop video…', {exact: true}).waitFor();
+    assert.equal(await page.getByLabel('Audio visualization library').isVisible(), true);
+    assert.equal(await page.locator('.player-shell').getAttribute('data-spotify-view'), 'visualizations');
+    assert.equal(await page.locator('.desktop-tile video').evaluate(video => getComputedStyle(video).opacity), '0');
+    assert.equal(await page.locator('.desktop-video-loading .spinner').isVisible(), true);
+    assert.equal(await page.locator('.video-canvas').evaluate(canvas => {
+      window.dispatchEvent(new Event('resize'));
+      const gl = canvas.getContext('webgl');
+      const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+      gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return pixels.some((value, i) => i % 4 === 1 && value > 100);
+    }), true, 'The visualization is still rendered behind the spinner');
+  };
   const checkControls = async page => {
     const controls = page.getByRole('group', {name: 'Spotify playback controls', exact: true});
     assert.equal(await controls.locator('button:enabled').count(), 3);
@@ -165,21 +180,44 @@ test('Spotify visualizations, local view switching and consecutive tracks retain
   await pages[0].screenshot({path: 'test-artifacts/spotify-shared-visualizations.png', fullPage: true});
   const perform = instance.desktop.perform.bind(instance.desktop);
   let failVideo = true;
-  t.mock.method(instance.desktop, 'perform', (session, peer, message) => {
-    if (failVideo && message.action === 'resume' && peer.consumers.get(message.consumerId)?.kind === 'video') {
-      failVideo = false;
-      throw new Error('Temporary video failure');
+  let videoResumeGate;
+  const delayVideo = () => {
+    let release;
+    videoResumeGate = new Promise(resolve => release = resolve);
+    return () => { videoResumeGate = null; release(); };
+  };
+  t.mock.method(instance.desktop, 'perform', async (session, peer, message) => {
+    if (message.action === 'resume' && peer.consumers.get(message.consumerId)?.kind === 'video') {
+      if (failVideo) {
+        failVideo = false;
+        throw new Error('Temporary video failure');
+      }
+      await videoResumeGate;
     }
     return perform(session, peer, message);
   });
   await chooseView(pages[0], 'Desktop');
   await pages[0].getByRole('button', {name: 'Retry video', exact: true}).waitFor();
+  assert.equal(await pages[0].getByLabel('Audio visualization library').isVisible(), true, 'Video errors keep the visualization visible');
+  assert.equal(await pages[0].locator('.desktop-video-loading').count(), 0, 'Errors replace the spinner with a retry control');
   const audioBeforeRetry = await Promise.all(audioConsumers.map(packets));
   await new Promise(resolve => setTimeout(resolve, 500));
   const audioDuringFailure = await Promise.all(audioConsumers.map(packets));
   assert.ok(audioDuringFailure.every((count, i) => count > audioBeforeRetry[i] + 10), 'Video failure leaves both audio receivers running');
+  const releaseFirstVideo = delayVideo();
   await pages[0].getByRole('button', {name: 'Retry video', exact: true}).click();
+  await checkLoading(pages[0]);
+  await checkControls(pages[0]);
+  await pages[0].locator('.desktop-tile video').evaluate(video => {
+    video.dispatchEvent(new Event('loadeddata'));
+    video.dispatchEvent(new Event('playing'));
+  });
+  await pages[0].waitForTimeout(400);
+  await checkLoading(pages[0]);
+  await pages[0].screenshot({path: 'test-artifacts/spotify-desktop-loading.png', fullPage: true});
+  releaseFirstVideo();
   await visibleDesktop(pages[0]);
+  assert.equal(await pages[0].locator('.desktop-video-loading').count(), 0);
   await checkControls(pages[0]);
   assert.equal(await pages[0].getByLabel('Audio visualization library').isVisible(), false);
   assert.equal(await pages[0].locator('.desktop-tile video').evaluate(video => getComputedStyle(video).opacity), '1');
@@ -197,8 +235,20 @@ test('Spotify visualizations, local view switching and consecutive tracks retain
   assert.equal(after[0], before[0], 'Hidden desktop sends zero video packets');
   assert.ok(after[1] > before[1], 'Another desktop viewer still receives video');
   assert.ok(after[2] > before[2] + 20 && after[3] > before[3] + 20, 'Both audio streams continue while video is off');
+  const releaseResumedVideo = delayVideo();
+  await chooseView(pages[0], 'Desktop');
+  await checkLoading(pages[0]);
+  await pages[0].waitForTimeout(400);
+  await checkLoading(pages[0]);
+  await chooseView(pages[0], 'Visualizations');
+  assert.equal(await pages[0].locator('.desktop-video-loading').count(), 0);
+  releaseResumedVideo();
+  await pages[0].waitForTimeout(300);
+  await until(() => firstVideo.paused);
+  assert.equal(await pages[0].locator('.player-shell').getAttribute('data-spotify-view'), 'visualizations', 'A cancelled transition cannot reveal a late frame');
   await chooseView(pages[0], 'Desktop');
   await until(async () => !firstVideo.paused && await packets(firstVideo) > after[0]);
+  await visibleDesktop(pages[0]);
   await chooseView(pages[1], 'Visualizations');
   await until(() => secondVideo.paused);
   // Repeated toggles must reuse the video consumer and never touch music.

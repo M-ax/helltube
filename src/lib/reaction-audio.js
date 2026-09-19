@@ -1,14 +1,15 @@
 import {createFingerBuffer, createFingerStaticBuffer, FINGER_SLIDE_LOOP_START} from './finger-audio.js';
+import {BIDEN_SOUNDS} from './biden.js';
 
 export function createReactionAudio() {
     let context;
     const sounds = {
         hitmarker: {url: '/sounds/mw2-hitmarker.mp3', gain: 0.65},
         metalpipe: {url: '/sounds/metal-pipe.mp3', gain: 1},
+        jpeg: {url: '/sounds/hank-jpeg.mp3', gain: .8},
         flashbangBounce: {url: '/sounds/csgo-flashbang-bounce.mp3', gain: .7},
         flashbangRing: {url: '/sounds/csgo-flashbang-ring.mp3', gain: .5},
-        bidenThing: {url: '/sounds/biden-you-know-the-thing.mp3', gain: .8},
-        bidenWord: {url: '/sounds/biden-one-word.mp3', gain: .8},
+        ...Object.fromEntries(Object.entries(BIDEN_SOUNDS).map(([kind, url]) => [kind, {url, gain: .8}])),
         fingertap: {gain: .8},
         fingerstatic: {gain: .4},
     };

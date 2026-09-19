@@ -28,9 +28,29 @@ Biden speech excerpts sourced from Voicemod Tuna:
 - https://tuna.voicemod.net/sound/73335727-ab20-4392-9e1b-bd52c6288e69
   (audio: https://us-tuna-sounds-files.voicemod.net/73335727-ab20-4392-9e1b-bd52c6288e69-1775964939945.mp3)
 
+Four additional Biden soundboard excerpts are sourced from SoundXPro:
+
+| Local file | Clip | Source | Original audio |
+| --- | --- | --- | --- |
+| `biden-come-on-man.mp3` | Come on, man | [SoundXPro](https://soundxpro.com/sounds/come-on-man-joe-biden) | [MP3](https://soundxpro.com/cloud_download/sound_67bedcdeb0605.mp3) |
+| `biden-chocolate-chip.mp3` | Chocolate chocolate chip | [SoundXPro](https://soundxpro.com/sounds/biden-chocolate-chip) | [MP3](https://soundxpro.com/cloud_download/sound_67bede1f5079d.mp3) |
+| `biden-corn-pop.mp3` | Corn Pop | [SoundXPro](https://soundxpro.com/sounds/biden-cornpop) | [MP3](https://soundxpro.com/cloud_download/sound_67bff36c3f64f.mp3) |
+| `biden-ice-cream.mp3` | I love ice cream | [SoundXPro](https://soundxpro.com/sounds/biden-ice-cream) | [MP3](https://soundxpro.com/cloud_download/sound_67bedb2174f52.mp3) |
+
 These are soundboard excerpts used for the labeled parody reaction; they are not
 voice synthesis or a new statement. Original recordings belong to their respective
 rights holders. Local copies are normalized to -18 LUFS / -2 dBTP, encoded as mono
 96 kbps MP3, and played at 80% of the viewer's volume. No words are reordered or added.
-The event ID selects one clip per walk, beginning 600 ms after the shared timestamp.
+The event ID selects one of six clips per walk, beginning 600 ms after the shared timestamp.
+Only the selected clip is downloaded and decoded, and every clip fits inside the 12-second walk.
 Late events skip the line; muting, leaving, disabling reactions, or hiding the tab stops it.
+
+`hank-jpeg.mp3` is Hank Hill's JPEG / hot-dog line from King of the Hill,
+downloaded from [Voicemod Tuna](https://tuna.voicemod.net/sound/4ddffe3f-7e53-4424-9304-9c251f6c68e0)
+([original MP3](https://us-tuna-sounds-files.voicemod.net/4ddffe3f-7e53-4424-9304-9c251f6c68e0-1683090578683.mp3)).
+The 5.64-second excerpt is normalized to -18 LUFS / -2 dBTP and encoded as
+mono 96 kbps MP3 at 44.1 kHz. Original audio belongs to its respective rights holders.
+It plays at 80% of the viewer's volume, 600 ms after the shared reaction timestamp.
+Live frames are JPEG-encoded locally at progressively lower quality and resolution
+during the line; normal video returns when it ends. No video is uploaded or transcoded
+on the server. Repeated triggers replace the active effect and voice.

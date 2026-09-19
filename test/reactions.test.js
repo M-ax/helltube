@@ -146,6 +146,12 @@ test('real WebSockets share reactions, isolate rooms, restore ball on join and r
     assert.deepEqual(a.messages.find(message => message.id === biden.id), biden);
     assert.ok(Number.isFinite(biden.serverTime));
     assert.ok(!outsider.messages.some(message => message.kind === 'biden'));
+    send(a, {type: 'reaction', kind: 'jpeg', x: .5, y: .65});
+    await until(() => b.messages.some(message => message.type === 'reaction' && message.kind === 'jpeg'));
+    const jpeg = b.messages.find(message => message.kind === 'jpeg');
+    assert.deepEqual(a.messages.find(message => message.id === jpeg.id), jpeg);
+    assert.ok(Number.isFinite(jpeg.serverTime));
+    assert.ok(!outsider.messages.some(message => message.kind === 'jpeg'));
     send(a, {type: 'reaction', kind: 'beachball', enabled: true});
     await until(() => b.messages.some(message => message.type === 'reactions:state' && message.ball));
     const first = b.messages.find(message => message.type === 'reactions:state' && message.ball);

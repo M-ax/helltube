@@ -60,6 +60,10 @@
             <img class="biden-icon" src="/images/joe-biden-walking.png" alt="" width="17" height="27"
                  loading="lazy" decoding="async" fetchpriority="low"/>Joe wander
         </button>
+        <button type="button" class="reaction-button jpeg-button" disabled={!connected || !enabled} on:click={() => onReact('jpeg')}
+                title="Hank Hill destroys the picture quality while he asks about JPEGs">
+            <span class="jpeg-icon" aria-hidden="true">JPG</span><span>do i look like i know what a jpeg is</span>
+        </button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('heart')}><span aria-hidden="true">❤️</span>Love</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('laugh')}><span aria-hidden="true">😂</span>Laugh</button>
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('clap')}><span aria-hidden="true">👏</span>Applause</button>
@@ -76,4 +80,7 @@
     .finger-icon { width: 26px; height: 26px; image-rendering: pixelated; }
     .flashbang-icon { display: inline-flex; width: 14px; height: 26px; transform: rotate(25deg); }
     .biden-icon { width: 17px; height: 27px; object-fit: contain; }
+    .jpeg-button { max-width: 100%; text-align: left; }
+    .jpeg-button > span { font-size: 12px; }
+    .jpeg-button > .jpeg-icon { flex-shrink: 0; padding: 4px 2px; border: 1px solid currentColor; font: bold 9px var(--mono); }
 </style>

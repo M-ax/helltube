@@ -18,7 +18,10 @@ without interrupting sound. Visualization mode receives audio only: desktop vide
 is first requested when you open **Desktop**, then paused at the relay whenever
 you switch back. The audio track, stream, and connection stay attached. This choice
 affects only your device; other desktop viewers keep receiving video. The VM's
-single capture remains running so the desktop can return immediately.
+single capture remains running. When opening **Desktop**, the visualization keeps
+playing with a loading spinner until a fresh video frame is ready. Switching back
+cancels the transition; video failures leave the visualization and music playing
+with a video retry control.
 Only one room can use the shared Spotify player at a
 time; other rooms see which room owns it and wait. Consecutive Spotify songs keep
 the same stream and view through skips and track changes. VM audio uses 320 kbps

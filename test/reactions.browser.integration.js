@@ -4,7 +4,7 @@ import {chromium} from 'playwright';
 import {start, until} from './helpers.js';
 import {createBeachBall, ballArena} from '../shared/beach-ball.js';
 import {FLASH_DETONATE_MS, FLASH_LIFETIME_MS} from '../src/lib/flashbang.js';
-import {BIDEN_LIFETIME_MS, bidenSound} from '../src/lib/biden.js';
+import {BIDEN_LIFETIME_MS, BIDEN_SOUND_MS, BIDEN_SOUNDS, bidenSound} from '../src/lib/biden.js';
 import {writeFile} from 'node:fs/promises';
 
 test('pointing fingers track locally, stream at 60Hz, tap and slide together, and clean up', {timeout: 60000}, async t => {
@@ -216,7 +216,12 @@ test('Biden wanders in sync with local audio controls, reduced motion and no sta
     const sounds = await Promise.all([a, b].map(page => page.evaluate(() => window.bidenSounds[0])));
     assert.equal(sounds[0].duration, sounds[1].duration, 'Everyone hears the same selected clip.');
     assert.ok(Math.abs(sounds[0].at - sounds[1].at) < 180);
-    assert.equal(sounds[0].duration > 7, bidenSound(id) === 'bidenWord');
+    assert.ok(sounds[0].duration > 0 && sounds[0].duration * 1000 < BIDEN_LIFETIME_MS - BIDEN_SOUND_MS);
+    for (const page of [a, b]) {
+        const fetched = await page.evaluate(() => performance.getEntriesByType('resource')
+            .map(entry => new URL(entry.name).pathname).filter(path => path.startsWith('/sounds/biden-')));
+        assert.deepEqual(fetched, [BIDEN_SOUNDS[bidenSound(id)]], 'Only the selected clip is downloaded.');
+    }
     const geometry = await joe(a).evaluate(node => {
         const image = node.querySelector('img');
         const canvas = document.createElement('canvas');

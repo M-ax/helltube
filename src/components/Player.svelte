@@ -18,6 +18,8 @@
     import MetalPipeReaction from './MetalPipeReaction.svelte';
     import FlashbangReaction from './FlashbangReaction.svelte';
     import BidenReaction from './BidenReaction.svelte';
+    import JpegReaction from './JpegReaction.svelte';
+    import {JPEG_LIFETIME_MS} from '../lib/jpeg.js';
     import {BIDEN_LIFETIME_MS, bidenSound} from '../lib/biden.js';
     import {PIPE_LIFETIME_MS} from '../lib/metal-pipe.js';
     import {FLASH_LIFETIME_MS} from '../lib/flashbang.js';
@@ -64,6 +66,7 @@
     let analysedStream = null;
     let spotifyView = 'visualizations';
     let spotifyViewRoom = null;
+    let spotifyReadyStream = null;
     let nativeAudioOnly = false;
     let analysisGeneration = 0;
     let seekPreview;
@@ -131,8 +134,8 @@
         spotifyView = 'visualizations';
         spotifyViewRoom = sharedSpotify ? room.id : null;
     }
-    $: spotifyVisualization = sharedSpotify && spotifyView === 'visualizations';
-    $: if (sharedDesktop) onDesktopVideoChange?.(sharedDesktop.id, !spotifyVisualization);
+    $: spotifyVisualization = sharedSpotify && (spotifyView === 'visualizations' || !spotifyStream || spotifyReadyStream !== spotifyStream);
+    $: if (sharedDesktop) onDesktopVideoChange?.(sharedDesktop.id, spotifyView === 'desktop');
     $: spotify = item?.kind === 'spotify' && !live;
     $: spotifyCollection = spotify && /\/(album|playlist|show|artist)\//.test(item.embed || '');
     $: audioOnly = !live && (!!item?.audioOnly || (!!media && hasFrame && nativeAudioOnly));
@@ -648,7 +651,7 @@
             if (seenReactions.has(event.id)) continue;
             seenReactions.add(event.id);
             if (!enabled) continue;
-            const lifetime = event.kind === 'biden' ? BIDEN_LIFETIME_MS : event.kind === 'flashbang' ? FLASH_LIFETIME_MS
+            const lifetime = event.kind === 'jpeg' ? JPEG_LIFETIME_MS : event.kind === 'biden' ? BIDEN_LIFETIME_MS : event.kind === 'flashbang' ? FLASH_LIFETIME_MS
                 : event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
@@ -662,6 +665,8 @@
                     clusters: event.clusters || [{strength: event.strength ?? 1, offset: 0}]});
                 continue;
             }
+            // A new JPEG replaces the previous one, bounding encode work and voice overlap.
+            if (event.kind === 'jpeg') activeReactions = activeReactions.filter(value => value.kind !== 'jpeg');
             activeReactions = [...activeReactions.slice(-39), event];
             if (event.kind === 'hitmarker' && !soundMuted && !muted && !captureMuted) reactionAudio?.play(volume);
             const timer = setTimeout(() => {
@@ -797,7 +802,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus reveals the playback controls.) -->
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
-         data-controls-visible={controlsVisible} data-spotify-view={sharedSpotify ? spotifyView : undefined}>
+         data-controls-visible={controlsVisible} data-spotify-view={sharedSpotify ? spotifyVisualization ? 'visualizations' : 'desktop' : undefined}>
     <div class="video-viewport" class:finger-armed={fingerArmed} bind:this={videoViewport}
          use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled && !whiteboardOpen, connected,
              roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
@@ -812,6 +817,8 @@
                     <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {connected} {volume} {muted}
                                    {captureMuted} inputDisabled={reactionInputActive}
                                    nativeControls={!sharedSpotify}
+                                   videoRequested={sharedSpotify && spotifyView === 'desktop'}
+                                   onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}
                                    visualized={spotifyVisualization && webglEffectsActive} onRetry={onRetryDesktop}
                                    onRetryVideo={onRetryDesktopVideo}/>
                 {/each}
@@ -829,6 +836,9 @@
         <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
                 class:video-visible={webglEffectsActive && (crtVisible || !!media || live || spotify)} aria-hidden="true"></canvas>
         <canvas bind:this={effectsCanvas} class="player-effects" aria-hidden="true"></canvas>
+        {#each activeReactions.filter(reaction => reaction.kind === 'jpeg') as reaction (reaction.id)}
+            <JpegReaction {reaction} {clockOffset} onSound={reactionSound}/>
+        {/each}
         {#if sharedSpotify && !live && connected}
             <div class="screen-message" role="status"><p>{room.spotifyDesktop.message}</p></div>
         {:else if spotify && connected && !captureMuted}
@@ -856,7 +866,7 @@
             <BidenReaction {reaction} {clockOffset} onSound={reactionSound}/>
         {/each}
         <div class="reaction-overlay" aria-hidden="true">
-            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang', 'biden'].includes(reaction.kind)) as reaction (reaction.id)}
+            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang', 'biden', 'jpeg'].includes(reaction.kind)) as reaction (reaction.id)}
                 <span class="player-reaction" class:hitmarker={reaction.kind === 'hitmarker'}
                       data-reaction={reaction.kind} data-reaction-id={reaction.id}
                       style={`left: ${reaction.x * 100}%; top: ${reaction.y * 100}%`}>

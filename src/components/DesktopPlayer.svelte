@@ -1,5 +1,6 @@
 <script>
     import Icon from './Icon.svelte';
+    import {waitForDesktopFrame} from '../lib/desktop-video-ready.js';
 
     export let item;
     export let playback = null;
@@ -10,6 +11,8 @@
     export let inputDisabled = false;
     export let visualized = false;
     export let nativeControls = true;
+    export let videoRequested = false;
+    export let onVideoReady;
     export let onRetry;
     export let onRetryVideo;
     let tile;
@@ -21,10 +24,31 @@
     let loading = true;
     let error = '';
     let generation = 0;
+    let videoReady = false;
 
     $: forcedMute = captureMuted || !!playback?.local;
     $: if (video) video.volume = volume;
     $: if (video) video.muted = muted || forcedMute;
+
+    function watchVideoFrame(node, initial) {
+        let previousStream;
+        let previousEnabled;
+        let cancel;
+        function update({stream, enabled}) {
+            if (stream === previousStream && enabled === previousEnabled) return;
+            previousStream = stream;
+            previousEnabled = enabled;
+            cancel?.();
+            videoReady = false;
+            onVideoReady?.(false, stream);
+            if (stream && enabled) cancel = waitForDesktopFrame(node, () => {
+                videoReady = true;
+                onVideoReady?.(true, stream);
+            });
+        }
+        update(initial);
+        return {update, destroy() { cancel?.(); }};
+    }
 
     async function toggleFullscreen() {
         if (fullscreenPending || (inputDisabled && !fullscreen)) return;
@@ -80,6 +104,7 @@
 <div class="desktop-tile" class:visualized bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}>
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
     <video bind:this={video} use:attachStream={{stream: playback?.stream, connected}}
+           use:watchVideoFrame={{stream: playback?.stream, enabled: videoRequested && connected && !blocked && !error && !playback?.error && !playback?.videoError}}
            controls={nativeControls && !inputDisabled && !visualized} controlslist="nofullscreen" inert={inputDisabled || visualized || !nativeControls} playsinline aria-label={`Shared desktop: ${item.title}`}
            on:dblclick|preventDefault={toggleFullscreen}
            on:volumechange={() => { if (forcedMute && video && !video.muted) video.muted = true; }}
@@ -111,6 +136,8 @@
             <span>{playback.videoError}</span>
             <button class="button secondary small" on:click={() => onRetryVideo?.(item.id)}>Retry video</button>
         </div>
+    {:else if videoRequested && !videoReady}
+        <div class="desktop-message desktop-video-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading desktop video…</div>
     {:else if loading}
         <div class="desktop-message" role="status"><span class="spinner"></span>Connecting desktop…</div>
     {/if}
@@ -181,5 +208,15 @@
         text-align: center;
         font-size: 12px;
         background: #050506df;
+    }
+    .desktop-video-loading {
+        inset: 50% auto auto 50%;
+        transform: translate(-50%, -50%);
+        flex-direction: row;
+        padding: 12px 16px;
+        border: 1px solid #294232;
+        border-radius: 7px;
+        white-space: nowrap;
+        pointer-events: none;
     }
 </style>
