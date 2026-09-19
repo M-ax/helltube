@@ -43,6 +43,27 @@ test('SoundCloud playlist metadata is bounded, tracks resolve fresh CDN URLs, an
     }
 });
 
+test('SoundCloud track links inside playlists resolve the newer AAC playback host without widening host trust', async t => {
+    const provider = new SoundCloud({ytdlp: 'yt-dlp'});
+    const link = 'https://soundcloud.com/djblyatman/atom?in=aezeus/sets/magnitude-5-hardbass';
+    const canonical = 'https://soundcloud.com/djblyatman/atom';
+    const media = 'https://playback.media-streaming.soundcloud.cloud/track/585307245/playlist.m3u8?token=private';
+    const data = {title: 'DJ Blyatman - Atom', duration: 265.65, webpage_url: canonical,
+        format_id: 'hls_aac_160k', protocol: 'm3u8_native', acodec: 'mp4a.40.2', url: media};
+    const extract = t.mock.method(provider, 'extract', async () => data);
+    const [item] = await provider.items(link, {displayName: 'Listener'}, 0);
+    assert.equal(item.source.url, canonical);
+    assert.equal(item.playlistId, null, 'The in= parameter identifies the context, not an explicit playlist import.');
+    assert.equal(extract.mock.calls[0].arguments[0], canonical);
+    assert.deepEqual(await provider.resolve(item.source.url), {inputs: [{url: media, headers: {}}], duration: 265.65});
+    for (const url of [media.replace('https:', 'http:'), media.replace('.cloud/', '.cloud.evil.test/'),
+        media.replace('playback.media-streaming.', 'untrusted.'), media.replace('https://', 'https://user:pass@'),
+        media.replace('.cloud/', '.cloud:444/')]) {
+        data.url = url;
+        await assert.rejects(provider.resolve(canonical), /unsupported media host/);
+    }
+});
+
 test('Spotify survives unavailable metadata and stays outside the room playback clock', async t => {
     t.mock.method(globalThis, 'fetch', async () => { throw new Error('Offline'); });
     const provider = new Spotify();

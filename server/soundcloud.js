@@ -58,7 +58,8 @@ export class SoundCloud {
     const formats = data.requested_formats || [data];
     const inputs = formats.map(format => {
       const source = new URL(format.url);
-      if (source.protocol !== 'https:' || source.username || source.password || source.port || !source.hostname.endsWith('.sndcdn.com')) {
+      const trustedHost = source.hostname.endsWith('.sndcdn.com') || source.hostname === 'playback.media-streaming.soundcloud.cloud';
+      if (source.protocol !== 'https:' || source.username || source.password || source.port || !trustedHost) {
         throw new Error('SoundCloud returned an unsupported media host.');
       }
       return {url: source.href, headers: format.http_headers || data.http_headers || {}};
