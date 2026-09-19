@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { atomicWrite, defaults, nextRefresh, sshArguments, validateConfig, youtubeCookies } from '../tools/cookie-helper/core.mjs';
 import { cookieUserAgent, COOKIE_USER_AGENT_MARKER } from '../shared/youtube-cookie-metadata.js';
@@ -123,4 +125,106 @@ test('corrupt settings produce a safe startup error instead of silently enabling
   assert.equal(code, 1);
   assert.equal(JSON.parse(output).type, 'fatal');
   assert.doesNotMatch(output, /secret-value/);
+});
+
+test('worker keeps refresh paused until the ordinary sign-in browser closes and the user finishes', { timeout: 20000 }, async () => {
+  await mkdir(directory, { recursive: true });
+  const temporary = await mkdtemp(path.join(directory, 'sign-in-worker-'));
+  const output = path.join(temporary, 'youtube-cookies.txt');
+  const closed = path.join(temporary, 'browser-closed');
+  const refreshed = path.join(temporary, 'refresh-started');
+  const browserFixture = path.join(temporary, 'browser-fixture.mjs');
+  const loader = path.join(temporary, 'loader.mjs');
+  const coreURL = pathToFileURL(path.resolve('tools/cookie-helper/core.mjs')).href;
+  const workerURL = pathToFileURL(path.resolve('tools/cookie-helper/worker.mjs')).href;
+  await writeFile(output, 'previous export');
+  await writeFile(browserFixture, `
+    import { existsSync, writeFileSync } from 'node:fs';
+    import { HelperError } from ${JSON.stringify(coreURL)};
+    export async function openSignInBrowser() {
+      let ended = false, finish;
+      const closed = new Promise(resolve => { finish = resolve; });
+      const timer = setInterval(() => {
+        if (existsSync(${JSON.stringify(closed)})) { ended = true; clearInterval(timer); finish(); }
+      }, 10);
+      return { closed, get isOpen() { return !ended; },
+        async finish() { if (!ended) throw new HelperError('Close all windows before finishing.'); },
+        async close() { ended = true; clearInterval(timer); finish(); }
+      };
+    }
+    export async function openBrowser() {
+      writeFileSync(${JSON.stringify(refreshed)}, 'started');
+      return { identity: { description: 'Synthetic refresh' }, async close() {} };
+    }
+    export async function refreshCookies() { return { cookies: [${JSON.stringify(cookie())}], userAgent: 'Synthetic Chrome' }; }
+  `);
+  await writeFile(loader, `export async function resolve(specifier, context, next) {
+    if (specifier === './browser.mjs' && context.parentURL === ${JSON.stringify(workerURL)})
+      return { url: ${JSON.stringify(pathToFileURL(browserFixture).href)}, shortCircuit: true };
+    return next(specifier, context);
+  }`);
+  const child = spawn(process.execPath, ['--experimental-loader', pathToFileURL(loader).href, 'tools/cookie-helper/worker.mjs', temporary],
+    { stdio: ['pipe', 'pipe', 'pipe'] });
+  const messages = [];
+  let buffered = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', data => {
+    buffered += data;
+    let newline;
+    while ((newline = buffered.indexOf('\n')) !== -1) {
+      messages.push(JSON.parse(buffered.slice(0, newline)));
+      buffered = buffered.slice(newline + 1);
+    }
+  });
+  child.stderr.resume();
+  const exited = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+  const send = message => { const from = messages.length; child.stdin.write(JSON.stringify(message) + '\n'); return from; };
+  async function waitFor(predicate, from = 0) {
+    for (let attempt = 0; attempt < 250; attempt++) {
+      const message = messages.slice(from).find(predicate);
+      if (message) return message;
+      await delay(20);
+    }
+    assert.fail('Timed out waiting for worker sign-in status.');
+  }
+  try {
+    const { config } = await waitFor(message => message.type === 'config');
+    let from = send({ action: 'save', config: { ...config, enabled: true } });
+    await waitFor(message => message.type === 'saved', from);
+    from = send({ action: 'signIn' });
+    const signingIn = await waitFor(message => message.type === 'status' && message.signingIn && !message.busy, from);
+    assert.equal(signingIn.nextRun, null);
+    from = send({ action: 'refresh' });
+    const early = await waitFor(message => message.type === 'status' && message.error, from);
+    assert.equal(early.signingIn, true);
+    assert.match(early.message, /Close all windows/);
+    await delay(1300); // Automatic refresh was due, but must remain paused during sign-in.
+    await assert.rejects(readFile(refreshed), { code: 'ENOENT' });
+    assert.equal(await readFile(output, 'utf8'), 'previous export');
+    from = messages.length;
+    await writeFile(closed, 'closed');
+    const browserClosed = await waitFor(message => message.type === 'status' && /Browser closed/.test(message.message), from);
+    assert.equal(browserClosed.signingIn, true);
+    assert.equal(browserClosed.nextRun, null);
+    from = send({ action: 'save', config });
+    await waitFor(message => message.type === 'status' && /Finish or cancel/.test(message.message), from);
+    from = send({ action: 'refresh' });
+    const exported = await waitFor(message => message.type === 'status' && !message.busy && message.lastExport, from);
+    assert.equal(exported.signingIn, false);
+    assert.ok(exported.nextRun > Date.now());
+    assert.match(await readFile(output, 'utf8'), /SID\tsynthetic-session/);
+    assert.equal(cookieUserAgent(await readFile(output, 'utf8')), 'Synthetic Chrome');
+    const previous = await readFile(output, 'utf8');
+    await rm(closed);
+    from = send({ action: 'signIn' });
+    await waitFor(message => message.type === 'status' && message.signingIn && !message.busy, from);
+    from = send({ action: 'cancel' });
+    const cancelled = await waitFor(message => message.type === 'status' && /Previous export preserved/.test(message.message), from);
+    assert.equal(cancelled.signingIn, false);
+    assert.ok(cancelled.nextRun > Date.now());
+    assert.equal(await readFile(output, 'utf8'), previous);
+  } finally {
+    child.stdin.end(JSON.stringify({ action: 'quit' }) + '\n');
+    assert.equal(await exited, 0);
+  }
 });

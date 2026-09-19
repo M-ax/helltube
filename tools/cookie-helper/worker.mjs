@@ -2,14 +2,14 @@ import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { atomicWrite, HelperError, nextRefresh, privateDirectory, readConfig, syncSSH, validateConfig, youtubeCookies } from './core.mjs';
-import { openBrowser, refreshCookies } from './browser.mjs';
+import { openBrowser, openSignInBrowser, refreshCookies } from './browser.mjs';
 
 const directory = path.resolve(process.argv[2]);
 const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 let config, session, busy = false, stopping = false, failures = 0;
 let status = { message: 'Ready. Sign in to YouTube to create your first export.', lastExport: null, lastSync: null, nextRun: null, error: false,
   browserIdentity: 'Automatic Chrome version (worldwide usage)' };
-const publish = () => emit({ type: 'status', ...status, busy, signingIn: !!session });
+const publish = () => emit({ type: 'status', ...status, nextRun: session ? null : status.nextRun, busy, signingIn: !!session });
 const safeError = error => error instanceof HelperError ? error.message : 'Operation failed. Check the browser, output folder permissions and network connection.';
 
 async function saveStatus() {
@@ -18,13 +18,18 @@ async function saveStatus() {
 
 async function refresh() {
   if (busy || stopping) return;
+  // A regular sign-in browser must finish writing its profile before background export.
+  // Leave sign-in mode active on an early click, so scheduled refresh stays paused.
+  if (session) {
+    await session.finish();
+    session = null;
+  }
   busy = true;
-  status.message = session ? 'Finishing sign-in and exporting cookies...' : 'Refreshing YouTube cookies...';
+  status.message = 'Refreshing YouTube cookies...';
   publish();
-  let active = session;
-  session = null;
+  let active;
   try {
-    active ||= await openBrowser(directory, config.browser, false);
+    active = await openBrowser(directory, config.browser);
     status.browserIdentity = active.identity.description;
     publish();
     const { cookies, userAgent } = await refreshCookies(active);
@@ -74,20 +79,25 @@ async function command(message) {
   } else if (message.action === 'refresh') {
     await refresh();
   } else if (message.action === 'signIn') {
-    if (session) { await session.page.bringToFront(); return; }
+    if (session?.isOpen) {
+      status.message = 'Sign in in the browser, close its windows, then click Finish sign-in here.';
+      status.error = false;
+      publish();
+      return;
+    }
     busy = true;
     status.message = 'Opening your dedicated YouTube browser...';
     publish();
     try {
-      session = await openBrowser(directory, config.browser, true);
-      status.browserIdentity = session.identity.description;
-      await session.page.goto('https://www.youtube.com/', { waitUntil: 'domcontentloaded' });
-      status.message = 'Sign in in the browser, then click Finish sign-in here. Keep the browser open until then.';
+      const opened = await openSignInBrowser(directory, config.browser);
+      session = opened;
+      status.browserIdentity = 'Installed browser during sign-in; automatic Chrome version during refresh';
+      status.message = 'Sign in in the browser, close its windows, then click Finish sign-in here.';
       status.error = false;
-      session.browser.on('disconnected', () => {
-        if (!session) return;
-        session = null;
-        status.message = 'Sign-in browser closed. Choose Refresh now to export, or Sign in to reopen it.';
+      void opened.closed.then(() => {
+        if (session !== opened || stopping) return;
+        status.message = 'Browser closed. Click Finish sign-in to export, or Sign in to reopen it.';
+        status.error = false;
         publish();
       });
     } catch (error) {
@@ -98,10 +108,12 @@ async function command(message) {
     } finally { busy = false; publish(); }
   } else if (message.action === 'cancel') {
     const active = session;
-    session = null;
     busy = true;
-    try { await active?.close(); } finally { busy = false; }
+    try { await active?.close(); session = null; }
+    finally { busy = false; publish(); }
     status.message = 'Sign-in closed. Previous export preserved.';
+    status.error = false;
+    status.nextRun = nextRefresh(config, failures);
     publish();
   }
 }
