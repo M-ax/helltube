@@ -6,6 +6,8 @@
     export let playing = false;
     export let external = false;
     export let webgl = false;
+    export let active = true;
+    export let allowOff = true;
     let selected = 'spectrum';
     let engine;
     let names = [];
@@ -16,8 +18,8 @@
     let disposed = false;
     $: choices = names.filter(name => name.toLowerCase().includes(search.toLowerCase()));
     $: if (engine) engine.setAnalyser(analyser);
-    $: if (engine) engine.setPlaying(playing);
-    $: if (engine && renderer) renderer.setAudioVisualization(selected === 'off' ? null : engine, playing);
+    $: if (engine) engine.setPlaying(active && playing);
+    $: if (engine && renderer) renderer.setAudioVisualization(!active || selected === 'off' ? null : engine, active && playing);
 
     async function loadLibrary() {
         if (loading || names.length) return;
@@ -34,7 +36,7 @@
         selected = value;
         try { localStorage.setItem('helltube.visualization', value); } catch {}
         await engine?.select(value);
-        if (!disposed) renderer?.setAudioVisualization(value === 'off' ? null : engine, playing);
+        if (!disposed) renderer?.setAudioVisualization(!active || value === 'off' ? null : engine, active && playing);
     }
 
     function randomPreset() {
@@ -46,21 +48,21 @@
         engine = createVisualization(message => error = message);
         try {
             const saved = localStorage.getItem('helltube.visualization');
-            if (saved === 'off' || saved?.startsWith('milkdrop:') || classicVisualizations.some(effect => effect.id === saved)) selected = saved;
+            if ((saved === 'off' && allowOff) || saved?.startsWith('milkdrop:') || classicVisualizations.some(effect => effect.id === saved)) selected = saved;
         } catch {}
         void choose(selected);
         if (selected.startsWith('milkdrop:')) void loadLibrary();
         const timer = setInterval(() => {
-            if (shuffle && playing && !document.hidden && !matchMedia('(prefers-reduced-motion: reduce)').matches) randomPreset();
+            if (active && shuffle && playing && !document.hidden && !matchMedia('(prefers-reduced-motion: reduce)').matches) randomPreset();
         }, 30000);
         return () => clearInterval(timer);
     });
     onDestroy(() => { disposed = true; renderer?.setAudioVisualization(null); engine?.destroy(); });
 </script>
 
-<div class="audio-visualizations" aria-label="Audio visualization library">
+<div class="audio-visualizations" aria-label="Audio visualization library" hidden={!active}>
     <div class="visualization-heading"><strong>Visualizations</strong><span>On this device</span>
-        <button type="button" class="button secondary small" class:active={selected === 'off'} aria-pressed={selected === 'off'} on:click={() => choose(selected === 'off' ? 'spectrum' : 'off')}>{selected === 'off' ? 'Turn on' : 'Turn off'}</button>
+        {#if allowOff}<button type="button" class="button secondary small" class:active={selected === 'off'} aria-pressed={selected === 'off'} on:click={() => choose(selected === 'off' ? 'spectrum' : 'off')}>{selected === 'off' ? 'Turn on' : 'Turn off'}</button>{/if}
     </div>
     <div class="classic-effects" role="group" aria-label="Classic Winamp effects">
         {#each classicVisualizations as effect}

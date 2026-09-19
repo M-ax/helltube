@@ -51,10 +51,53 @@ test('audio-only HLS uses the player WebGL, switches MilkDrop presets, and keeps
     await presets.waitFor();
     assert.ok(await presets.locator('option').count() > 300);
     const name = await presets.locator('option').first().getAttribute('value');
+    await page.evaluate(async () => {
+        const resource = performance.getEntriesByType('resource').find(entry => /\/butterchurn-[^/]+\.js/.test(entry.name));
+        const module = await import(resource.name);
+        const engine = Object.values(module).map(value => value.default || value).find(value => value.createVisualizer);
+        const create = engine.createVisualizer;
+        window.milkdropFrames = [];
+        engine.createVisualizer = function (...args) {
+            const visualizer = create.apply(this, args);
+            const render = visualizer.render;
+            visualizer.render = function (options) {
+                const result = render.call(this, options);
+                window.milkdropFrames.push({at: performance.now(), time: this.renderer.time});
+                return result;
+            };
+            return visualizer;
+        };
+    });
     await presets.selectOption(name);
     await library.locator('.preset-name').filter({hasText: name}).waitFor();
     await page.waitForTimeout(1200);
     assert.deepEqual(await library.locator('.form-error').allTextContents(), []);
+    const measureMilkdrop = async () => {
+        await page.evaluate(() => { window.milkdropFrames.length = 0; });
+        await page.waitForTimeout(1800);
+        return page.evaluate(() => {
+            const frames = window.milkdropFrames;
+            const first = frames[0], last = frames.at(-1);
+            const seconds = (last.at - first.at) / 1000;
+            return {fps: (frames.length - 1) / seconds, speed: (last.time - first.time) / seconds};
+        });
+    };
+    const baseline = await measureMilkdrop();
+    await page.getByRole('button', {name: 'Beach ball', exact: true}).click();
+    await page.waitForFunction(() => document.querySelector('.video-viewport').dataset.beachBall === 'true');
+    // Extra invalidations mimic incoming ball snapshots and other overlay updates.
+    await page.evaluate(() => { window.reactionRedraws = setInterval(() => window.dispatchEvent(new Event('resize')), 5); });
+    const withBall = await measureMilkdrop();
+    await page.evaluate(() => clearInterval(window.reactionRedraws));
+    await page.getByRole('button', {name: 'Beach ball', exact: true}).click();
+    const afterBall = await measureMilkdrop();
+    for (const [label, metrics] of Object.entries({baseline, withBall, afterBall})) {
+        assert.ok(metrics.fps <= 31, `${label}: MilkDrop stays near 30 fps, got ${metrics.fps}`);
+        assert.ok(metrics.speed > 0.4 && metrics.speed < 1.35, `${label}: preset clock tracks real time, got ${metrics.speed}x`);
+    }
+    assert.ok(Math.abs(withBall.speed - baseline.speed) < 0.3, 'The beachball cannot accelerate the visualizer');
+    assert.equal(await page.locator('video').evaluate(video => video.paused), false);
+    t.diagnostic(`MilkDrop speed before/during/after beachball: ${[baseline, withBall, afterBall].map(value => value.speed.toFixed(2) + 'x').join(', ')}`);
     await library.getByRole('button', {name: 'Random preset', exact: true}).click();
     await page.waitForTimeout(500);
     assert.deepEqual(await library.locator('.form-error').allTextContents(), []);

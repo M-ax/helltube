@@ -5,7 +5,6 @@ No HTTP listener, passwords, arbitrary commands, or arbitrary media destinations
 Closing SSH, losing the heartbeat, or disabling sharing stops capture.
 """
 import json
-import fcntl
 import os
 from pathlib import Path
 import re
@@ -54,23 +53,29 @@ def capture_args(video, audio):
     video_target, audio_target = destination(video), destination(audio)
     video_ssrc, audio_ssrc = [str(integer(track.get("ssrc"), 2147483647)) for track in (video, audio)]
     return ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
-            # Raw 720p frames are 3.5 MiB each; 512 queued frames can OOM the VM.
+            # Capture the full current X11 desktop, rather than cropping to 720p.
+            # Eight raw 1080p frames use about 64 MiB; keep this queue bounded.
             "-thread_queue_size", "8", "-f", "x11grab", "-framerate", "30",
-            "-video_size", "1280x720", "-i", ":0.0",
+            "-i", ":0.0",
             # Read 20 ms of stereo s16 PCM per fragment, matching an Opus packet.
             "-thread_queue_size", "64", "-f", "pulse", "-sample_rate", "48000",
             "-channels", "2", "-fragment_size", "3840", "-i", "helltube.monitor",
-            "-map", "0:v:0", "-an", "-c:v", "libx264", "-threads", "2",
+            "-map", "0:v:0", "-an",
+            "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v", "libx264", "-threads", "2",
             "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline",
-            "-level", "3.1", "-pix_fmt", "yuv420p", "-b:v", "2500k",
-            "-maxrate", "3000k", "-bufsize", "1500k", "-g", "30",
+            "-level", "4.0", "-pix_fmt", "yuv420p", "-b:v", "4500k",
+            "-maxrate", "6000k", "-bufsize", "3000k", "-g", "30",
             "-keyint_min", "30", "-sc_threshold", "0", "-f", "rtp",
             "-payload_type", "102", "-ssrc", video_ssrc, video_target,
             # Pulse's wall-clock latency corrections can move timestamps backward.
             # Count PCM samples instead, retaining the initial audio/video offset.
             "-map", "1:a:0", "-vn", "-af", "asetpts=N/SR/TB+STARTPTS",
-            "-c:a", "libopus", "-b:a", "128k", "-ac", "2", "-ar", "48000",
-            "-application", "lowdelay", "-frame_duration", "20", "-flush_packets", "1", "-f", "rtp",
+            "-c:a", "libopus", "-b:a", "320k", "-ac", "2", "-ar", "48000",
+            # Constant bitrate keeps 20 ms frames within the 1200-byte RTP limit;
+            # even constrained VBR can emit oversized startup/transient packets.
+            "-application", "audio", "-compression_level", "10", "-vbr", "off",
+            "-frame_duration", "20", "-flush_packets", "1", "-f", "rtp",
             "-payload_type", "111", "-ssrc", audio_ssrc, audio_target]
 
 
@@ -107,7 +112,9 @@ class Bridge:
             uri = message.get("uri", "")
             if not isinstance(uri, str) or not URI.fullmatch(uri):
                 raise ValueError("Invalid Spotify URI")
-            self.stop()
+            # A queue handoff changes Spotify's URI without interrupting RTP.
+            if message.get("keepCapture") is not True:
+                self.stop()
             player("open", uri)
             player("play")
             return {}
@@ -123,7 +130,7 @@ class Bridge:
                 self.capture = subprocess.Popen(args, stdin=subprocess.DEVNULL,
                                                 stdout=subprocess.DEVNULL, stderr=output)
             return {}
-        if action in ("play", "pause"):
+        if action in ("play", "pause", "previous", "next"):
             player(action)
             return {}
         raise ValueError("Unknown desktop action")
@@ -167,6 +174,8 @@ class Bridge:
 
 
 if __name__ == "__main__":
+    import fcntl
+
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     with open("/run/user/1000/helltube-bridge.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -36,27 +36,53 @@ export function createAudioAnalysis() {
     let context;
     let destroyed = false;
     const sources = new Map();
+    const streams = new Map();
+    async function ready(gesture) {
+        if (destroyed) return false;
+        if (!context) {
+            if (!gesture && !globalThis.navigator?.userActivation?.hasBeenActive) return false;
+            const AudioContext = globalThis.AudioContext || globalThis.webkitAudioContext;
+            if (!AudioContext) return false;
+            context = new AudioContext();
+        }
+        if (context.state !== 'running') await context.resume();
+        return !destroyed && context.state === 'running';
+    }
+    function createAnalyser() {
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.8;
+        return analyser;
+    }
     return {
         async sample(video, gesture = false) {
-            if (!video || destroyed) return null;
-            if (!context) {
-                if (!gesture && !globalThis.navigator?.userActivation?.hasBeenActive) return null;
-                const AudioContext = globalThis.AudioContext || globalThis.webkitAudioContext;
-                if (!AudioContext) return null;
-                context = new AudioContext();
-            }
-            if (context.state !== 'running') await context.resume();
-            if (destroyed || context.state !== 'running') return null;
+            if (!video || !await ready(gesture)) return null;
             if (!sources.has(video)) {
-                const analyser = context.createAnalyser();
-                analyser.fftSize = 1024;
-                analyser.smoothingTimeConstant = 0.8;
+                const analyser = createAnalyser();
                 const source = context.createMediaElementSource(video);
                 source.connect(context.destination);
                 source.connect(analyser);
                 sources.set(video, {analyser, source});
             }
             return sources.get(video).analyser;
+        },
+        async sampleStream(stream, gesture = false) {
+            if (!stream?.getAudioTracks().length || !await ready(gesture)) return null;
+            if (!streams.has(stream)) {
+                const analyser = createAnalyser();
+                const source = context.createMediaStreamSource(stream);
+                // Tap received audio for effects only. The desktop video element
+                // remains the sole audible output and owns volume/mute controls.
+                source.connect(analyser);
+                streams.set(stream, {analyser, source});
+            }
+            return streams.get(stream).analyser;
+        },
+        releaseStream(stream) {
+            const audio = streams.get(stream);
+            audio?.source.disconnect();
+            audio?.analyser.disconnect();
+            streams.delete(stream);
         },
         release(video) {
             const audio = sources.get(video);
@@ -67,13 +93,15 @@ export function createAudioAnalysis() {
         destroy() {
             destroyed = true;
             for (const {source, analyser} of sources.values()) { source.disconnect(); analyser.disconnect(); }
+            for (const {source, analyser} of streams.values()) { source.disconnect(); analyser.disconnect(); }
             sources.clear();
+            streams.clear();
             context?.close().catch(() => {});
         },
     };
 }
 
-export function createVisualization(onError = () => {}) {
+export function createVisualization(onError = () => {}, {loadLibrary = loadMilkdropLibrary} = {}) {
     const frequencies = new Uint8Array(512);
     const waveform = new Uint8Array(1024).fill(128);
     const pixels = new Uint8Array(256 * 2 * 4);
@@ -84,9 +112,15 @@ export function createVisualization(onError = () => {}) {
     let milkCanvas = null;
     let generation = 0;
     let destroyed = false;
-    let lastTime = 0;
+    let lastTime = null;
     let lastFrame = null;
     let running = false;
+
+    function needsFrame(time) {
+        // Allow sub-millisecond RAF jitter without accidentally halving the rate
+        // on a 60 Hz display. Both the compositor and engine use this same clock.
+        return !lastFrame || lastTime === null || time - lastTime >= 1000 / 30 - 0.5;
+    }
 
     function releaseMilkdrop() {
         milkCanvas?.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext();
@@ -100,16 +134,23 @@ export function createVisualization(onError = () => {}) {
             analyser = value;
             peaks.fill(0);
             lastFrame = null;
+            lastTime = null;
         },
-        setPlaying(value) { running = !!value; },
+        setPlaying(value) {
+            if (running !== !!value) lastTime = null;
+            running = !!value;
+        },
+        resetClock() { lastTime = null; },
+        needsFrame,
         async select(id) {
             const version = ++generation;
             selection = id;
             lastFrame = null;
+            lastTime = null;
             onError('');
             if (!id.startsWith('milkdrop:')) { releaseMilkdrop(); return; }
             try {
-                const {engine, presets} = await loadMilkdropLibrary();
+                const {engine, presets} = await loadLibrary();
                 if (destroyed || version !== generation) return;
                 const preset = presets[id.slice(9)];
                 if (!preset) throw new Error('This preset is unavailable. Choose another effect.');
@@ -136,8 +177,12 @@ export function createVisualization(onError = () => {}) {
         },
         frame(width, height, time, reducedMotion = false) {
             if (destroyed || selection === 'off') return null;
-            if (lastFrame && (!running || reducedMotion)) return lastFrame;
-            const elapsed = Math.min(0.1, Math.max(0, (time - lastTime) / 1000));
+            if (lastFrame && (!running || reducedMotion)) { lastTime = null; return lastFrame; }
+            // Reactions, resize events and room updates can redraw the compositor
+            // much faster than the visualizer. Reuse its last frame independently
+            // of those redraws and advance MilkDrop by actual elapsed time.
+            if (!needsFrame(time)) return lastFrame;
+            const elapsed = lastTime === null ? 1 / 30 : Math.min(0.1, Math.max(0, (time - lastTime) / 1000));
             lastTime = time;
             frequencies.fill(0);
             waveform.fill(128);
@@ -162,7 +207,7 @@ export function createVisualization(onError = () => {}) {
                         milkCanvas.height = h;
                         milkdrop.setRendererSize(w, h);
                     }
-                    milkdrop.render({elapsedTime: 1 / 30, audioLevels: {
+                    milkdrop.render({elapsedTime: elapsed, audioLevels: {
                         timeByteArray: waveform, timeByteArrayL: waveform, timeByteArrayR: waveform,
                     }});
                     return lastFrame = {canvas: milkCanvas};

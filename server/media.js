@@ -154,8 +154,10 @@ export class Media {
       else if (job.restored && wantedIds.has(job.item.id)) {
         const room = allRooms.find(room => room.current?.id === job.item.id);
         const position = room ? this.rooms.position(room) : job.item.resumeAt ?? job.item.startAt ?? 0;
+        // A completed rendition has no missing tail. Keep it even if the clock
+        // passes EOF before Rooms.tick advances, otherwise we restart past EOF.
         const prepared = job.item.media?.qualities.some(quality => position >= quality.baseTime &&
-          (quality.complete ? position <= quality.bufferedUntil : position <= quality.bufferedUntil - 4));
+          (quality.complete || position <= quality.bufferedUntil - 4));
         // Interrupted streams can serve their cached buffer, then prepare the missing range.
         if (!prepared) {
           this.dispose(job);
@@ -174,7 +176,8 @@ export class Media {
         const room = allRooms.find(room => room.current?.id === item.id);
         const position = room ? this.rooms.position(room) : item.resumeAt ?? item.startAt ?? 0;
         const standard = item.media.qualities.find(quality => quality.id === 'standard');
-        if (!standard || (!standard.complete && position > standard.bufferedUntil - 4)) {
+        const originalEnd = item.media.qualities.find(quality => quality.id === 'original').bufferedUntil;
+        if (position < originalEnd && (!standard || (!standard.complete && position > standard.bufferedUntil - 4))) {
           // Keep the finished copy while rebuilding only the interrupted Standard stream.
           const original = cached.original;
           const media = item.media;
@@ -437,8 +440,11 @@ export class Media {
     const room = [...this.rooms.rooms.values()].find(room => room.current?.id === job.item.id);
     const position = room ? this.rooms.position(room) : job.baseTime;
     // The room follows the furthest prepared rendition; each viewer selects its own.
+    // At the same endpoint, prefer completion so an interrupted copy cannot hide EOF.
     const selected = qualities.filter(quality => quality.baseTime <= position)
-      .reduce((best, quality) => !best || quality.bufferedUntil > best.bufferedUntil ? quality : best, null) || qualities[0];
+      .reduce((best, quality) => !best || quality.bufferedUntil > best.bufferedUntil ||
+        (quality.bufferedUntil === best.bufferedUntil && quality.complete && !best.complete)
+        ? quality : best, null) || qualities[0];
     job.item.media = {...selected, qualities};
     job.item.status = 'ready';
     job.item.preparation = { ...job.item.preparation, stage: selected.complete ? 'ready' : 'buffering' };

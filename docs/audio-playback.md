@@ -12,6 +12,23 @@ SoundCloud and hosted audio drive the effects through a Web Audio analyzer. The 
 
 Spotify's cross-origin embedded player does not expose its audio samples. MilkDrop can animate ambient visuals; spectrum and oscilloscope modes have no audio signal. The library explains this limitation rather than showing invented beat analysis. Spotify embeds are removed on disconnection, item changes, and local desktop capture to stop their playback.
 
+With the shared Spotify VM enabled, the player defaults to visualizations driven
+by its received audio. **Visualizations / Desktop** changes the view on your device
+without interrupting sound. Visualization mode receives audio only: desktop video
+is first requested when you open **Desktop**, then paused at the relay whenever
+you switch back. The audio track, stream, and connection stay attached. This choice
+affects only your device; other desktop viewers keep receiving video. The VM's
+single capture remains running so the desktop can return immediately.
+Only one room can use the shared Spotify player at a
+time; other rooms see which room owns it and wait. Consecutive Spotify songs keep
+the same stream and view through skips and track changes. VM audio uses 320 kbps
+stereo Opus at 48 kHz. This controls the capture quality; the original audio quality
+still depends on Spotify's playback settings and source.
+The green Spotify controls stay centered in the bottom bar in either view. They
+control Spotify's previous track, play/pause, and next track; the separate Skip
+button advances the Helltube queue. Desktop capture includes the whole display,
+up to 1080p, rather than cropping a larger desktop to 720p.
+
 Preset packs are loaded on demand. The Vite plug-in in `scripts/milkdrop-presets.mjs` converts the pinned preset equations into regular functions during the build, preserving `script-src 'self'` without `unsafe-eval`. The content policy permits Spotify frames and SoundCloud artwork. Embed mode needs no Spotify credentials or new server secrets; the optional VM uses a private Spotify session and a restricted SSH bridge.
 
 ## Validation

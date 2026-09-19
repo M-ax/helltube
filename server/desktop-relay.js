@@ -57,9 +57,11 @@ export class DesktopRelay {
     return this.initializing;
   }
 
-  async createRouter() {
+  async createRouter({fullHd = false} = {}) {
     const worker = await this.ready();
-    return worker.createRouter({mediaCodecs});
+    return worker.createRouter({mediaCodecs: fullHd ? mediaCodecs.map(codec => codec.mimeType === 'video/H264'
+      ? {...codec, parameters: {...codec.parameters, 'profile-level-id': codec.parameters['profile-level-id'].slice(0, 4) + '28'}}
+      : codec) : mediaCodecs});
   }
 
   async createTransport(router) {

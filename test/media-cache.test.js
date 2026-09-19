@@ -263,6 +263,45 @@ test('interrupted buffers are reused, then missing media is prepared from the sa
   await restarted.close();
 });
 
+for (const finished of ['both', 'standard', 'original']) {
+  test(`a scheduler poll past EOF preserves finished ${finished} media until the queue advances`, async t => {
+    const { instance, dir } = await start(t, { maxTranscoders: 0 });
+    const room = instance.rooms.get('lobby');
+    const items = Array.from({ length: 2 }, () => makeItem(
+      { kind: 'youtube', url: 'https://youtu.be/jNQXAC9IVRw' }, { duration: 120 }));
+    instance.rooms.add(room, items);
+    await cache(instance, items[0], { complete: finished !== 'original', originalComplete: finished !== 'standard' });
+    await cache(instance, items[1]);
+    instance.rooms.stamp(room, 60, true);
+    room.resumeWhenReady = false;
+    const restarted = await restart(t, instance, dir, { maxTranscoders: 4 });
+    const started = t.mock.method(restarted.media, 'start', () => {});
+    await restarted.listen(0);
+    const restored = restarted.rooms.get('lobby');
+    const current = restored.current;
+    const job = restarted.media.jobs.get(current.id);
+    const qualities = structuredClone(current.media.qualities);
+    // The 500 ms media poll can run after EOF but before the 750 ms room tick.
+    restarted.rooms.stamp(restored, 120.419, false);
+    restarted.media.schedule();
+    assert.equal(started.mock.callCount(), 0, 'EOF must not start another transcoder');
+    assert.equal(restarted.media.jobs.get(current.id), job, 'Retain the cache for history/replay');
+    assert.deepEqual(current.media.qualities, qualities);
+    assert.equal(current.status, 'ready');
+    assert.equal(current.error, null);
+    restarted.rooms.tick();
+    assert.equal(restored.current.id, items[1].id);
+    assert.equal(restored.history[0], current);
+    assert.equal(restarted.youtube.resolve.mock.callCount(), 0);
+    restarted.rooms.stamp(restored, 120.419, false);
+    restarted.media.schedule();
+    restarted.rooms.tick();
+    assert.equal(restored.current, null, 'The final video also finishes without an error');
+    assert.equal(started.mock.callCount(), 0);
+    await restarted.close();
+  });
+}
+
 test('resuming interrupted Standard preserves the finished Original across further restarts', async t => {
   const { instance, dir } = await start(t, { maxTranscoders: 0 });
   const room = instance.rooms.get('lobby');

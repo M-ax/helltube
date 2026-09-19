@@ -153,7 +153,9 @@ export class Rooms extends EventEmitter {
   }
 
   advance(room) {
-    room.desktops = [];
+    // Consecutive Spotify entries share one VM capture and the same subscriptions.
+    room.desktops = this.spotifyDesktopEnabled && room.current?.kind === 'spotify' && room.queue[0]?.kind === 'spotify'
+      ? room.desktops.filter(item => item.provider === 'spotify') : [];
     if (room.current && room.current.kind !== 'desktop') room.history = [room.current, ...room.history.filter(i => i.id !== room.current.id)].slice(0, 5);
     room.current = room.queue.shift() || null;
     room.resumeWhenReady = !!room.current;

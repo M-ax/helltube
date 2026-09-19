@@ -29,6 +29,7 @@ function fixture(t, {audio = true, capture, connectTimeout, peerStart} = {}) {
                 if (!this.closed && options.stream) options.onState('connected');
             },
             async restartIce() { this.restarts++; },
+            async setVideoEnabled(enabled) { this.videoEnabled = enabled; },
             close() { this.closed = true; }};
         peers.push(peer);
         return peer;
@@ -213,13 +214,19 @@ test('failed or cancelled asynchronous publishing never leaves capture running',
     assert.equal(h.peers[0].closed, true);
 });
 
-function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilities = null, failProduce, getStats} = {}) {
+function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilities = null, failProduce, getStats,
+    videoEnabled = true, rpcError, beforeConsume} = {}) {
     const commands = [], produced = [], consumed = [], events = [];
     const connection = {requestId: 'capture', peerId: 'peer', itemId: 'desktop', transportOptions: {id: 'transport'},
         rtcConfig: {iceServers: [], iceTransportPolicy: 'all'}, routerRtpCapabilities: {}, producers: []};
     const client = {desktopMessages: writable(null), command(message) {
         commands.push(message);
         if (respond) queueMicrotask(() => {
+            const error = rpcError?.(message);
+            if (error) {
+                client.desktopMessages.set({type: 'desktop:error', requestId: message.requestId, rpcId: message.rpcId, message: error});
+                return;
+            }
             const data = message.action === 'produce' ? {id: message.kind + '-producer'} :
                 message.action === 'consume' ? {id: `${message.producerId}-consumer`,
                     kind: message.producerId === 'audio' ? 'audio' : 'video', producerId: message.producerId, rtpParameters: {}} : {};
@@ -245,8 +252,10 @@ function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilitie
                 return Object.assign(new EventEmitter(), {id: data.id, close() {}});
             },
             async consume(options) {
+                await beforeConsume?.(options);
                 const track = {kind: options.kind, stopped: false, stop() { this.stopped = true; }};
                 const consumer = {...options, track, rtpReceiver: {jitterBufferTarget: 100},
+                    pause() { this.paused = true; }, resume() { this.paused = false; },
                     close() { this.closed = true; track.stop(); }};
                 consumed.push(consumer);
                 events.push('installed');
@@ -259,12 +268,13 @@ function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilitie
     const device = {async load() {}, recvRtpCapabilities: {}, sendRtpCapabilities: {codecs},
         createSendTransport: makeTransport, createRecvTransport: makeTransport};
     let received;
-    const stats = [];
+    const stats = [], videoErrors = [];
     const peer = createDesktopPeer({client, connection, stream, Stream: FakeStream,
         loadDevice: load || (async () => device), mediaCapabilities, onStream: stream => { received = stream; },
+        videoEnabled, onVideoError: error => videoErrors.push(error),
         onStats: report => stats.push(report)});
     t.after(() => peer.close());
-    return {peer, client, connection, commands, produced, consumed, transports, stats,
+    return {peer, client, connection, commands, produced, consumed, transports, stats, videoErrors,
         get transport() { return transports.at(-1); }, events, received: () => received};
 }
 
@@ -432,9 +442,106 @@ test('receivers reserve audio jitter headroom and keep both tracks in the same s
     h.client.desktopMessages.set({type: 'desktop:available', requestId: 'capture', producers: h.connection.producers});
     await flush();
     assert.deepEqual(h.consumed.map(value => [value.kind, value.rtpReceiver.jitterBufferTarget]),
-        [['video', 0], ['audio', 100]]);
+        [['audio', 100], ['video', 0]]);
     assert.ok(h.consumed.every(value => value.streamId === h.connection.itemId));
-    assert.deepEqual(h.received().getTracks().map(track => track.kind), ['video', 'audio']);
+    assert.deepEqual(h.received().getTracks().map(track => track.kind), ['audio', 'video']);
+});
+
+test('Spotify watches start audio only and retain a local video choice through retries and song changes', async t => {
+    const h = fixture(t);
+    const setSpotify = title => h.client.state.set({joined: true, status: 'connected', room: {id: 'lobby',
+        current: {id: title, kind: 'spotify'}, desktops: [{id: 'desktop', provider: 'spotify', title}]}});
+    const acceptWatch = () => h.client.desktopMessages.set({...h.commands.at(-1), type: 'desktop:watching', peerId: 'viewer'});
+    setSpotify('first'); acceptWatch();
+    assert.equal(h.peers[0].videoEnabled, false);
+    h.share.setVideoEnabled('desktop', true);
+    assert.equal(h.peers[0].videoEnabled, true);
+    setSpotify('second');
+    assert.equal(h.peers.length, 1);
+    h.share.retryView('desktop'); acceptWatch();
+    assert.equal(h.peers[1].videoEnabled, true);
+    h.peers[1].onVideoError('Video unavailable');
+    assert.equal(playback(h.share).error, '');
+    assert.equal(playback(h.share).videoError, 'Video unavailable');
+    h.share.retryVideo('desktop');
+    assert.equal(h.peers[1].closed, false);
+    assert.equal(h.peers.length, 2);
+    h.share.setVideoEnabled('desktop', false);
+    h.share.retryView('desktop'); acceptWatch();
+    assert.equal(h.peers[2].videoEnabled, false);
+    h.peers[1].onVideoError('Stale error');
+    assert.equal(playback(h.share).videoError, '');
+});
+
+test('video is lazy, pauses at the relay and resumes without replacing any audio resource', async t => {
+    const h = relayHarness(t, {videoEnabled: false});
+    h.connection.producers.push({id: 'video', kind: 'video'}, {id: 'audio', kind: 'audio'});
+    await h.peer.start();
+    h.client.desktopMessages.set({type: 'desktop:available', requestId: 'capture', producers: h.connection.producers});
+    await flush();
+    const stream = h.received(), audio = h.consumed[0], transport = h.transport;
+    assert.deepEqual(stream.getTracks().map(track => track.kind), ['audio']);
+    assert.deepEqual(h.commands.map(command => command.producerId || command.consumerId), ['audio', 'audio-consumer']);
+    await h.peer.setVideoEnabled(true);
+    const video = h.consumed[1];
+    await h.peer.setVideoEnabled(false);
+    assert.equal(video.paused, true);
+    assert.equal(h.commands.at(-1).action, 'pause-video');
+    await h.peer.setVideoEnabled(true);
+    assert.equal(video.paused, false);
+    assert.equal(h.commands.at(-1).action, 'resume');
+    assert.equal(h.consumed.length, 2);
+    assert.equal(h.received(), stream);
+    assert.equal(h.transport, transport);
+    assert.equal(stream.getTracks()[0], audio.track);
+    assert.equal(audio.track.stopped, false);
+    assert.equal(h.commands.filter(command => command.consumerId === audio.id).length, 1, 'Audio is only resumed once');
+});
+
+test('rapid view changes during video negotiation settle on the latest choice without resuming hidden video', async t => {
+    const pending = Promise.withResolvers();
+    const h = relayHarness(t, {videoEnabled: false, beforeConsume: options => options.kind === 'video' ? pending.promise : undefined});
+    h.connection.producers.push({id: 'audio', kind: 'audio'}, {id: 'video', kind: 'video'});
+    h.client.desktopMessages.set({type: 'desktop:available', requestId: 'capture', producers: h.connection.producers});
+    await h.peer.start();
+    const first = h.peer.setVideoEnabled(true);
+    await flush();
+    const changes = [h.peer.setVideoEnabled(false), h.peer.setVideoEnabled(true), h.peer.setVideoEnabled(false)];
+    pending.resolve();
+    await Promise.all([first, ...changes]);
+    assert.equal(h.consumed[1].paused, true);
+    assert.equal(h.commands.some(command => command.action === 'resume' && command.consumerId === 'video-consumer'), false);
+    assert.equal(h.consumed[0].track.stopped, false);
+    await h.peer.setVideoEnabled(true);
+    assert.equal(h.consumed[1].paused, false);
+});
+
+test('failed video requests can retry independently while audio and the transport stay alive', async t => {
+    let failing = 'consume';
+    const h = relayHarness(t, {videoEnabled: false, rpcError: message =>
+        (message.producerId === 'video' || message.consumerId === 'video-consumer') && message.action === failing ? 'Video failed' : ''});
+    h.connection.producers.push({id: 'video', kind: 'video'}, {id: 'audio', kind: 'audio'});
+    h.client.desktopMessages.set({type: 'desktop:available', requestId: 'capture', producers: h.connection.producers});
+    await h.peer.start();
+    const audio = h.consumed[0];
+    await h.peer.setVideoEnabled(true);
+    assert.equal(h.videoErrors.at(-1), 'Video failed');
+    failing = 'resume';
+    await h.peer.setVideoEnabled(true);
+    assert.equal(h.videoErrors.at(-1), 'Video failed');
+    failing = '';
+    await h.peer.setVideoEnabled(true);
+    assert.equal(h.videoErrors.at(-1), '');
+    failing = 'pause-video';
+    await h.peer.setVideoEnabled(false);
+    assert.equal(h.videoErrors.at(-1), 'Video failed');
+    failing = '';
+    await h.peer.setVideoEnabled(false);
+    assert.equal(h.videoErrors.at(-1), '');
+    assert.equal(h.consumed.length, 2);
+    assert.equal(h.transport.closed, false);
+    assert.equal(audio.track.stopped, false);
+    assert.equal(h.commands.filter(command => command.consumerId === audio.id).length, 1);
 });
 
 test('closing during device loading or an RPC rejects pending work and releases transport resources', async t => {

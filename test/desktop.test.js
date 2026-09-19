@@ -245,6 +245,45 @@ test('one producer feeds multiple metal consumers; viewers cannot publish or acc
     await assert.rejects(h.rpc(viewers[0], firstConnection, 'restart-ice'), /not authorized/);
 });
 
+test('video forwarding pauses per viewer while audio, other viewers and the producer remain active', async t => {
+    const h = fixture(t);
+    const {session, connection, producer} = await publish(h);
+    const opus = session.router.rtpCapabilities.codecs.find(codec => codec.mimeType === 'audio/opus');
+    const audio = await h.rpc(h.ws, connection, 'produce', {kind: 'audio', rtpParameters: {
+        codecs: [{mimeType: opus.mimeType, payloadType: opus.preferredPayloadType, clockRate: opus.clockRate, channels: opus.channels}],
+        encodings: [{ssrc: 87654321}], rtcp: {cname: 'desktop'},
+    }});
+    const subscriptions = [];
+    for (const id of ['first', 'second']) {
+        const ws = {id};
+        await h.desktop.watch(h.room, ws, {itemId: session.item.id, requestId: id});
+        const viewing = h.messages.find(message => message.type === 'desktop:watching' && message.ws === ws);
+        const peer = session.viewers.get(viewing.peerId);
+        for (const track of [producer, audio]) {
+            const data = {producerId: track.id, rtpCapabilities: session.router.rtpCapabilities};
+            const consumer = await h.rpc(ws, viewing, 'consume', data);
+            assert.equal((await h.rpc(ws, viewing, 'consume', data)).id, consumer.id, 'Lost consume replies can retry idempotently');
+            await h.rpc(ws, viewing, 'resume', {consumerId: consumer.id});
+        }
+        subscriptions.push({ws, viewing, peer, video: [...peer.consumers.values()].find(c => c.kind === 'video'),
+            audio: [...peer.consumers.values()].find(c => c.kind === 'audio')});
+    }
+    const [first, second] = subscriptions;
+    await assert.rejects(h.rpc(first.ws, first.viewing, 'pause-video', {consumerId: second.video.id}), /not authorized/);
+    await assert.rejects(h.rpc(first.ws, first.viewing, 'pause-video', {consumerId: first.audio.id}), /not authorized/);
+    await assert.rejects(h.rpc(h.ws, connection, 'pause-video', {consumerId: first.video.id}), /not authorized/);
+    await h.rpc(first.ws, first.viewing, 'pause-video', {consumerId: first.video.id});
+    assert.equal(first.video.paused, true);
+    assert.equal(first.audio.paused, false);
+    assert.equal(second.video.paused, false);
+    assert.equal(second.audio.paused, false);
+    assert.equal(session.producers.get('video').paused, false);
+    await h.rpc(first.ws, first.viewing, 'resume', {consumerId: first.video.id});
+    assert.equal(first.video.paused, false);
+    assert.equal(first.peer.transport.closed, false);
+    assert.equal(first.peer.consumers.size, 2);
+});
+
 test('subscriptions are bounded and reconnecting closes the old transport without changing the uplink', async t => {
     const h = fixture(t);
     h.desktop.maxViewers = 1;

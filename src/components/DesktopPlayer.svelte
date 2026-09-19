@@ -8,7 +8,10 @@
     export let muted = false;
     export let captureMuted = false;
     export let inputDisabled = false;
+    export let visualized = false;
+    export let nativeControls = true;
     export let onRetry;
+    export let onRetryVideo;
     let tile;
     let video;
     let fullscreen = false;
@@ -74,21 +77,21 @@
 
 <svelte:document on:fullscreenchange={() => fullscreen = document.fullscreenElement === tile}/>
 
-<div class="desktop-tile" bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}>
+<div class="desktop-tile" class:visualized bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}>
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
     <video bind:this={video} use:attachStream={{stream: playback?.stream, connected}}
-           controls={!inputDisabled} controlslist="nofullscreen" inert={inputDisabled} playsinline aria-label={`Shared desktop: ${item.title}`}
+           controls={nativeControls && !inputDisabled && !visualized} controlslist="nofullscreen" inert={inputDisabled || visualized || !nativeControls} playsinline aria-label={`Shared desktop: ${item.title}`}
            on:dblclick|preventDefault={toggleFullscreen}
            on:volumechange={() => { if (forcedMute && video && !video.muted) video.muted = true; }}
            on:loadeddata={() => loading = false} on:playing={() => { loading = false; error = ''; blocked = false; }}
            on:waiting={() => loading = true}
            on:error={() => error = 'This desktop could not be played. Retry playback.'}></video>
     <span class="desktop-name" title={item.title}>{item.addedBy || item.title}{playback?.local ? ' (you)' : ''}</span>
-    <button class="icon-button desktop-fullscreen" type="button"
+    {#if nativeControls}<button class="icon-button desktop-fullscreen" type="button"
             aria-label={fullscreen ? 'Exit fullscreen' : `Fullscreen ${item.title}`} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen this desktop'}
             disabled={fullscreenPending || (inputDisabled && !fullscreen)} on:click={toggleFullscreen}>
         <Icon name="fullscreen" size={17}/>
-    </button>
+    </button>{/if}
     {#if fullscreenError}<p class="desktop-fullscreen-error" role="status">{fullscreenError}</p>{/if}
     {#if playback?.error || error}
         <div class="desktop-message" role="alert">
@@ -102,6 +105,11 @@
     {:else if blocked}
         <div class="desktop-message">
             <button class="button primary small" on:click={() => play()}><Icon name="play" size={16}/>Enable playback</button>
+        </div>
+    {:else if playback?.videoError}
+        <div class="desktop-message" role="alert">
+            <span>{playback.videoError}</span>
+            <button class="button secondary small" on:click={() => onRetryVideo?.(item.id)}>Retry video</button>
         </div>
     {:else if loading}
         <div class="desktop-message" role="status"><span class="spinner"></span>Connecting desktop…</div>
@@ -120,6 +128,8 @@
         border-radius: 5px;
     }
     video { width: 100%; height: 100%; display: block; object-fit: contain; }
+    .visualized video { opacity: 0; }
+    .visualized .desktop-name, .visualized .desktop-fullscreen { display: none; }
     video::-webkit-media-controls-fullscreen-button { display: none; }
     .desktop-tile:fullscreen { width: 100%; height: 100%; border-radius: 0; }
     .desktop-tile::backdrop { background: #050506; }
@@ -160,6 +170,7 @@
     }
     .desktop-message {
         position: absolute;
+        z-index: 2;
         inset: 30px 8px 38px;
         display: flex;
         flex-direction: column;

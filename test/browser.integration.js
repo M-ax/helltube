@@ -1647,7 +1647,7 @@ test('overlay controls autohide accessibly and account volume survives reloads a
   }
   const shell = page.locator('.player-shell');
   const viewport = page.locator('.video-viewport');
-  const reveal = () => viewport.hover({ position: { x: 30, y: 70 } });
+  const reveal = () => viewport.hover({ position: { x: 90, y: 70 } });
   await until(async () => room.current.media?.complete && await page.locator('video').evaluate(video => !video.paused && video.readyState >= 2), 20000);
   await reveal();
   // Playback preparation can outlast autohide; wait for the reveal animation.
@@ -1715,6 +1715,18 @@ test('overlay controls autohide accessibly and account volume survives reloads a
   await page.keyboard.press('Escape');
   await page.mouse.up();
   assert.equal(room.playback.revision, beforeIdle);
+  const drawingTools = page.getByRole('button', { name: 'Whiteboard tools', exact: true });
+  await drawingTools.click();
+  const drawingBounds = await viewport.boundingBox();
+  await page.mouse.move(drawingBounds.x + drawingBounds.width * .7, drawingBounds.y + drawingBounds.height * .3);
+  await until(async () => await drawingTools.getAttribute('aria-expanded') === 'false', 5000);
+  await until(async () => await shell.getAttribute('data-controls-visible') === 'false', 5000);
+  // No intervening pointermove: the first press after autohide must draw.
+  await page.mouse.down();
+  await page.mouse.up();
+  await until(async () => await page.locator('[data-whiteboard-id][data-complete="true"]').count() === 1);
+  assert.equal(room.playback.revision, beforeIdle, 'Drawing after autohide leaves playback alone.');
+  await page.getByRole('button', { name: 'Finish drawing', exact: true }).click();
   await reveal();
   await page.getByRole('button', { name: 'Pause for everyone', exact: true }).click();
   await until(() => room.playback.paused);

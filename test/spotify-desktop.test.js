@@ -25,6 +25,8 @@ test('VM capture uses loopback transports and preserves the Spotify queue and hi
   rooms.add(room, [item, next]);
   const {session, targets} = await desktop.prepareExternal(room, item);
   assert.equal(session.producers.size, 2);
+  assert.equal(session.producers.get('video').rtpParameters.codecs[0].parameters['profile-level-id'], '42e028',
+    '1080p capture is advertised as H.264 level 4.0');
   assert.deepEqual(room.desktops, [], 'Capture is hidden until media arrives');
   assert.ok(targets.video.port > 0 && targets.audio.port > 0);
   assert.notEqual(targets.video.ssrc, targets.audio.ssrc);
@@ -90,12 +92,13 @@ function fixture(t) {
   const desktop = {
     sessions: new Map(),
     async prepareExternal(target, source) {
-      const session = {ws: {id: source.id}, room: target, item: source,
+      const session = {ws: {id: source.id}, room: target, sourceItem: source, item: {...source, kind: 'desktop', provider: 'spotify'},
         producers: new Map(['video', 'audio'].map(kind => [kind, {async getStats() { return [{packetCount: packets}]; }}]))};
       this.sessions.set(session.ws.id, session);
       return {session, targets: {video: {}, audio: {}}};
     },
-    activateExternal(session) { session.room.desktops.push({...session.item, kind: 'desktop'}); },
+    activateExternal(session) { session.ready = true; session.room.desktops.push(session.item); },
+    retargetExternal(session, source) { session.sourceItem = source; session.item.title = source.title; },
     stop(ws) {
       const session = this.sessions.get(ws.id);
       if (session) session.room.desktops = [];
@@ -121,12 +124,34 @@ test('sharing requires opt-in, has one owner room, and shares play/pause control
   h.rooms.add(other, [spotifyItem()]);
   await h.manager.tick();
   assert.equal(other.spotifyDesktop.state, 'busy');
+  assert.equal(other.spotifyDesktop.exclusive, true);
+  assert.equal(other.spotifyDesktop.ownerRoomId, h.room.id);
+  assert.match(other.spotifyDesktop.message, /Only one room/);
   assert.equal(h.calls.filter(call => call.action === 'open').length, 1);
   assert.equal(await h.manager.control(h.room, {action: 'pause', revision: h.room.playback.revision}), true);
   assert.equal(h.status.playback, 'Paused');
   assert.equal(h.room.playback.paused, true);
   await assert.rejects(h.manager.control(other, {action: 'play', revision: other.playback.revision}), /not ready/);
   await assert.rejects(h.manager.control(h.room, {action: 'play', revision: -1}), /Playback changed/);
+});
+
+test('dedicated Spotify track controls preserve the room queue and obey ownership and playback revision', async t => {
+  const h = fixture(t);
+  await h.share();
+  const session = h.manager.active.session, revision = h.room.playback.revision;
+  const other = h.rooms.create('Other');
+  h.rooms.add(other, [spotifyItem()]);
+  for (const [action, command] of [['spotify-previous', 'previous'], ['spotify-next', 'next']]) {
+    assert.equal(await h.manager.control(h.room, {action, revision}), true);
+    assert.equal(h.calls.at(-1).action, command);
+    assert.equal(h.room.current, h.item);
+    assert.equal(h.manager.active.session, session);
+    assert.equal(h.room.playback.revision, revision);
+    await assert.rejects(h.manager.control(other, {action, revision: other.playback.revision}), /not ready/);
+    await assert.rejects(h.manager.control(h.room, {action, revision: -1}), /Playback changed/);
+  }
+  assert.equal(await h.manager.control(h.room, {action: 'constructor', revision}), false);
+  assert.equal(await h.manager.control(h.room, {action: 'skip', revision}), false, 'Skip still belongs to the Helltube queue');
 });
 
 test('skip and the last viewer leaving immediately detach the stream', async t => {
@@ -144,6 +169,81 @@ test('skip and the last viewer leaving immediately detach the stream', async t =
   assert.equal(h.desktop.sessions.size, 0);
   await h.manager.tick();
   assert.equal(h.status.capturing, false);
+});
+
+test('consecutive Spotify skips keep the capture, desktop identity and ownership until leaving Spotify', async t => {
+  const h = fixture(t);
+  const next = spotifyItem(), third = spotifyItem();
+  const other = h.rooms.create('Waiting room');
+  other.members.set('other', {id: 'other'});
+  h.rooms.add(other, [spotifyItem()]);
+  h.rooms.add(h.room, [next, third]);
+  await h.share();
+  const session = h.manager.active.session;
+  const stream = h.room.desktops[0];
+  const stopCount = h.calls.filter(call => call.action === 'stop').length;
+  const states = [];
+  h.rooms.on('state', room => { if (room === h.room) states.push(room.desktops.map(item => item.id)); });
+  for (const item of [next, third]) {
+    h.rooms.advance(h.room);
+    assert.equal(h.manager.active.item, item);
+    assert.equal(h.manager.active.session, session);
+    assert.equal(h.room.desktops[0], stream);
+    assert.equal(h.room.spotifyDesktop.state, 'switching');
+    await h.manager.tick();
+    assert.equal(h.calls.findLast(call => call.action === 'open').data.keepCapture, true);
+    await h.manager.tick();
+    assert.equal(h.room.spotifyDesktop.state, 'sharing');
+    assert.equal(other.spotifyDesktop.state, 'busy');
+  }
+  assert.ok(states.every(ids => ids.length === 1 && ids[0] === stream.id), 'No empty desktop snapshot between songs');
+  assert.equal(h.calls.filter(call => call.action === 'capture').length, 1);
+  assert.equal(h.calls.filter(call => call.action === 'stop').length, stopCount);
+  assert.deepEqual(h.room.history, [next, h.item]);
+  h.rooms.advance(h.room);
+  await h.manager.tick();
+  assert.equal(h.desktop.sessions.has(session.ws.id), false);
+  assert.equal(h.manager.active.room, other, 'The waiting room takes ownership after the Spotify run finishes');
+});
+
+test('natural track completion reuses the Spotify stream for the next queued song', async t => {
+  const h = fixture(t), next = spotifyItem();
+  h.rooms.add(h.room, [next]);
+  await h.share();
+  const session = h.manager.active.session;
+  h.status.url = 'spotify:track:7ouMYWpwJ422jRcDASZB7P';
+  await h.manager.tick();
+  assert.equal(h.room.current, next);
+  assert.equal(h.manager.active.session, session);
+  assert.equal(h.status.capturing, true);
+  await h.manager.tick();
+  await h.manager.tick();
+  assert.equal(h.room.spotifyDesktop.state, 'sharing');
+  assert.equal(h.calls.filter(call => call.action === 'capture').length, 1);
+});
+
+test('a skip during a pending media-status read cannot tear down the retained Spotify stream', async t => {
+  const h = fixture(t), next = spotifyItem();
+  h.rooms.add(h.room, [next]);
+  await h.share();
+  const session = h.manager.active.session;
+  const producer = session.producers.get('video');
+  const original = producer.getStats;
+  let release;
+  producer.getStats = () => new Promise(resolve => { release = resolve; });
+  const pending = h.manager.tick();
+  while (!release) await new Promise(resolve => setImmediate(resolve));
+  h.rooms.advance(h.room);
+  release([{packetCount: 2}]);
+  await pending;
+  producer.getStats = original;
+  await h.manager.tick();
+  await h.manager.tick();
+  assert.equal(h.manager.active.item, next);
+  assert.equal(h.manager.active.session, session);
+  assert.equal(h.room.spotifyDesktop.state, 'sharing');
+  assert.equal(h.calls.filter(call => call.action === 'capture').length, 1);
+  assert.equal(h.calls.filter(call => call.action === 'stop').length, 0);
 });
 
 test('disabling sharing and stalled media stop capture without losing the current song', async t => {

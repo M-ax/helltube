@@ -49,6 +49,8 @@
     export let captureMuted = false;
     export let desktopPlayback = {};
     export let onRetryDesktop;
+    export let onDesktopVideoChange;
+    export let onRetryDesktopVideo;
     export let theaterMode = false;
     export let onTheaterToggle;
     let video;
@@ -59,6 +61,9 @@
     let renderer;
     let audioAnalysis;
     let analyser = null;
+    let analysedStream = null;
+    let spotifyView = 'visualizations';
+    let spotifyViewRoom = null;
     let nativeAudioOnly = false;
     let analysisGeneration = 0;
     let seekPreview;
@@ -68,6 +73,8 @@
     let hitmarkerArmed = false;
     let fingerArmed = false;
     let whiteboardOpen = false;
+    let whiteboardExpanded = false;
+    let videoViewport;
     let localFinger = null;
     let hitmarkerTarget;
     let aim = {x: 0.5, y: 0.5};
@@ -117,11 +124,19 @@
 
     $: item = room?.current;
     $: sharedSpotify = item?.kind === 'spotify' && !!room.spotifyDesktop;
-    $: live = item?.kind === 'desktop' || (sharedSpotify && room.desktops?.some(desktop => desktop.id === item.id));
+    $: sharedDesktop = sharedSpotify ? room.desktops?.find(desktop => desktop.provider === 'spotify' || desktop.id === item.id) : null;
+    $: live = item?.kind === 'desktop' || !!sharedDesktop;
+    $: spotifyStream = sharedDesktop ? desktopPlayback[sharedDesktop.id]?.stream : null;
+    $: if (!sharedSpotify || spotifyViewRoom !== room?.id) {
+        spotifyView = 'visualizations';
+        spotifyViewRoom = sharedSpotify ? room.id : null;
+    }
+    $: spotifyVisualization = sharedSpotify && spotifyView === 'visualizations';
+    $: if (sharedDesktop) onDesktopVideoChange?.(sharedDesktop.id, !spotifyVisualization);
     $: spotify = item?.kind === 'spotify' && !live;
     $: spotifyCollection = spotify && /\/(album|playlist|show|artist)\//.test(item.embed || '');
     $: audioOnly = !live && (!!item?.audioOnly || (!!media && hasFrame && nativeAudioOnly));
-    $: updateAnalysis(audioOnly && !spotify, video, audioAnalysis);
+    $: updateAnalysis(sharedSpotify ? !!spotifyStream : audioOnly && !spotify, video, audioAnalysis, false, spotifyStream);
     $: desktops = live ? room.desktops ?? [item] : [];
     $: desktopGrid = desktopLayout(desktops.length, desktopWidth, desktopHeight);
     $: qualities = availableQualities(item?.media);
@@ -138,7 +153,7 @@
     $: preparing = item && !media && !live && !spotify && item.status !== 'error';
     $: canAutoHide = (!!media || live) && connected && playing && !room?.playback.paused && !preparing
         && !localBuffering && !blocked && !playerError && item?.status !== 'error';
-    $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed || whiteboardOpen;
+    $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed || whiteboardExpanded;
     $: beachBall = reactionsEnabled && connected && reactions.roomId === room?.id && !!reactions.ball;
     $: reactionInputActive = connected && reactionsEnabled && (fingerArmed || hitmarkerArmed || beachBall || whiteboardOpen);
     $: if (whiteboardOpen) { fingerArmed = false; hitmarkerArmed = false; }
@@ -157,11 +172,15 @@
     $: if (!connected && video) video.pause();
     $: if (!connected || playerError || item?.status === 'error') previewRelative(null);
 
-    async function updateAnalysis(enabled, element, analysis, gesture = false) {
+    async function updateAnalysis(enabled, element, analysis, gesture = false, stream = null) {
         const version = ++analysisGeneration;
-        if (!enabled || !element || !analysis) { analyser = null; return; }
+        if (analysedStream !== stream) {
+            analysis?.releaseStream(analysedStream);
+            analysedStream = stream;
+        }
+        if (!enabled || (!element && !stream) || !analysis) { analyser = null; return; }
         try {
-            const result = await analysis.sample(element, gesture);
+            const result = stream ? await analysis.sampleStream(stream, gesture) : await analysis.sample(element, gesture);
             if (version === analysisGeneration) analyser = result;
         } catch { if (version === analysisGeneration) analyser = null; }
     }
@@ -307,7 +326,7 @@
             pointers.set(event.pointerId, event.target);
             activePointerCount = pointers.size;
             revealControls();
-            if (hidden && !hitmarkerArmed && event.target.closest('.video-viewport')) {
+            if (hidden && !hitmarkerArmed && !whiteboardOpen && event.target.closest('.video-viewport')) {
                 event.preventDefault();
                 event.stopPropagation();
                 return;
@@ -565,7 +584,7 @@
     }
 
     function control(action, value) {
-        if (!connected || (live && action !== 'skip' && !(sharedSpotify && ['play', 'pause'].includes(action)))) return;
+        if (!connected || (live && action !== 'skip' && !(sharedSpotify && ['play', 'pause', 'spotify-previous', 'spotify-next'].includes(action)))) return;
         onCommand({type: 'control', action, ...(value !== undefined ? {position: value} : {})});
     }
 
@@ -746,7 +765,7 @@
         audioAnalysis = createAudioAnalysis();
         const unlockAudio = () => {
             reactionAudio.unlock();
-            void updateAnalysis(audioOnly && !spotify, video, audioAnalysis, true);
+            void updateAnalysis(sharedSpotify ? !!spotifyStream : audioOnly && !spotify, video, audioAnalysis, true, spotifyStream);
         };
         const cancelReaction = event => { if (event.key === 'Escape') { hitmarkerArmed = false; fingerArmed = false; } };
         document.addEventListener('pointerdown', unlockAudio);
@@ -778,8 +797,8 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus reveals the playback controls.) -->
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
-         data-controls-visible={controlsVisible}>
-    <div class="video-viewport" class:finger-armed={fingerArmed} class:whiteboard-open={whiteboardOpen}
+         data-controls-visible={controlsVisible} data-spotify-view={sharedSpotify ? spotifyView : undefined}>
+    <div class="video-viewport" class:finger-armed={fingerArmed} bind:this={videoViewport}
          use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled && !whiteboardOpen, connected,
              roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
          data-renderer="native" data-effects-renderer={webglEffectsActive ? 'webgl' : '2d'}
@@ -791,7 +810,10 @@
                  style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}`}>
                 {#each desktops as desktop (desktop.id)}
                     <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {connected} {volume} {muted}
-                                   {captureMuted} inputDisabled={reactionInputActive} onRetry={onRetryDesktop}/>
+                                   {captureMuted} inputDisabled={reactionInputActive}
+                                   nativeControls={!sharedSpotify}
+                                   visualized={spotifyVisualization && webglEffectsActive} onRetry={onRetryDesktop}
+                                   onRetryVideo={onRetryDesktopVideo}/>
                 {/each}
             </div>
         {:else}
@@ -900,8 +922,6 @@
                 <Icon name="info" size={20}/>
                 <span>{serverOverlay}</span></div>
         {/if}
-        <Whiteboard board={whiteboard} roomId={room?.id} {userId} {connected} enabled={reactionsEnabled}
-                    bind:open={whiteboardOpen} {onCommand}/>
         <div class="player-controls transport" role="group" aria-label="Playback controls">
             {#if canAutoHide}
                 <div class="controls-backdrop" aria-hidden="true">
@@ -918,15 +938,9 @@
                        on:change={seek} on:blur={() => scrubbing = false}/>
             </div>
             {/if}
-            <div class="transport-row" bind:clientHeight={transportRowHeight}>
+            <div class="transport-row" class:spotify-transport={sharedSpotify} bind:clientHeight={transportRowHeight}>
                 <div class="shared-controls">
-                    {#if sharedSpotify && live}
-                        <button class="play-button" aria-label={room?.playback.paused ? 'Play Spotify for everyone' : 'Pause Spotify for everyone'}
-                                disabled={!connected} on:click={() => control(room.playback.paused ? 'play' : 'pause')}>
-                            <Icon name={room?.playback.paused ? 'play' : 'pause'} size={21}/>
-                        </button>
-                    {/if}
-                    {#if !live}
+                    {#if !live && !sharedSpotify}
                     <button class="icon-button" title="Play previous video for everyone"
                             aria-label="Play previous video for everyone" disabled={!connected || !room?.history?.length || live}
                             on:click={() => control('previous')}>
@@ -939,12 +953,30 @@
                         <Icon name={room?.playback.paused || !item ? 'play' : 'pause'} size={21}/>
                     </button>{/if}
                     {/if}
-                    <button class="icon-button" title="Skip video for everyone" aria-label="Skip video for everyone"
+                    <button class="icon-button" title={sharedSpotify ? 'Skip this Spotify entry in the Helltube queue for everyone' : 'Skip video for everyone'} aria-label="Skip video for everyone"
                             disabled={!connected || !item} on:click={() => control('skip')}>
                         <Icon name="next" size={19}/>
                     </button>
                     <span class="time-display">{#if live}LIVE{:else if spotify}SPOTIFY{:else}{time(displayedPosition)}<span> / {time(duration)}</span>{/if}</span>
                 </div>
+                {#if sharedSpotify}
+                    <div class="spotify-controls" role="group" aria-label="Spotify playback controls">
+                        <span class="spotify-control-label">Spotify</span>
+                        <button class="icon-button" type="button" aria-label="Previous track in Spotify" title="Previous track in Spotify for everyone"
+                                disabled={!connected || room.spotifyDesktop.state !== 'sharing'} on:click={() => control('spotify-previous')}>
+                            <Icon name="previous" size={17}/>
+                        </button>
+                        <button class="play-button" type="button" aria-label={room?.playback.paused ? 'Play Spotify for everyone' : 'Pause Spotify for everyone'}
+                                title={room?.playback.paused ? 'Play Spotify for everyone' : 'Pause Spotify for everyone'}
+                                disabled={!connected || room.spotifyDesktop.state !== 'sharing'} on:click={() => control(room.playback.paused ? 'play' : 'pause')}>
+                            <Icon name={room?.playback.paused ? 'play' : 'pause'} size={21}/>
+                        </button>
+                        <button class="icon-button" type="button" aria-label="Next track in Spotify" title="Next track in Spotify for everyone"
+                                disabled={!connected || room.spotifyDesktop.state !== 'sharing'} on:click={() => control('spotify-next')}>
+                            <Icon name="next" size={17}/>
+                        </button>
+                    </div>
+                {/if}
                 {#if !live && !spotify}<div class="relative-seek-control">
                     {#key `${room?.id}|${sourceKey}`}
                         <SeekJoystick disabled={!connected || !media || !!playerError || item?.status === 'error' || live}
@@ -979,9 +1011,28 @@
             </div>
         </div>
     </div>
-    {#if audioOnly}
-        <AudioVisualizations {renderer} {analyser} playing={spotify ? connected && !captureMuted : playing}
-                             external={spotify} webgl={webglEffectsActive}/>
+    {#if sharedSpotify}
+        <div class="spotify-sharing" aria-label="Shared Spotify player">
+            <div><strong>Spotify · one room at a time</strong>
+                <p>All rooms share one Spotify player. Play, pause, and skip affect everyone in the room using it.</p>
+            </div>
+            <div class="spotify-view-switch" role="group" aria-label="Spotify view on this device">
+                <button type="button" class="button secondary small" aria-pressed={spotifyView === 'visualizations'}
+                        title="Audio only on this device; desktop video stops downloading"
+                        on:click={() => spotifyView = 'visualizations'}>Visualizations</button>
+                <button type="button" class="button secondary small" aria-pressed={spotifyView === 'desktop'}
+                        on:click={() => spotifyView = 'desktop'}>Desktop</button>
+            </div>
+        </div>
+    {/if}
+    <Whiteboard board={whiteboard} roomId={room?.id} {userId} {connected} enabled={reactionsEnabled}
+                bind:open={whiteboardOpen} bind:expanded={whiteboardExpanded} viewport={videoViewport}
+                controlsHeight={transportRowHeight + (live ? 8 : 28)} {onCommand}/>
+    {#if audioOnly || sharedSpotify}
+        <AudioVisualizations {renderer} {analyser}
+                             playing={sharedSpotify ? connected && !!spotifyStream && !room.playback.paused : spotify ? connected && !captureMuted : playing}
+                             active={!sharedSpotify || spotifyVisualization} allowOff={!sharedSpotify}
+                             external={spotify && !sharedSpotify} webgl={webglEffectsActive}/>
     {/if}
 </section>
 <Reactions {connected} {beachBall} {fingerArmed} {whiteboardOpen} armed={hitmarkerArmed} enabled={reactionsEnabled} {soundMuted} onReact={react}
@@ -1039,6 +1090,28 @@
 {/if}
 
 <style>
+    .spotify-transport { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 6px; }
+    .spotify-transport .shared-controls { justify-self: start; min-width: 0; }
+    .spotify-transport .local-controls { justify-self: end; margin-left: 0; min-width: 0; }
+    .spotify-transport .shared-label { display: none; }
+    .spotify-controls { display: flex; align-items: center; gap: 2px; padding: 3px 6px; background: #14532d; border: 1px solid #2b9151; border-radius: 9px; color: #edfff3; }
+    .spotify-control-label { padding: 0 5px; font-size: 11px; font-weight: 700; }
+    .spotify-controls .icon-button, .spotify-controls .play-button { color: inherit; width: 28px; height: 28px; }
+    .spotify-controls button:hover:not(:disabled) { background: #ffffff20; }
+    .spotify-controls button:focus-visible { outline: 2px solid #b8fbb0; outline-offset: 1px; }
+    @container (max-width: 600px) { .spotify-transport .volume-range { display: none; } }
+    @container (max-width: 440px) {
+        .spotify-control-label, .spotify-transport .time-display { display: none; }
+        .spotify-controls { padding-inline: 3px; gap: 0; }
+        .spotify-transport .local-controls { gap: 0; }
+        .spotify-transport .local-controls .icon-button { width: 26px; }
+    }
+    .spotify-sharing { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: #101b16; color: #d7eee0; border-top: 1px solid #294232; font-size: 12px; }
+    .spotify-sharing strong { color: #b8fbb0; }
+    .spotify-sharing p { margin: 5px 0 0; line-height: 1.4; }
+    .spotify-view-switch { display: flex; gap: 4px; flex-shrink: 0; }
+    .spotify-view-switch button[aria-pressed='true'] { border-color: #7bcb7f; color: #b8fbb0; background: #283829; }
+    @media (max-width: 600px) { .spotify-sharing { flex-direction: column; align-items: stretch; } .spotify-view-switch > button { flex: 1; } }
     .desktop-grid {
         position: absolute;
         inset: 38px 8px var(--controls-height);

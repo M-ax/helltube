@@ -1,7 +1,7 @@
 # Spotify desktop VM
 
 Metal hosts a real Ubuntu 24.04 KVM guest: four vCPUs, 3 GB RAM, a sparse 30 GB disk,
-and a 1280×720 XFCE desktop. Spotify and Chrome come from their signed vendor APT
+and a 1920×1080 XFCE desktop. Spotify and Chrome come from their signed vendor APT
 repositories. QEMU runs as `helltube-spotify-vm`, with access to `/dev/kvm`.
 
 ## Open the private desktop
@@ -40,16 +40,37 @@ FFmpeg sends H.264 and stereo Opus RTP through QEMU's host alias `10.0.2.2` to
 loopback-only mediasoup transports on metal. Existing authenticated WebRTC room
 subscriptions deliver the stream to viewers. Video and audio are encoded once;
 no media file is recorded.
+Capture uses the full X11 desktop at startup, preserving its aspect ratio and
+scaling down only when it exceeds 1920×1080. H.264 Baseline level 4.0 supports
+1080p at 30 fps, with a 4.5 Mbps target and 6 Mbps ceiling. If the desktop resolution
+changes during an active capture, it takes effect on the next capture start.
 
 Audio capture requests 20 ms PulseAudio fragments and uses PCM sample counts for
 continuous Opus timestamps, preserving the initial video/audio offset. Pulse's
 latency updates no longer become gaps or overlaps in encoded audio. Receivers request
-100 ms of audio jitter buffering, and the raw video queue is limited to eight
-frames (about 28 MiB) so capture stalls cannot fill the guest's RAM.
+100 ms of audio jitter buffering. The VM encodes stereo Opus at 320 kbps / 48 kHz
+with the music application and maximum encoder complexity. Constant bitrate keeps
+each 20 ms audio frame within the RTP packet budget, including sudden transients;
+constrained VBR can exceed that budget. The raw video queue is limited to eight
+frames (about 64 MiB at 1080p) so capture stalls cannot fill the guest's RAM.
 
-One VM/account serves one room at a time. Other rooms display a waiting message.
-Play/pause control the Spotify application for everyone; volume stays local to
-each viewer. Skip releases the desktop and advances the room queue. A single track
+One VM/account serves one room at a time. The player explains this exclusive use;
+other rooms display the name of the room using Spotify and wait without taking over.
+The green Spotify controls centered in the bottom bar operate its previous track,
+play/pause, and next track for everyone. The separate Skip button advances the
+Helltube queue. Volume stays local to
+each viewer. Audio-reactive visualizations are shown by default, with a per-viewer
+Visualizations / Desktop switch. The visualizer taps the received stream without
+adding another audible output or changing the desktop's volume controls.
+Visualization viewers subscribe to audio alone initially. Opening Desktop adds
+video on the same connection; switching back pauses only that viewer's video
+consumer at the relay. Audio never pauses or reconnects during these changes.
+The VM capture stays running for other desktop viewers and quick view switches.
+
+Consecutive Spotify entries retain the same VM encoder, relay, desktop tile and
+viewer subscriptions. Skip changes Spotify's URI while capture continues, so the
+desktop and visualization selection stay in place. Leaving the Spotify sequence
+releases the desktop and lets another waiting room use it. A single track
 also advances when Spotify moves to a different track; collections use Spotify's
 own navigation and the room's Skip control. A paused track does not advance.
 
@@ -84,6 +105,9 @@ An already connected bridge keeps its loaded code; end that bridge connection
 after installing an update so the backend reconnects with the new capture settings.
 This briefly interrupts playback. Frontend buffering changes require the normal
 application deployment and a viewer reload as well.
+Install the updated guest bridge before deploying the consecutive-track feature:
+its `open` request accepts `keepCapture: true` for a track handoff. Regular opens,
+disconnects, disabled sharing and expired heartbeats still stop capture.
 
 The backend needs a dedicated private key whose matching public key is installed
 in the guest `spotify` user's `authorized_keys` with `restrict` and the forced

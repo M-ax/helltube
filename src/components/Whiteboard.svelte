@@ -11,6 +11,9 @@
     export let connected = false;
     export let enabled = true;
     export let open = false;
+    export let expanded = false;
+    export let viewport;
+    export let controlsHeight = 71;
     export let onCommand;
 
     const tools = [['pen', 'Pen'], ['line', 'Line'], ['arrow', 'Arrow'],
@@ -21,6 +24,7 @@
     let strokeWidth = 4;
     let svg;
     let toggle;
+    let panel;
     let width = 960;
     let height = 540;
     let pointerId = null;
@@ -33,14 +37,82 @@
     let timer;
     let context = null;
     let lastError = null;
+    let panelTimer;
+    let panelHovered = false;
+    let panelKeyboardFocus = false;
+    const PANEL_HIDE_DELAY = 3000;
 
+    $: compact = width <= 560;
     $: ready = connected && board.roomId === roomId && !!board.epoch;
     $: reconcile(board, ready);
     $: if ((!ready || !enabled) && open) open = false;
-    $: if (!open) finish();
+    $: syncMode(open);
     $: shapes = [...board.shapes.filter(shape => !localShapes.some(local => local.id === shape.id)), ...localShapes]
         .filter(shape => !erased.includes(shape.id));
     $: canUndo = shapes.some(shape => shape.userId === userId && shape.complete);
+
+    // Keep the SVG inside the viewport while the mobile controls live below it.
+    function drawingLayer(node, target) {
+        target?.appendChild(node);
+        return {update(next) { next?.appendChild(node); }, destroy() { node.remove(); }};
+    }
+
+    function schedulePanelHide() {
+        clearTimeout(panelTimer);
+        if (expanded && !panelHovered && !panelKeyboardFocus && pointerId === null) {
+            panelTimer = setTimeout(() => collapsePanel(), PANEL_HIDE_DELAY);
+        }
+    }
+
+    function collapsePanel(restoreFocus = false) {
+        clearTimeout(panelTimer);
+        expanded = false;
+        panelHovered = false;
+        panelKeyboardFocus = false;
+        if (restoreFocus || panel?.contains(document.activeElement)) toggle?.focus({preventScroll: true});
+    }
+
+    function showPanel() {
+        expanded = true;
+        schedulePanelHide();
+    }
+
+    function syncMode(active) {
+        if (active) showPanel();
+        else { finish(); collapsePanel(); }
+    }
+
+    function togglePanel() {
+        if (!open) open = true;
+        else if (expanded) collapsePanel(true);
+        else showPanel();
+    }
+
+    function trackPanelActivity(node) {
+        const listeners = [];
+        let destroyed = false;
+        function listen(type, handler) {
+            node.addEventListener(type, handler);
+            listeners.push(() => node.removeEventListener(type, handler));
+        }
+        function focusChanged() {
+            queueMicrotask(() => {
+                if (destroyed) return;
+                panelKeyboardFocus = expanded && node.contains(document.activeElement)
+                    && document.activeElement.matches(':focus-visible');
+                schedulePanelHide();
+            });
+        }
+        listen('pointerenter', event => { panelHovered = event.pointerType === 'mouse'; schedulePanelHide(); });
+        listen('pointerleave', () => { panelHovered = false; schedulePanelHide(); });
+        listen('pointerdown', () => { panelKeyboardFocus = false; schedulePanelHide(); });
+        listen('pointermove', schedulePanelHide);
+        listen('click', schedulePanelHide);
+        listen('keydown', focusChanged);
+        listen('focusin', focusChanged);
+        listen('focusout', focusChanged);
+        return {destroy() { destroyed = true; listeners.forEach(remove => remove()); }};
+    }
 
     function send(action, extra = {}) {
         if (!ready) return false;
@@ -122,6 +194,8 @@
         pointerId = event.pointerId;
         svg.setPointerCapture(pointerId);
         svg.focus({preventScroll: true});
+        clearTimeout(panelTimer);
+        if (!compact) collapsePanel();
         const point = pointAt(event);
         if (tool === 'eraser') { eraseAt(point); return; }
         activeId = globalThis.crypto?.randomUUID?.() || `mark-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -152,6 +226,7 @@
         if (event.pointerId !== pointerId) return;
         if (event.type === 'pointerup') move(event);
         finish();
+        collapsePanel();
     }
 
     function eraseAt(point) {
@@ -175,7 +250,7 @@
     function choose(value) { finish(); tool = value; }
     function undo() { finish(); send('undo'); }
     function clear() { finish(); send('clear'); }
-    function close() { finish(); open = false; toggle?.focus({preventScroll: true}); }
+    function close() { finish(); open = false; collapsePanel(true); }
     function keydown(event) {
         if (!open) return;
         if (event.key === 'Escape') { event.preventDefault(); close(); }
@@ -185,16 +260,18 @@
         }
     }
 
-    onDestroy(() => { finish(); clearTimeout(timer); });
+    onDestroy(() => { finish(); clearTimeout(timer); clearTimeout(panelTimer); });
 </script>
 
-<svelte:window on:keydown={keydown} on:blur={finish}/>
-<svelte:document on:visibilitychange={() => { if (document.hidden) finish(); }}/>
+<svelte:window on:keydown={keydown} on:blur={() => { finish(); collapsePanel(); }}/>
+<svelte:document on:visibilitychange={() => { if (document.hidden) { finish(); collapsePanel(); } }}/>
 
 {#if enabled}
+    <div class="whiteboard-layer-mount">
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Drawing uses a pointer; tools and undo are keyboard accessible.) -->
     <svg class="whiteboard-canvas" class:drawing={open && ready} class:erasing={tool === 'eraser'}
          bind:this={svg} bind:clientWidth={width} bind:clientHeight={height}
+         use:drawingLayer={viewport}
          viewBox={`0 0 ${width || 960} ${height || 540}`} role="img" aria-label="Shared whiteboard" tabindex="-1"
          on:pointerdown={begin} on:pointermove={move} on:pointerup={end} on:pointercancel={end} on:lostpointercapture={end}>
         {#if ready}
@@ -211,14 +288,25 @@
             {/each}
         {/if}
     </svg>
-    <button class="whiteboard-toggle" class:active={open} bind:this={toggle} type="button"
-            aria-label="Whiteboard tools" aria-expanded={open} aria-controls="whiteboard-tools"
-            title={open ? 'Close whiteboard · Escape' : 'Draw with everyone in the room'} disabled={!ready}
-            on:click={() => open = !open}><Icon name="pen" size={19}/></button>
-    {#if open}
-        <section id="whiteboard-tools" class="whiteboard-tools" aria-label="Whiteboard controls">
+    </div>
+    <div class="whiteboard-launcher" class:expanded class:compact>
+        <button class="whiteboard-toggle" class:active={open} bind:this={toggle} type="button"
+                aria-label="Whiteboard tools" aria-expanded={expanded} aria-controls="whiteboard-tools"
+                title={expanded ? 'Collapse tools · keep drawing' : open ? 'Show tools · drawing is on' : 'Draw with everyone in the room'} disabled={!ready}
+                on:click={togglePanel}>
+            <Icon name={open ? tool : 'pen'} size={19}/><span class="toggle-arrow" class:reverse={expanded}><Icon name="chevron" size={10}/></span>
+        </button>
+        {#if open}<button class="whiteboard-stop" type="button" aria-label="Finish drawing" title="Finish drawing · Escape" on:click={close}>
+            <Icon name="close" size={15}/>
+        </button>{/if}
+    </div>
+    <div class="whiteboard-dock" class:compact class:collapsed={!expanded} inert={!expanded} aria-hidden={!expanded}
+         style={`--panel-max-height: ${Math.max(100, height - controlsHeight - 64)}px`}>
+        <div class="whiteboard-dock-clip">
+        <section id="whiteboard-tools" class="whiteboard-tools" aria-label="Whiteboard controls" bind:this={panel} use:trackPanelActivity>
             <header><div><strong>Whiteboard</strong><span class="live"><i></i>LIVE WITH ROOM</span></div>
-                <button type="button" class="close" aria-label="Close whiteboard tools" on:click={close}><Icon name="close" size={16}/></button>
+                <button type="button" class="collapse" aria-label="Collapse whiteboard tools" title="Keep drawing with the tools tucked away"
+                        on:click={() => collapsePanel(true)}><Icon name={compact ? 'up' : 'chevron'} size={16}/></button>
             </header>
             <div class="tools" role="group" aria-label="Drawing tools">
                 {#each tools as [value, label]}
@@ -230,9 +318,10 @@
             <div class="palette" role="group" aria-label="Ink color">
                 {#each WHITEBOARD_COLORS as value, index}
                     <button type="button" class="swatch" style={`--ink: ${value}`} aria-label={`${colorNames[index]} ink`}
-                            aria-pressed={color === value} on:click={() => { finish(); color = value; }}></button>
+                            aria-pressed={color === value} on:click={() => { finish(); color = value; }}><span></span></button>
                 {/each}
             </div>
+            <div class="tool-footer">
             <div class="sizes" role="group" aria-label="Stroke size">
                 {#each WHITEBOARD_WIDTHS as value, index}
                     <button type="button" aria-label={`${['Thin', 'Medium', 'Thick'][index]} stroke`}
@@ -245,37 +334,50 @@
                 <button type="button" disabled={!canUndo} on:click={undo} title="Undo your last mark · Ctrl/⌘ Z"><Icon name="undo" size={15}/>Undo mine</button>
                 <button type="button" disabled={!shapes.length} on:click={clear} title="Clear the whiteboard for everyone"><Icon name="trash" size={15}/>Clear all</button>
             </div>
-            <p>{tool === 'eraser' ? 'Drag across a mark to erase it for everyone.' : 'Draw on the picture. Everyone sees it live.'} <span>Esc to finish.</span></p>
+            </div>
+            <p>{tool === 'eraser' ? 'Drag across a mark to erase it for everyone.' : 'Draw on the picture. Tools tuck away as you draw.'} <span>Esc to finish.</span></p>
         </section>
-    {/if}
+        </div>
+    </div>
 {/if}
 
 <style>
+    .whiteboard-layer-mount { display: none; }
     .whiteboard-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; overflow: hidden; }
     .whiteboard-canvas.drawing { pointer-events: auto; cursor: crosshair; touch-action: none; user-select: none; }
     .whiteboard-canvas.erasing.drawing { cursor: cell; }
     .whiteboard-canvas:focus { outline: none; }
     .whiteboard-canvas g { pointer-events: none; }
-    .whiteboard-toggle { position: absolute; z-index: 6; left: 12px; top: 52px; width: 36px; height: 36px; display: grid;
-        place-items: center; border: 1px solid #ffffff26; border-radius: 9px; background: #19191df2; color: #d2c9c4; box-shadow: 0 3px 12px #0004; }
+    .whiteboard-launcher { position: absolute; z-index: 6; left: 0; top: 52px; display: grid; gap: 3px; transition: left .2s ease; }
+    .whiteboard-launcher.expanded:not(.compact) { left: 216px; }
+    .whiteboard-toggle { width: 44px; height: 42px; display: flex; align-items: center; justify-content: center; gap: 2px;
+        border: 1px solid #ffffff26; border-left: 0; border-radius: 0 8px 8px 0; background: #19191df2; color: #d2c9c4; box-shadow: 0 3px 12px #0004; }
+    .toggle-arrow { display: flex; }
+    .toggle-arrow.reverse { transform: rotate(180deg); }
+    .whiteboard-stop { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid #ffffff26; border-left: 0;
+        border-radius: 0 7px 7px 0; background: #19191df2; color: var(--muted); }
     .whiteboard-toggle.active, .whiteboard-toggle:hover:enabled { color: var(--accent); border-color: var(--accent); background: #32231ff5; }
-    .whiteboard-tools { position: absolute; z-index: 6; top: 52px; left: 56px; width: 202px;
-        max-height: calc(100% - var(--controls-height) - 64px); overflow-y: auto; overscroll-behavior: contain;
-        padding: 13px; border: 1px solid #655043; border-radius: 11px; background: #19191df7; box-shadow: 0 8px 30px #0007;
-        color: var(--text); scrollbar-width: thin; animation: reveal .15s ease-out; }
+    .whiteboard-dock { position: absolute; z-index: 6; top: 52px; left: 0; width: 216px;
+        transition: transform .2s ease, visibility 0s; }
+    .whiteboard-dock.collapsed { transform: translateX(-100%); visibility: hidden; pointer-events: none;
+        transition: transform .2s ease, visibility 0s .2s; }
+    .whiteboard-tools { max-height: var(--panel-max-height); overflow-y: auto; overscroll-behavior: contain;
+        padding: 13px; border: 1px solid #655043; border-left: 0; border-radius: 0 11px 11px 0; background: #19191df7;
+        box-shadow: 0 8px 30px #0007; color: var(--text); scrollbar-width: thin; }
     header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
     strong { display: block; font-size: 13px; font-weight: 600; }
     .live { display: flex; gap: 5px; align-items: center; margin-top: 5px; color: var(--green); font: 8px var(--mono); letter-spacing: .06em; }
     .live i { width: 5px; height: 5px; background: var(--green); border-radius: 50%; }
-    .close { display: grid; place-items: center; width: 24px; height: 24px; color: var(--muted); border-radius: 5px; }
+    .collapse { display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); border-radius: 5px; transform: rotate(180deg); }
     .tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
     .tools button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
         min-height: 49px; padding: 7px 2px; border: 1px solid #ffffff13; border-radius: 6px; background: #222226; color: #c4bec8; }
     .tools span { font-size: 9px; }
     .tools button[aria-pressed=true], .sizes button[aria-pressed=true] { border-color: var(--accent); background: var(--accent-dim); color: var(--accent-light); }
     .palette { display: flex; justify-content: space-between; gap: 3px; margin: 14px 0 12px; }
-    .swatch { width: 21px; height: 21px; padding: 0; border: 3px solid #19191d; border-radius: 50%; background: var(--ink); }
-    .swatch[aria-pressed=true] { box-shadow: 0 0 0 1px var(--ink); }
+    .swatch { display: grid; place-items: center; width: 23px; height: 25px; padding: 0; }
+    .swatch span { width: 21px; height: 21px; border: 3px solid #19191d; border-radius: 50%; background: var(--ink); }
+    .swatch[aria-pressed=true] span { box-shadow: 0 0 0 1px var(--ink); }
     .sizes { display: flex; gap: 5px; }
     .sizes button { display: grid; place-items: center; flex: 1; height: 28px; border: 1px solid #ffffff13; border-radius: 5px; color: #d2c9c4; }
     .sizes span { display: block; width: 23px; background: currentColor; border-radius: 8px; }
@@ -284,10 +386,33 @@
     button:hover:enabled { color: var(--accent-light); }
     p { margin: 10px 0 0; font-size: 10px; line-height: 1.5; color: var(--muted); }
     p span { color: var(--quiet); white-space: nowrap; }
-    @keyframes reveal { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
-    @media (prefers-reduced-motion: reduce) { .whiteboard-tools { animation: none; } }
-    @container (max-width: 560px) {
-        .whiteboard-toggle { left: 8px; top: 40px; width: 32px; height: 32px; }
-        .whiteboard-tools { left: 47px; top: 40px; width: 185px; padding: 10px; max-height: calc(100% - var(--controls-height) - 48px); }
+    .whiteboard-launcher.compact { top: 40px; display: flex; gap: 0; }
+    .compact .whiteboard-stop { height: 42px; border-radius: 0 7px 7px 0; }
+    .compact:has(.whiteboard-stop) .whiteboard-toggle { border-radius: 0; }
+    .whiteboard-dock.compact { position: relative; top: auto; width: 100%; flex: 0 0 auto; display: grid; grid-template-rows: 1fr;
+        transform: none; transition: grid-template-rows .2s ease, visibility 0s; overflow-anchor: none; }
+    .whiteboard-dock.compact.collapsed { grid-template-rows: 0fr; transition: grid-template-rows .2s ease, visibility 0s .2s; }
+    .compact .whiteboard-dock-clip { min-height: 0; overflow: hidden; }
+    .compact .whiteboard-tools { max-height: min(320px, 55dvh); padding: 10px 12px; border: 0; border-top: 1px solid #655043; border-radius: 0; box-shadow: none; }
+    .compact header { align-items: center; margin-bottom: 8px; }
+    .compact header > div { display: flex; align-items: center; gap: 12px; }
+    .compact .live { margin: 0; }
+    .compact .collapse { width: 40px; height: 36px; transform: none; }
+    .compact .tools { grid-template-columns: repeat(6, 1fr); gap: 4px; }
+    .compact .tools button { min-height: 48px; }
+    .compact .palette { justify-content: space-around; margin: 3px 0; }
+    .compact .swatch { width: 40px; height: 40px; }
+    .compact .swatch span { width: 24px; height: 24px; }
+    .compact .tool-footer { display: flex; align-items: center; gap: 12px; }
+    .compact .sizes { flex: 1; }
+    .compact .sizes button { min-width: 30px; height: 40px; }
+    .compact .sizes span { width: 18px; }
+    .compact .actions { gap: 12px; margin: 0; padding: 0; border: 0; }
+    .compact .actions button { min-height: 40px; }
+    .compact p { display: none; }
+    :global(.player-shell:fullscreen) .whiteboard-dock.compact, :global(.theater-mode) .whiteboard-dock.compact {
+        position: absolute; top: auto; bottom: 0; max-height: 60%; }
+    @media (prefers-reduced-motion: reduce) {
+        .whiteboard-dock, .whiteboard-dock.compact, .whiteboard-dock.collapsed, .whiteboard-dock.compact.collapsed, .whiteboard-launcher { transition: none; }
     }
 </style>

@@ -21,7 +21,7 @@ export class DesktopShares {
     rooms.on('state', room => {
       for (const session of this.sessions.values()) {
         if (session.room !== room || session.starting) continue;
-        if (session.external && room.current?.id !== session.item.id) this.stop(session.ws);
+        if (session.external && room.current?.kind !== 'spotify') this.stop(session.ws);
         else if (!room.desktops.some(item => item.id === session.item.id)) this.stop(session.ws);
         else if (session.item.status === 'error') this.stop(session.ws, session.item.error);
       }
@@ -89,8 +89,8 @@ export class DesktopShares {
   async prepareExternal(room, sourceItem) {
     const ws = {id: randomUUID()};
     const item = makeItem({kind: 'desktop'}, {id: sourceItem.id, title: `Spotify · ${sourceItem.title}`,
-      addedBy: sourceItem.addedBy, status: 'ready', transport: 'mediasoup'});
-    const session = {room, ws, item, external: true, requestId: randomUUID(), started: this.now(), starting: true,
+      addedBy: sourceItem.addedBy, status: 'ready', transport: 'mediasoup', provider: 'spotify'});
+    const session = {room, ws, item, sourceItem, external: true, requestId: randomUUID(), started: this.now(), starting: true,
       publisher: endpoint(ws, randomUUID()), producers: new Map(), viewers: new Map()};
     this.sessions.set(ws.id, session);
     const check = () => {
@@ -99,7 +99,7 @@ export class DesktopShares {
     };
     try {
       check();
-      const router = await this.relay.createRouter();
+      const router = await this.relay.createRouter({fullHd: true});
       session.router = router;
       check();
       const targets = {};
@@ -108,7 +108,7 @@ export class DesktopShares {
           rtcpMux: false, comedia: true});
         check();
         const codec = router.rtpCapabilities.codecs.find(value => value.mimeType === mimeType &&
-          (kind !== 'video' || value.parameters['profile-level-id'] === '42e01f'));
+          (kind !== 'video' || value.parameters['profile-level-id'] === '42e028'));
         const ssrc = randomInt(1, 2147483647);
         const producer = await transport.produce({kind, rtpParameters: {
           codecs: [{mimeType, payloadType, clockRate: codec.clockRate,
@@ -129,11 +129,21 @@ export class DesktopShares {
 
   activateExternal(session) {
     this.active(session);
-    if (session.room.current?.id !== session.item.id || !session.external) throw httpError(409, 'Spotify playback changed.');
+    if (session.room.current !== session.sourceItem || !session.external) throw httpError(409, 'Spotify playback changed.');
     session.ready = true;
     session.starting = false;
     session.room.desktops.push(session.item);
     this.rooms.changed(session.room);
+  }
+
+  retargetExternal(session, sourceItem) {
+    this.active(session);
+    if (!session.external || !session.ready || session.room.current !== sourceItem || sourceItem.kind !== 'spotify') {
+      throw httpError(409, 'Spotify playback changed.');
+    }
+    session.sourceItem = sourceItem;
+    session.item.title = `Spotify · ${sourceItem.title}`;
+    session.item.addedBy = sourceItem.addedBy;
   }
 
   async createTransport(session, peer) {
@@ -255,7 +265,10 @@ export class DesktopShares {
         if (!producer || !session.router.canConsume({producerId: producer.id, rtpCapabilities: message.rtpCapabilities})) {
           throw httpError(400, 'This desktop track cannot be played in your browser.');
         }
-        if ([...peer.consumers.values()].some(value => value.producerId === producer.id)) throw httpError(409, 'This track is already subscribed.');
+        // A lost reply or failed browser negotiation can retry without leaking
+        // another consumer or replacing the already-playing audio transport.
+        const existing = [...peer.consumers.values()].find(value => value.producerId === producer.id);
+        if (existing) return {id: existing.id, producerId: producer.id, kind: existing.kind, rtpParameters: existing.rtpParameters};
         const consumer = await peer.transport.consume({producerId: producer.id, rtpCapabilities: message.rtpCapabilities, paused: true});
         try { this.active(session, peer); } catch (error) { consumer.close(); throw error; }
         peer.consumers.set(consumer.id, consumer);
@@ -269,6 +282,13 @@ export class DesktopShares {
         const consumer = peer.consumers.get(message.consumerId);
         if (publishing || !consumer) throw httpError(403, 'Desktop track is not authorized.');
         await consumer.resume();
+        return {};
+      }
+      case 'pause-video': {
+        const consumer = peer.consumers.get(message.consumerId);
+        if (publishing || consumer?.kind !== 'video') throw httpError(403, 'Desktop video track is not authorized.');
+        // Pause this viewer's forwarding, never the producer or audio consumer.
+        await consumer.pause();
         return {};
       }
       case 'close-producer': {

@@ -30,7 +30,7 @@ EOF
 install -d -o spotify -g spotify /home/spotify/.config/autostart /home/spotify/.config/pulse /home/spotify/Desktop
 cat > /usr/local/bin/helltube-spotify-session <<'EOF'
 #!/bin/sh
-xrandr --output Virtual-1 --mode 1280x720
+xrandr --output Virtual-1 --mode 1920x1080
 xset s off
 xset -dpms
 xdg-settings set default-web-browser google-chrome.desktop

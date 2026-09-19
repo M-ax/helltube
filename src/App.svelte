@@ -520,6 +520,7 @@
                                     onCommand={client.command} onAdd={focusComposer}
                                     captureMuted={$desktopState.hasAudio}
                                     desktopPlayback={$desktopPlayback} onRetryDesktop={desktop.retryView}
+                                    onDesktopVideoChange={desktop.setVideoEnabled} onRetryDesktopVideo={desktop.retryVideo}
                                     {theaterMode} onTheaterToggle={toggleTheater}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}

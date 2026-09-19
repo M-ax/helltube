@@ -6,10 +6,11 @@
     let available = new Set();
     $: local = !!playback?.local;
     $: interrupted = !connected || !!playback?.error || ['disconnected', 'failed', 'closed'].includes(playback?.connectionState);
-    $: stats = interrupted ? null : playback?.stats;
+    $: audioOnly = playback?.videoEnabled === false;
+    $: stats = interrupted || audioOnly ? null : playback?.stats;
     $: values = {...stats, resolution: stats?.width && stats?.height ? `${stats.width}×${stats.height}` : null};
     $: rememberMetrics(playback?.itemId, values);
-    $: status = interrupted ? 'Desktop disconnected' : stats
+    $: status = interrupted ? 'Desktop disconnected' : audioOnly && playback?.connectionState === 'connected' ? 'Audio only · video off' : stats
         ? local ? 'Encoder active' : 'Receiving desktop'
         : playback?.connectionState === 'connected' ? 'Statistics unavailable' : 'Connecting desktop';
     const limitations = {cpu: 'CPU limited', bandwidth: 'Bandwidth limited', other: 'Quality limited'};
@@ -54,7 +55,7 @@
     <span class="desktop-metric" data-metric="status" style="--metric-width: 13em">
         <span class="buffer-health-state" class:status-error={interrupted} title={status}>{status}</span>
     </span>
-    {#each metrics.filter(metric => available.has(metric.key)) as metric (metric.key)}
+    {#each metrics.filter(metric => !audioOnly && available.has(metric.key)) as metric (metric.key)}
         {@const value = values[metric.key]}
         {@const label = value == null ? '—' : metric.format ? metric.format(value, local) : value}
         <span class="desktop-metric" data-metric={metric.key} style={`--metric-width: ${metric.width}`}>

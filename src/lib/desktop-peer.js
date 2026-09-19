@@ -5,7 +5,8 @@ import {createDesktopStats} from './desktop-stats.js';
 // stays scoped to this capture/subscription on the authenticated room socket.
 export function createDesktopPeer({client, connection, stream, Stream = globalThis.MediaStream,
     loadDevice = async () => (await import('mediasoup-client')).Device.factory(),
-    onStream = () => {}, onState = () => {}, onStats = () => {}, requestTimeout = 15000,
+    onStream = () => {}, onState = () => {}, onStats = () => {}, onVideoError = null,
+    videoEnabled = true, requestTimeout = 15000,
     mediaCapabilities = globalThis.navigator?.mediaCapabilities}) {
     let closed = false;
     let device;
@@ -17,6 +18,7 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
     const requests = new Map();
     const producers = new Map();
     const consumers = new Map();
+    const videoStates = new Map();
     const wanted = new Map((connection.producers || []).map(value => [value.id, value]));
     const removed = new Set();
     const identity = {requestId: connection.requestId, itemId: connection.itemId, peerId: connection.peerId};
@@ -28,7 +30,7 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
             const report = await current.getStats();
             // A receiving transport also contains mediasoup's video probator.
             // Only the real consumer's negotiated SSRC describes the desktop.
-            const consumer = [...consumers.values()].find(value => value.kind === 'video');
+            const consumer = videoEnabled ? [...consumers.values()].find(value => value.kind === 'video') : undefined;
             const ssrc = consumer?.rtpParameters.encodings?.[0]?.ssrc;
             if (!closed && transport === current) onStats(stats.sample(!stream && ssrc === undefined ? null : report, {ssrc}));
         } catch {
@@ -96,28 +98,52 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
     function consumeTracks() {
         work = work.then(async () => {
             if (!transport || closed) return;
-            for (const producer of wanted.values()) {
-                if (closed || consumers.has(producer.id) || removed.has(producer.id)) continue;
+            // Start music before negotiating optional desktop video.
+            const tracks = [...wanted.values()].sort((a, b) => Number(a.kind === 'video') - Number(b.kind === 'video'));
+            for (const producer of tracks) {
+                if (closed || removed.has(producer.id)) continue;
+                let consumer = consumers.get(producer.id);
+                if (consumer && producer.kind !== 'video') continue;
+                if (!consumer && producer.kind === 'video' && !videoEnabled) continue;
                 try {
-                    const options = await request('consume', {producerId: producer.id, rtpCapabilities: device.recvRtpCapabilities});
-                    active();
-                    const consumer = await transport.consume({...options, streamId: connection.itemId});
-                    if (closed || removed.has(producer.id)) { consumer.close(); continue; }
-                    consumers.set(producer.id, consumer);
-                    try {
-                        // Music needs enough headroom for capture/network jitter;
-                        // starving the audio buffer causes audible time stretching.
-                        if ('jitterBufferTarget' in consumer.rtpReceiver) {
-                            consumer.rtpReceiver.jitterBufferTarget = consumer.kind === 'audio' ? 100 : 0;
+                    if (!consumer) {
+                        const options = await request('consume', {producerId: producer.id, rtpCapabilities: device.recvRtpCapabilities});
+                        active();
+                        consumer = await transport.consume({...options, streamId: connection.itemId});
+                        if (closed || removed.has(producer.id)) { consumer.close(); continue; }
+                        consumers.set(producer.id, consumer);
+                        if (consumer.kind === 'video') consumer.pause();
+                        try {
+                            // Music needs enough headroom for capture/network jitter;
+                            // starving the audio buffer causes audible time stretching.
+                            if ('jitterBufferTarget' in consumer.rtpReceiver) {
+                                consumer.rtpReceiver.jitterBufferTarget = consumer.kind === 'audio' ? 100 : 0;
+                            }
+                        } catch { /* Optional browser API. */ }
+                        received.addTrack(consumer.track);
+                        onStream(received);
+                    }
+                    if (consumer.kind === 'video') {
+                        // Serialize and reconcile rapid toggles against the latest
+                        // choice. Keep the MediaStream, audio and transport intact.
+                        while (!closed && !removed.has(producer.id) && videoStates.get(consumer.id) !== videoEnabled) {
+                            const enabled = videoEnabled;
+                            if (enabled) consumer.resume();
+                            else consumer.pause();
+                            await request(enabled ? 'resume' : 'pause-video', {consumerId: consumer.id});
+                            videoStates.set(consumer.id, enabled);
                         }
-                    } catch { /* Optional browser API. */ }
-                    received.addTrack(consumer.track);
-                    onStream(received);
-                    // Resume only after the browser installed the consumer, so
-                    // its initial keyframe is not lost during negotiation.
-                    await request('resume', {consumerId: consumer.id});
+                        if (!closed) onVideoError?.('');
+                    } else {
+                        // Resume after the browser installed its audio receiver.
+                        await request('resume', {consumerId: consumer.id});
+                    }
                 } catch (error) {
-                    if (!closed && !removed.has(producer.id)) throw error;
+                    if (!closed && !removed.has(producer.id)) {
+                        if (producer.kind !== 'video' || !onVideoError) throw error;
+                        if (consumer) { consumer.pause(); videoStates.delete(consumer.id); }
+                        onVideoError(error.message || 'Desktop video could not connect.');
+                    }
                 }
             }
         });
@@ -143,6 +169,7 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
                 received.removeTrack(consumer.track);
                 consumer.close();
                 consumers.delete(message.producerId);
+                videoStates.delete(consumer.id);
                 onStream(received);
             }
         }
@@ -185,6 +212,10 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
             active();
             await transport.restartIce(options);
         },
+        setVideoEnabled(enabled) {
+            videoEnabled = !!enabled;
+            return stream || closed ? Promise.resolve() : consumeTracks();
+        },
         close() {
             if (closed) return;
             closed = true;
@@ -198,6 +229,7 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
             transport?.close();
             received?.getTracks().forEach(track => track.stop());
             consumers.clear();
+            videoStates.clear();
             producers.clear();
             wanted.clear();
         },

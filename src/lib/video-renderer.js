@@ -106,7 +106,6 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     let audioSizeLocation;
     let visualization = null;
     let visualizationPlaying = false;
-    let lastVisualizationTime = 0;
     let maxSize = 4096;
     let maxTextureSize;
     let animationId = null;
@@ -142,6 +141,7 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
         animationId = null;
         lastBallTime = null;
         lastFlameTime = null;
+        visualization?.resetClock?.();
     }
 
     function disposeResources() {
@@ -429,11 +429,10 @@ export function createVideoRenderer(canvas, video, onActive, overlayCanvas) {
     function animate(time) {
         animationId = null;
         if (destroyed || document.hidden) return;
-        if (visualization && !ball && !crtActive && time - lastVisualizationTime < 1000 / 30) {
+        if (visualization && !ball && !crtActive && visualization.needsFrame?.(performance.now()) === false) {
             schedule();
             return;
         }
-        lastVisualizationTime = time;
         if (crtActive && !reducedMotion) {
             if (lastFlameTime !== null) {
                 const elapsed = Math.min(0.05, Math.max(0, (time - lastFlameTime) / 1000));

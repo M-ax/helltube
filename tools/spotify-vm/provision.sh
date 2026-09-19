@@ -39,7 +39,7 @@ User=helltube-spotify-vm
 Group=helltube-spotify-vm
 SupplementaryGroups=kvm
 WorkingDirectory=/var/lib/helltube-spotify-vm
-ExecStart=/usr/bin/qemu-system-x86_64 -name helltube-spotify -machine q35,accel=kvm -cpu host -smp 4 -m 3072 -drive file=disk.qcow2,format=qcow2,if=virtio,discard=unmap -drive file=seed.img,format=raw,if=virtio,readonly=on -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22022-:22 -device virtio-net-pci,netdev=net0 -device virtio-vga,xres=1280,yres=720 -vnc 127.0.0.1:91 -display none -serial file:serial.log -qmp unix:qmp.sock,server=on,wait=off -audiodev none,id=audio0 -device ich9-intel-hda -device hda-duplex,audiodev=audio0
+ExecStart=/usr/bin/qemu-system-x86_64 -name helltube-spotify -machine q35,accel=kvm -cpu host -smp 4 -m 3072 -drive file=disk.qcow2,format=qcow2,if=virtio,discard=unmap -drive file=seed.img,format=raw,if=virtio,readonly=on -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22022-:22 -device virtio-net-pci,netdev=net0 -device virtio-vga,xres=1920,yres=1080 -vnc 127.0.0.1:91 -display none -serial file:serial.log -qmp unix:qmp.sock,server=on,wait=off -audiodev none,id=audio0 -device ich9-intel-hda -device hda-duplex,audiodev=audio0
 ExecStop=/usr/bin/python3 /usr/local/lib/helltube-spotify-vm/poweroff.py
 Restart=on-failure
 RestartSec=5

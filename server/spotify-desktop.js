@@ -2,6 +2,8 @@ import {spotifyLink} from '../shared/media-source.js';
 import {httpError} from './config.js';
 import {SpotifyDesktopBridge} from './spotify-desktop-bridge.js';
 
+const spotifyControls = new Map([['play', 'play'], ['pause', 'pause'], ['spotify-previous', 'previous'], ['spotify-next', 'next']]);
+
 export function spotifyDesktopUri(url) {
   const link = spotifyLink(url);
   return `spotify:${link.type}:${new URL(link.url).pathname.split('/').at(-1)}`;
@@ -23,7 +25,15 @@ export class SpotifyDesktop {
     this.retryAt = 0;
     this.onState = room => {
       const active = this.active;
-      if (active?.room === room && !this.owns(active) && active.session) this.desktop.stop(active.session.ws);
+      if (active?.room !== room || this.owns(active)) return;
+      if (this.ownsRoom(active) && room.current?.kind === 'spotify' && active.session?.ready &&
+          this.desktop.sessions.has(active.session.ws.id) && room.desktops.some(item => item.id === active.session.item.id)) {
+        const item = room.current;
+        this.desktop.retargetExternal(active.session, item);
+        this.active = {...active, item, uri: spotifyDesktopUri(item.source.url), phase: 'opening',
+          started: this.now(), openPending: true};
+        this.state(room, 'switching', 'Switching Spotify tracks…');
+      } else if (active.session) this.desktop.stop(active.session.ws);
     };
     rooms.on('state', this.onState);
   }
@@ -36,16 +46,21 @@ export class SpotifyDesktop {
     void this.tick();
   }
 
-  state(room, state, message) {
-    const next = {state, message};
+  state(room, state, message, owner = this.active?.room) {
+    const next = {state, message, exclusive: true,
+      ...(owner ? {ownerRoomId: owner.id, ownerRoomName: owner.name} : {})};
     if (JSON.stringify(next) === JSON.stringify(room.spotifyDesktop)) return;
     room.spotifyDesktop = next;
     this.rooms.emit('state', room);
   }
 
-  owns(active = this.active) {
+  ownsRoom(active = this.active) {
     return !this.closed && active && this.rooms.rooms.get(active.room.id) === active.room &&
-      active.room.current === active.item && active.room.members.size > 0;
+      active.room.members.size > 0;
+  }
+
+  owns(active = this.active) {
+    return this.ownsRoom(active) && active.room.current === active.item;
   }
 
   async stop() {
@@ -79,7 +94,8 @@ export class SpotifyDesktop {
     if (!candidates.length || this.closed) return;
     const owner = this.active?.room || candidates[0];
     for (const room of candidates) {
-      if (room !== owner) this.state(room, 'busy', 'The Spotify desktop is playing in another room. Waiting for it to finish.');
+      if (room !== owner) this.state(room, 'busy',
+        `Spotify is in use in “${owner.name}”. Only one room can use the shared Spotify player at a time. Your queue will wait.`, owner);
     }
     if (this.now() < this.retryAt) return;
     let status;
@@ -105,24 +121,34 @@ export class SpotifyDesktop {
       return;
     }
     const active = this.active;
-    if (!this.owns(active)) { await this.stop(); return; }
+    if (!this.owns(active)) { if (this.active === active) await this.stop(); return; }
     const single = /^spotify:(track|episode):/.test(active.uri);
     if (active.phase === 'opening') {
+      if (active.openPending) {
+        active.openPending = false;
+        await this.bridge.request('open', {uri: active.uri, keepCapture: true});
+        return;
+      }
       if (!status.url || (single && !matches(active.uri, status.url))) {
         if (this.now() - active.started > 30000) throw new Error('Spotify did not open the requested item.');
         return;
       }
-      const {session, targets} = await this.desktop.prepareExternal(active.room, active.item);
-      active.session = session;
-      if (!this.owns(active)) { await this.stop(); return; }
-      await this.bridge.request('capture', targets);
-      active.phase = 'capturing';
-      active.started = this.now();
-      return;
+      if (active.session?.ready) {
+        active.phase = 'sharing';
+        this.state(active.room, 'sharing', 'Playing from the shared Spotify player.');
+      } else {
+        const {session, targets} = await this.desktop.prepareExternal(active.room, active.item);
+        active.session = session;
+        if (!this.owns(active)) { if (this.active === active) await this.stop(); return; }
+        await this.bridge.request('capture', targets);
+        active.phase = 'capturing';
+        active.started = this.now();
+        return;
+      }
     }
     if (!status.capturing || !this.desktop.sessions.has(active.session.ws.id)) throw new Error('Capture ended.');
     const stats = await Promise.all([...active.session.producers.values()].map(producer => producer.getStats()));
-    if (!this.owns(active)) { await this.stop(); return; }
+    if (!this.owns(active)) { if (this.active === active) await this.stop(); return; }
     const packets = stats.map(reports => reports.reduce((count, report) => count + (report.packetCount || 0), 0));
     if (active.phase === 'capturing') {
       if (!packets.every(count => count > 0)) {
@@ -137,8 +163,8 @@ export class SpotifyDesktop {
     active.packets = packets;
     if (this.now() - active.lastMedia > 10000) throw new Error('Desktop media stopped.');
     if (single && status.url && !matches(active.uri, status.url)) {
-      await this.stop();
       if (active.room.current === active.item) this.rooms.advance(active.room);
+      if (this.active === active) await this.stop();
       return;
     }
     const paused = status.playback !== 'Playing';
@@ -149,12 +175,13 @@ export class SpotifyDesktop {
   }
 
   async control(room, message) {
-    if (!this.enabled || room.current?.kind !== 'spotify' || !['play', 'pause'].includes(message.action)) return false;
+    const action = spotifyControls.get(message.action);
+    if (!this.enabled || room.current?.kind !== 'spotify' || !action) return false;
     if (message.revision !== room.playback.revision) throw httpError(409, 'Playback changed. Please try again.');
     const active = this.active;
     if (active?.room !== room || active.phase !== 'sharing') throw httpError(409, 'The shared Spotify desktop is not ready.');
-    await this.bridge.request(message.action);
-    if (this.active === active && this.owns(active)) {
+    await this.bridge.request(action);
+    if (['play', 'pause'].includes(action) && this.active === active && this.owns(active)) {
       this.rooms.stamp(room, this.rooms.position(room), message.action === 'pause');
       this.rooms.changed(room);
     }

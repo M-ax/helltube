@@ -55,13 +55,16 @@ test('SVG whiteboard streams to viewers, supports every tool, and follows room a
     assert.equal(instance.rooms.get('lobby').playback.revision, 0);
 
     for (const [name, tool] of [['Line', 'line'], ['Arrow', 'arrow'], ['Rectangle', 'rectangle'], ['Circle', 'ellipse']]) {
+        await open(a);
         await tools(a).getByRole('button', {name, exact: true}).click();
         await drag(a, [.58, .5], [.87, .65]);
         await until(async () => await b.locator(`[data-tool="${tool}"][data-complete="true"]`).count() === 1);
     }
     assert.equal(await marks(b).count(), 5);
+    await open(a);
+    await tools(a).hover();
     await a.locator('.player-shell').screenshot({path: 'test-artifacts/whiteboard-desktop.png'});
-    await tools(a).getByRole('button', {name: 'Close whiteboard tools'}).click();
+    await a.getByRole('button', {name: 'Finish drawing', exact: true}).click();
     assert.equal(await marks(a).count(), 5, 'Closing tools retains visible drawings.');
     assert.equal(await a.locator('.whiteboard-canvas').evaluate(node => getComputedStyle(node).pointerEvents), 'none');
 
@@ -72,6 +75,7 @@ test('SVG whiteboard streams to viewers, supports every tool, and follows room a
     await tools(b).getByRole('button', {name: 'Pen', exact: true}).click();
     await drag(b, [.6, .23], [.85, .23]);
     await until(async () => await marks(a).count() === 6);
+    await open(b);
     await tools(b).getByRole('button', {name: 'Undo mine'}).click();
     await until(async () => await marks(a).count() === 5 && await marks(b).count() === 5);
 
@@ -86,6 +90,7 @@ test('SVG whiteboard streams to viewers, supports every tool, and follows room a
     await open(a);
     await a.getByRole('button', {name: 'Toggle fullscreen', exact: true}).click();
     await until(() => a.evaluate(() => !!document.fullscreenElement));
+    await tools(a).getByRole('button', {name: 'Pen', exact: true}).hover();
     const panel = await tools(a).boundingBox();
     const player = await a.locator('.video-viewport').boundingBox();
     assert.ok(panel.x >= player.x && panel.x + panel.width <= player.x + player.width);
@@ -112,8 +117,12 @@ test('SVG whiteboard streams to viewers, supports every tool, and follows room a
     assert.equal(instance.whiteboards.snapshot('lobby').shapes.length, 0, 'Rejected drawing input leaves no optimistic ghost.');
 
     await b.setViewportSize({width: 390, height: 844});
+    await open(b);
     await tools(b).getByRole('button', {name: 'Rectangle', exact: true}).click();
-    assert.ok((await tools(b).boundingBox()).height > 280, 'The mobile flyout has room for the drawing controls.');
+    const mobilePanel = await tools(b).boundingBox();
+    const mobilePicture = await b.locator('.video-viewport').boundingBox();
+    assert.ok(mobilePanel.y >= mobilePicture.y + mobilePicture.height - 1, 'Mobile tools sit below the picture.');
+    assert.ok(mobilePanel.width > 320 && mobilePanel.height < 250, 'Mobile tools use a compact full-width tray.');
     await b.locator('.whiteboard-canvas').scrollIntoViewIfNeeded();
     const touch = await b.context().newCDPSession(b);
     const rect = await b.locator('.whiteboard-canvas').boundingBox();
@@ -122,6 +131,7 @@ test('SVG whiteboard streams to viewers, supports every tool, and follows room a
     await touch.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: touchPoint(.95, .55)});
     await touch.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
     await until(async () => await a.locator('[data-tool="rectangle"][data-complete="true"]').count() === 1);
+    await open(b);
     await b.locator('.player-shell').screenshot({path: 'test-artifacts/whiteboard-mobile.png'});
     assert.equal(await b.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await b.setViewportSize({width: 1000, height: 850});
@@ -131,5 +141,92 @@ test('SVG whiteboard streams to viewers, supports every tool, and follows room a
     await open(a);
     await a.keyboard.press('Escape');
     assert.equal(await tools(a).count(), 0);
+    assert.deepEqual(errors, []);
+});
+
+test('whiteboard tools autohide into the left edge without ending drawing and remain accessible on mobile', {timeout: 60000}, async t => {
+    const {url} = await start(t, {maxTranscoders: 0});
+    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--enable-unsafe-swiftshader']});
+    t.after(() => browser.close());
+    const page = await browser.newPage({viewport: {width: 1440, height: 1000}});
+    page.setDefaultTimeout(8000);
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(url);
+    await page.getByLabel('Username', {exact: true}).fill('admin');
+    await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+    await page.getByRole('button', {name: 'Enter Helltube'}).click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button').first().click();
+    const toggle = page.getByRole('button', {name: 'Whiteboard tools', exact: true});
+    const panel = page.getByRole('region', {name: 'Whiteboard controls'});
+    const dock = page.locator('.whiteboard-dock');
+    const viewport = page.locator('.video-viewport');
+    const canvas = page.locator('.whiteboard-canvas');
+    await toggle.click();
+    await panel.getByRole('button', {name: 'Blue ink'}).click();
+    await panel.getByRole('button', {name: 'Pen', exact: true}).hover();
+    await page.waitForTimeout(3300);
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'true', 'The drawer stays available while the pointer uses its controls.');
+    await page.mouse.move(0, 0);
+    await until(async () => await toggle.getAttribute('aria-expanded') === 'false', 4500);
+    await until(async () => await dock.evaluate(node => getComputedStyle(node).visibility) === 'hidden');
+    assert.equal(await dock.evaluate(node => node.inert), true, 'Hidden tools leave the keyboard tab order.');
+    assert.equal(await canvas.evaluate(node => getComputedStyle(node).pointerEvents), 'auto', 'Autohide keeps drawing enabled.');
+    const picture = await viewport.boundingBox();
+    const tucked = await dock.boundingBox();
+    assert.ok(tucked.x + tucked.width <= picture.x + 1, 'The desktop drawer retracts through the left edge.');
+    assert.ok(Math.abs((await toggle.boundingBox()).x - picture.x) <= 1);
+    await page.screenshot({path: 'test-artifacts/whiteboard-collapsed.png'});
+
+    await toggle.click();
+    assert.equal(await panel.getByRole('button', {name: 'Blue ink'}).getAttribute('aria-pressed'), 'true');
+    await panel.getByRole('button', {name: 'Pen', exact: true}).focus();
+    await page.keyboard.press('Tab');
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(3300);
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'true', 'Keyboard-focused controls do not vanish.');
+    await panel.getByRole('button', {name: 'Collapse whiteboard tools'}).click();
+    assert.equal(await toggle.evaluate(node => node === document.activeElement), true, 'Manual collapse returns focus to the edge tab.');
+    const before = await viewport.boundingBox();
+    await page.mouse.move(before.x + before.width * .65, before.y + before.height * .25);
+    await page.mouse.down();
+    await page.mouse.move(before.x + before.width * .85, before.y + before.height * .4, {steps: 8});
+    await page.mouse.up();
+    await until(async () => await page.locator('[data-whiteboard-id][data-complete="true"]').count() === 1);
+    assert.equal(await page.locator('[data-whiteboard-id] path').getAttribute('stroke'), '#73c7ff');
+
+    await page.setViewportSize({width: 390, height: 844});
+    const closedHeight = (await viewport.boundingBox()).height;
+    await toggle.click();
+    await until(async () => (await panel.boundingBox())?.height > 150);
+    const mobilePicture = await viewport.boundingBox();
+    const mobileTools = await panel.boundingBox();
+    assert.equal(mobilePicture.height, closedHeight, 'Opening the mobile tray preserves the drawing coordinates.');
+    assert.ok(mobileTools.y >= mobilePicture.y + mobilePicture.height - 1);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.locator('.player-shell').screenshot({path: 'test-artifacts/whiteboard-mobile-tray.png'});
+    await page.getByRole('button', {name: 'Toggle fullscreen', exact: true}).click();
+    await until(() => page.evaluate(() => !!document.fullscreenElement));
+    await panel.getByRole('button', {name: 'Pen', exact: true}).hover();
+    const fullscreenPicture = await viewport.boundingBox();
+    const fullscreenTools = await panel.boundingBox();
+    assert.ok(fullscreenTools.y >= fullscreenPicture.y && fullscreenTools.y + fullscreenTools.height <= fullscreenPicture.y + fullscreenPicture.height + 1);
+    await panel.getByRole('button', {name: 'Collapse whiteboard tools'}).click();
+    await until(async () => (await dock.boundingBox()).height < 1);
+    assert.equal((await viewport.boundingBox()).height, fullscreenPicture.height, 'Collapsing the fullscreen tray never resizes an active stroke.');
+    await page.getByRole('button', {name: 'Toggle fullscreen', exact: true}).click();
+    await until(() => page.evaluate(() => !document.fullscreenElement));
+    await toggle.click();
+    await page.mouse.move(0, 0);
+    await until(async () => await toggle.getAttribute('aria-expanded') === 'false', 4500);
+    await until(async () => (await dock.boundingBox()).height < 1);
+    assert.equal((await viewport.boundingBox()).height, closedHeight);
+    await page.getByRole('button', {name: 'Finish drawing', exact: true}).click();
+    assert.equal(await canvas.evaluate(node => getComputedStyle(node).pointerEvents), 'none');
+    await page.emulateMedia({reducedMotion: 'reduce'});
+    await toggle.click();
+    assert.ok(await dock.evaluate(node => getComputedStyle(node).transitionDuration.split(',').every(value => parseFloat(value) <= .001)));
+    await page.keyboard.press('Escape');
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
     assert.deepEqual(errors, []);
 });

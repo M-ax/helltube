@@ -71,3 +71,90 @@ test('visualizations use real samples, freeze while paused or reduced motion, an
     assert.equal(visualization.frame(960, 540, 4000), null);
     visualization.destroy();
 });
+
+test('received-stream analysis has no audible output, reuses its source and leaves playback tracks alive', async t => {
+    let created = 0, disconnected = 0;
+    const connections = [];
+    const analyser = {disconnect() {}};
+    class Context {
+        state = 'running';
+        destination = {};
+        createAnalyser() { return analyser; }
+        createMediaStreamSource() {
+            created++;
+            return {connect(target) { connections.push(target); }, disconnect() { disconnected++; }};
+        }
+        close() { return Promise.resolve(); }
+    }
+    const original = globalThis.AudioContext;
+    globalThis.AudioContext = Context;
+    t.after(() => { if (original) globalThis.AudioContext = original; else delete globalThis.AudioContext; });
+    let stopped = false;
+    const track = {stop() { stopped = true; }};
+    const stream = {getAudioTracks: () => [track]};
+    const analysis = createAudioAnalysis();
+    assert.equal(await analysis.sampleStream({getAudioTracks: () => []}, true), null);
+    assert.equal(await analysis.sampleStream(stream, true), analyser);
+    assert.equal(await analysis.sampleStream(stream), analyser);
+    assert.equal(created, 1);
+    assert.deepEqual(connections, [analyser], 'Analysis must not double-play the received audio');
+    analysis.releaseStream(stream);
+    assert.equal(disconnected, 1);
+    assert.equal(stopped, false);
+    analysis.destroy();
+    assert.equal(await analysis.sampleStream(stream, true), null);
+});
+
+async function milkdropFixture(t) {
+    const original = globalThis.document;
+    globalThis.document = {createElement: () => ({width: 0, height: 0, addEventListener() {},
+        getContext: () => ({getExtension: () => null})})};
+    t.after(() => { if (original) globalThis.document = original; else delete globalThis.document; });
+    const elapsed = [];
+    const visualization = createVisualization(message => assert.equal(message, ''), {loadLibrary: async () => ({
+        presets: {test: {}}, engine: {createVisualizer: () => ({loadPreset() {}, setRendererSize() {},
+            render(options) { elapsed.push(options.elapsedTime); }})},
+    })});
+    t.after(() => visualization.destroy());
+    await visualization.select('milkdrop:test');
+    visualization.setPlaying(true);
+    return {visualization, elapsed};
+}
+
+test('MilkDrop keeps real-time speed and a bounded frame rate despite fast reaction redraws', async t => {
+    const durations = [];
+    const {visualization, elapsed} = await milkdropFixture(t);
+    for (const refreshRate of [30, 60, 144]) {
+        await visualization.select('milkdrop:test');
+        elapsed.length = 0;
+        const redraws = Array.from({length: refreshRate * 2 + 1}, (_, index) => index * 1000 / refreshRate);
+        // Ball snapshots and repeated state/resize updates redraw between RAFs.
+        if (refreshRate > 30) for (let time = 0; time <= 2000; time += 5) redraws.push(time, time, time);
+        for (const time of redraws.sort((a, b) => a - b)) visualization.frame(960, 540, time);
+        assert.ok(elapsed.length >= 35 && elapsed.length <= 61, `${refreshRate} Hz does not accelerate preset frame equations`);
+        const duration = elapsed.reduce((sum, value) => sum + value, 0);
+        assert.ok(Math.abs(duration - 2) < 0.05, `${refreshRate} Hz redraws advance about two seconds, got ${duration}`);
+        durations.push(duration);
+    }
+    assert.ok(Math.max(...durations) - Math.min(...durations) < 0.05);
+});
+
+test('paused, reduced-motion and suspended visualizations do not accumulate time to catch up later', async t => {
+    const {visualization, elapsed} = await milkdropFixture(t);
+    const first = visualization.frame(960, 540, 1000);
+    assert.equal(visualization.frame(960, 540, 1001), first, 'Immediate redraw uses the existing frame');
+    visualization.setPlaying(false);
+    visualization.frame(960, 540, 20000);
+    assert.equal(elapsed.length, 1);
+    visualization.setPlaying(true);
+    visualization.frame(960, 540, 20001);
+    assert.equal(elapsed.at(-1), 1 / 30);
+    visualization.frame(960, 540, 30000, true);
+    visualization.frame(960, 540, 40000);
+    assert.equal(elapsed.at(-1), 1 / 30);
+    visualization.resetClock(); // Tab hidden or WebGL context interrupted.
+    visualization.frame(960, 540, 60000);
+    assert.equal(elapsed.at(-1), 1 / 30);
+    visualization.frame(960, 540, 60080);
+    assert.equal(elapsed.at(-1), 0.08, 'Use measured time when a frame arrives late');
+});

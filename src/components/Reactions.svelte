@@ -65,7 +65,7 @@
         <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('clap')}><span aria-hidden="true">👏</span>Applause</button>
     </div>
     <p class="reaction-help" role="status">{!enabled ? 'Reactions are off on this device.' : !connected ? 'Reconnect to send reactions.' : whiteboardOpen
-        ? 'Choose a tool on the left and draw on the picture. The whole room sees your marks. Escape closes the tools.' : fingerArmed
+        ? 'Draw on the picture. Reopen tools from the edge tab; Escape finishes drawing. Everyone sees your marks.' : fingerArmed
         ? 'Point at the picture. Click to tap; hold and move to slide on the glass. Escape puts it away.' : armed
         ? 'Click anywhere on the picture to place a hit marker. Escape cancels.'
         : beachBall ? 'Move your cursor into the ball to bump it. Everyone can play.'

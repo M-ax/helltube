@@ -1030,6 +1030,7 @@ ul, ol {
 }
 
 .player-shell {
+    position: relative;
     border: 1px solid #383036;
     border-radius: 11px;
     overflow: hidden;
@@ -1059,12 +1060,6 @@ ul, ol {
 
 .video-viewport:has(.screen-message) {
     aspect-ratio: auto;
-}
-
-@media (max-width: 600px) {
-    .player-shell:not(:fullscreen) .video-viewport.whiteboard-open {
-        min-height: min(480px, 75dvh);
-    }
 }
 
 .video-viewport > video, .video-canvas {

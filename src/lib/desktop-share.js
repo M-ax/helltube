@@ -108,11 +108,11 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
         void pending.peer.restartIce().catch(() => { if (operation === pending) stop(connectionError); });
     }
 
-    function watch(itemId, attempts = 0) {
+    function watch(itemId, attempts = 0, videoEnabled = views.get(itemId)?.videoEnabled ?? true) {
         closeView(itemId);
-        const pending = {itemId, requestId: crypto.randomUUID(), attempts};
+        const pending = {itemId, requestId: crypto.randomUUID(), attempts, videoEnabled};
         views.set(itemId, pending);
-        updateView(itemId, {...emptyPlayback(), itemId});
+        updateView(itemId, {...emptyPlayback(), itemId, videoEnabled, videoError: ''});
         if (!Peer) {
             updateView(itemId, {error: 'This browser does not support WebRTC desktop playback.'});
             return;
@@ -175,7 +175,10 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
         if (message.type === 'desktop:watching' && !view.peer && message.itemId === view.itemId) {
             view.peerId = message.peerId;
             try {
-                view.peer = makePeer({client, connection: message, Stream,
+                view.peer = makePeer({client, connection: message, Stream, videoEnabled: view.videoEnabled,
+                    onVideoError: videoError => {
+                        if (views.get(view.itemId) === view && !view.finished) updateView(view.itemId, {videoError});
+                    },
                     onStream: stream => {
                         if (views.get(view.itemId) === view && !view.finished) updateView(view.itemId, {stream, error: ''});
                     },
@@ -219,10 +222,22 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
                 views.set(itemId, {itemId, local: true});
                 updateView(itemId, {...emptyPlayback(), itemId, stream: operation.stream, local: true,
                     stats: operation.stats || null, connectionState: operation.connectionState || 'new'});
-            } else watch(itemId);
+            } else watch(itemId, 0, items.find(item => item.id === itemId)?.provider !== 'spotify');
         }
     });
+
+    function setVideoEnabled(itemId, enabled, retry = false) {
+        const view = views.get(itemId);
+        if (!view || view.local || view.finished || (!retry && view.videoEnabled === enabled)) return;
+        view.videoEnabled = !!enabled;
+        updateView(itemId, {videoEnabled: view.videoEnabled, videoError: ''});
+        void view.peer?.setVideoEnabled(view.videoEnabled).catch(error => {
+            if (views.get(itemId) === view && !view.finished) updateView(itemId, {videoError: error.message});
+        });
+    }
     return {state, playback, start, stop, active: () => !!operation,
+        setVideoEnabled,
+        retryVideo(itemId) { setVideoEnabled(itemId, views.get(itemId)?.videoEnabled, true); },
         retryView(itemId) {
             const view = views.get(itemId);
             if (view && !view.local) watch(itemId);
