@@ -15,6 +15,4 @@ wg*.conf
 scripts/__pycache__/
 test/__pycache__/
 tools/cookie-helper/bin/
-apps/caster/native/build/
-apps/caster/native/bin/
-apps/caster/release/
+apps/obs-studio/

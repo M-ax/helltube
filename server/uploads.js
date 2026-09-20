@@ -125,8 +125,8 @@ export class Uploads {
     return { name, size: body.size, duration: duration || null, lastModified: body.lastModified ?? null };
   }
 
-  async create(room, user, body) {
-    const result = await this.createBatch(room, user, { files: [body], insertAt: body.insertAt });
+  async create(room, user, body, beforeCommit) {
+    const result = await this.createBatch(room, user, { files: [body], insertAt: body.insertAt }, beforeCommit);
     return result.uploads[0];
   }
 
@@ -205,7 +205,7 @@ export class Uploads {
     return { received: upload.received, complete: upload.complete, active, ...health };
   }
 
-  async append(upload, offset, bytes, transferMs) {
+  async append(upload, offset, bytes, transferMs, beforeCommit = () => {}) {
     if (upload.cancelled) throw httpError(404, 'Upload no longer exists.');
     if (upload.busy) throw httpError(409, 'Only one upload chunk may be in flight.');
     if (offset !== upload.received) throw httpError(409, 'Upload offset mismatch; request upload status to resume.');
@@ -216,6 +216,7 @@ export class Uploads {
     try {
       const handle = await open(upload.file, 'r+');
       try {
+        beforeCommit();
         let written = 0;
         while (written < bytes.length) {
           const result = await handle.write(bytes, written, bytes.length - written, offset + written);
@@ -227,6 +228,7 @@ export class Uploads {
         await handle.close();
       }
       if (upload.cancelled) throw httpError(404, 'Upload no longer exists.');
+      beforeCommit();
       upload.received += bytes.length;
       upload.lastProgressAt = this.now();
       upload.complete = upload.received === upload.size;

@@ -29,6 +29,7 @@ import { DirectAccess, equalSecret } from './direct-access.js';
 import { deploymentOrigin, securityHeaders, normalizeCommit } from '../shared/deployment.js';
 import { Deployment } from './deployment.js';
 import { DesktopShares } from './desktop.js';
+import { ObsStreams, obsIngestRoutes } from './obs.js';
 import { SpotifyDesktop } from './spotify-desktop.js';
 import { desktopRtcConfig } from './desktop-config.js';
 import { desktopRelayOptions } from './desktop-relay.js';
@@ -100,6 +101,7 @@ export async function createApp(overrides = {}) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024, perMessageDeflate: false });
   const reportedDisconnects = new Map();
   const desktop = new DesktopShares(rooms, send, {rtcConfig, config, maxViewers: config.desktopMaxViewers});
+  const obs = new ObsStreams({accounts, rooms, desktop, store, rtcConfig});
   const spotifyDesktop = new SpotifyDesktop(rooms, desktop, config);
   const reactions = new Reactions({ broadcast(roomId, message) {
     for (const ws of wss.clients) if (ws.roomId === roomId) send(ws, message);
@@ -167,10 +169,14 @@ export async function createApp(overrides = {}) {
     const edgeIP = req.edge && req.headers['x-helltube-client-ip'];
     return typeof edgeIP === 'string' && isIP(edgeIP) ? edgeIP : req.ip;
   };
+  const reauthorize = (req, administrator = false) => {
+    const session = accounts.authenticate(req.auth ? `session=${req.auth.token}` : req.headers.cookie);
+    if (!session) throw httpError(401, 'Please sign in.');
+    if (administrator && session.user.role !== 'admin') throw httpError(403, 'Administrator access required.');
+    return session;
+  };
   const identify = (req, _res, next) => {
-    const session = accounts.authenticate(req.headers.cookie);
-    if (!session) return next(httpError(401, 'Please sign in.'));
-    req.auth = session;
+    req.auth = reauthorize(req);
     next();
   };
   const admin = (req, _res, next) => next(req.auth.user.role === 'admin' ? undefined : httpError(403, 'Administrator access required.'));
@@ -216,7 +222,16 @@ export async function createApp(overrides = {}) {
   });
   const closeAccountRequests = accountRequestRoutes(app, { requests: accountRequests, accounts, identify, admin,
     limit, clientIP, cookie, config, capabilities });
+  obsIngestRoutes(app, obs, {limit, clientIP});
   app.use('/api', identify, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.post('/api/rooms/:id/obs-token', (req, res) => {
+    limit(`obs-token:${req.auth.user.id}`, 12);
+    res.status(201).json(obs.issue(req.auth, membership(req)));
+  });
+  app.delete('/api/rooms/:id/obs-token', (req, res) => {
+    obs.revoke(req.auth.user.id, req.params.id);
+    res.json({ok: true});
+  });
   app.get('/api/config', (_req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin }));
   app.get('/api/media/:jobId/access', (req, res) => {
     const job = mediaJob(req.params.jobId, req.auth);
@@ -248,7 +263,9 @@ export async function createApp(overrides = {}) {
   });
   app.patch('/api/me', async (req, res) => {
     limit(`account:${req.auth.user.id}`, 20);
-    const user = await accounts.update(req.auth.user.id, req.body, { self: true, token: req.auth.token });
+    const user = await accounts.update(req.auth.user.id, req.body, {
+      self: true, token: req.auth.token, beforeCommit: () => reauthorize(req),
+    });
     expireSockets();
     broadcastRooms();
     res.json({ user: publicUser(user) });
@@ -256,11 +273,11 @@ export async function createApp(overrides = {}) {
   app.get('/api/users', admin, (_req, res) => res.json({ users: accounts.users.map(publicUser) }));
   app.post('/api/users', admin, async (req, res) => {
     limit(`account:${req.auth.user.id}`, 20);
-    res.status(201).json({ user: publicUser(await accounts.create(req.body)) });
+    res.status(201).json({ user: publicUser(await accounts.create(req.body, { beforeCommit: () => reauthorize(req, true) })) });
   });
   app.patch('/api/users/:id', admin, async (req, res) => {
     limit(`account:${req.auth.user.id}`, 20);
-    const user = await accounts.update(req.params.id, req.body);
+    const user = await accounts.update(req.params.id, req.body, { beforeCommit: () => reauthorize(req, true) });
     expireSockets();
     res.json({ user: publicUser(user) });
   });
@@ -320,7 +337,10 @@ export async function createApp(overrides = {}) {
   app.post('/api/rooms/:id/uploads', async (req, res) => {
     requireMedia();
     limit(`submissions:${req.auth.user.id}`, 12);
-    res.status(201).json(await uploads.create(membership(req), req.auth.user, req.body));
+    res.status(201).json(await uploads.create(membership(req), req.auth.user, req.body, () => {
+      reauthorize(req);
+      membership(req);
+    }));
   });
   app.post('/api/rooms/:id/uploads/batch', async (req, res) => {
     requireMedia();
@@ -335,14 +355,17 @@ export async function createApp(overrides = {}) {
   app.get('/api/uploads/:id', (req, res) => res.json(uploadStatus(uploads.get(req.params.id, req.auth.user.id), req.auth)));
   app.put('/api/uploads/:id', (req, _res, next) => next(config.bareMetalOrigin || req.edge
     ? httpError(409, 'Send upload bytes directly to the transferUrl from the upload status endpoint.') : undefined),
-  express.raw({ type: 'application/octet-stream', limit: chunkSize }), async (req, res) => {
+  express.raw({ type: 'application/octet-stream', limit: chunkSize }), identify, async (req, res) => {
     const upload = uploads.get(req.params.id, req.auth.user.id);
-    res.json(await uploads.append(upload, Number(req.query.offset), req.body, performance.now() - req.startedAt));
+    res.json(await uploads.append(upload, Number(req.query.offset), req.body, performance.now() - req.startedAt,
+      () => reauthorize(req)));
   });
   app.put('/direct/uploads/:id', identifyDirect(req => `upload:${req.params.id}`),
-  express.raw({ type: 'application/octet-stream', limit: chunkSize }), async (req, res) => {
+  express.raw({ type: 'application/octet-stream', limit: chunkSize }),
+  identifyDirect(req => `upload:${req.params.id}`), async (req, res) => {
     const upload = uploads.get(req.params.id, req.auth.user.id);
-    const status = await uploads.append(upload, Number(req.query.offset), req.body, performance.now() - req.startedAt);
+    const status = await uploads.append(upload, Number(req.query.offset), req.body, performance.now() - req.startedAt,
+      () => reauthorize(req));
     res.json(uploadStatus(upload, req.auth, status));
   });
   app.delete('/api/uploads/:id', async (req, res) => {
@@ -576,7 +599,7 @@ export async function createApp(overrides = {}) {
       closeConnection(ws, 'socket-error');
     });
   });
-  const tick = setInterval(() => { expireSockets(); desktop.tick(); rooms.tick(); benZone.tick(); }, 750);
+  const tick = setInterval(() => { expireSockets(); desktop.tick(); obs.tick(); rooms.tick(); benZone.tick(); }, 750);
   const stopReactionTick = startPointerTicker(() => reactions.tick());
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
@@ -601,7 +624,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, accountRequests, rooms, benZone, reactions, whiteboards, desktop, spotifyDesktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
+  return { app, server, accounts, accountRequests, rooms, benZone, reactions, whiteboards, desktop, obs, spotifyDesktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;

@@ -1,0 +1,198 @@
+diff --git a/frontend/settings/OBSBasicSettings.hpp b/frontend/settings/OBSBasicSettings.hpp
+index 384125053..fb5f7a4b5 100644
+--- a/frontend/settings/OBSBasicSettings.hpp
++++ b/frontend/settings/OBSBasicSettings.hpp
+@@ -205,6 +205,7 @@ private:
+ 	void InitStreamPage();
+ 	bool IsCustomService() const;
+ 	inline bool IsWHIP() const;
++	bool IsHelltube() const;
+ 	void LoadServices(bool showAll);
+ 	void OnOAuthStreamKeyConnected();
+ 	void OnAuthConnected();
+diff --git a/frontend/settings/OBSBasicSettings_Stream.cpp b/frontend/settings/OBSBasicSettings_Stream.cpp
+index 1307e267c..519b84d73 100644
+--- a/frontend/settings/OBSBasicSettings_Stream.cpp
++++ b/frontend/settings/OBSBasicSettings_Stream.cpp
+@@ -30,6 +30,7 @@ enum class ListOpt : int {
+ 	ShowAll = 1,
+ 	Custom,
+ 	WHIP,
++	Helltube,
+ };
+ 
+ enum class Section : int {
+@@ -44,7 +45,12 @@ bool OBSBasicSettings::IsCustomService() const
+ 
+ inline bool OBSBasicSettings::IsWHIP() const
+ {
+-	return ui->service->currentData().toInt() == (int)ListOpt::WHIP;
++	return ui->service->currentData().toInt() == (int)ListOpt::WHIP || IsHelltube();
++}
++
++bool OBSBasicSettings::IsHelltube() const
++{
++	return ui->service->currentData().toInt() == (int)ListOpt::Helltube;
+ }
+ 
+ void OBSBasicSettings::InitStreamPage()
+@@ -101,7 +107,8 @@ void OBSBasicSettings::LoadStream1Settings()
+ 	const char *type = obs_service_get_type(service_obj);
+ 	bool is_rtmp_custom = (strcmp(type, "rtmp_custom") == 0);
+ 	bool is_rtmp_common = (strcmp(type, "rtmp_common") == 0);
+-	bool is_whip = (strcmp(type, "whip_custom") == 0);
++	bool is_helltube = (strcmp(type, "helltube_whip") == 0);
++	bool is_whip = (strcmp(type, "whip_custom") == 0) || is_helltube;
+ 
+ 	loading = true;
+ 
+@@ -130,7 +137,7 @@ void OBSBasicSettings::LoadStream1Settings()
+ 		ui->authPw->setText(QT_UTF8(password));
+ 		ui->useAuth->setChecked(use_auth);
+ 	} else {
+-		int idx = ui->service->findText(service);
++		int idx = is_helltube ? ui->service->findData((int)ListOpt::Helltube) : ui->service->findText(service);
+ 		if (idx == -1) {
+ 			if (service && *service) {
+ 				ui->service->insertItem(1, service);
+@@ -219,7 +226,7 @@ void OBSBasicSettings::LoadStream1Settings()
+ 
+ 	if (is_whip) {
+ 		ui->key->setText(bearer_token);
+-		ui->whipSimulcastGroupBox->show();
++		ui->whipSimulcastGroupBox->setVisible(!is_helltube);
+ 	} else {
+ 		ui->key->setText(key);
+ 		ui->whipSimulcastGroupBox->hide();
+@@ -237,7 +244,7 @@ void OBSBasicSettings::LoadStream1Settings()
+ 	ui->streamPage->setEnabled(!streamActive);
+ 
+ 	ui->ignoreRecommended->setChecked(ignoreRecommended);
+-	ui->whipSimulcastTotalLayers->setValue(whipSimulcastTotalLayers);
++	ui->whipSimulcastTotalLayers->setValue(is_helltube ? 1 : whipSimulcastTotalLayers);
+ 
+ 	loading = false;
+ 
+@@ -273,7 +280,7 @@ void OBSBasicSettings::SaveStream1Settings()
+ 	if (customServer) {
+ 		service_id = "rtmp_custom";
+ 	} else if (whip) {
+-		service_id = "whip_custom";
++		service_id = IsHelltube() ? "helltube_whip" : "whip_custom";
+ 	}
+ 
+ 	obs_service_t *oldService = main->GetService();
+@@ -317,7 +324,7 @@ void OBSBasicSettings::SaveStream1Settings()
+ 	}
+ 
+ 	if (whip) {
+-		obs_data_set_string(settings, "service", "WHIP");
++		obs_data_set_string(settings, "service", IsHelltube() ? "Helltube" : "WHIP");
+ 		obs_data_set_string(settings, "bearer_token", QT_TO_UTF8(ui->key->text()));
+ 	} else {
+ 		obs_data_set_string(settings, "key", QT_TO_UTF8(ui->key->text()));
+@@ -492,6 +499,7 @@ void OBSBasicSettings::LoadServices(bool showAll)
+ 	}
+ 
+ 	if (obs_is_output_protocol_registered("WHIP")) {
++		ui->service->addItem(QStringLiteral("Helltube"), QVariant((int)ListOpt::Helltube));
+ 		ui->service->addItem(QTStr("WHIP"), QVariant((int)ListOpt::WHIP));
+ 	}
+ 
+@@ -608,7 +616,10 @@ void OBSBasicSettings::on_service_currentIndexChanged(int idx)
+ 		SwapMultiTrack(QT_TO_UTF8(protocol));
+ 	}
+ 
+-	if (IsWHIP()) {
++	if (IsHelltube()) {
++		ui->whipSimulcastTotalLayers->setValue(1);
++		ui->whipSimulcastGroupBox->hide();
++	} else if (IsWHIP()) {
+ 		ui->whipSimulcastGroupBox->show();
+ 	} else {
+ 		ui->whipSimulcastGroupBox->hide();
+@@ -686,6 +697,10 @@ void OBSBasicSettings::ServiceChanged(bool resetFields)
+ 
+ QString OBSBasicSettings::FindProtocol()
+ {
++	if (IsWHIP()) {
++		return QStringLiteral("WHIP");
++	}
++
+ 	if (IsCustomService()) {
+ 		if (ui->customServer->text().isEmpty()) {
+ 			return QString("RTMP");
+@@ -784,7 +799,7 @@ OBSService OBSBasicSettings::SpawnTempService()
+ 	if (custom) {
+ 		service_id = "rtmp_custom";
+ 	} else if (whip) {
+-		service_id = "whip_custom";
++		service_id = IsHelltube() ? "helltube_whip" : "whip_custom";
+ 	}
+ 
+ 	OBSDataAutoRelease settings = obs_data_create();
+diff --git a/frontend/utility/BasicOutputHandler.cpp b/frontend/utility/BasicOutputHandler.cpp
+index 74cd06e74..8f31b2d29 100644
+--- a/frontend/utility/BasicOutputHandler.cpp
++++ b/frontend/utility/BasicOutputHandler.cpp
+@@ -242,7 +242,8 @@ BasicOutputHandler::BasicOutputHandler(OBSBasic *main_) : main(main_)
+ 		multitrackVideo = make_unique<MultitrackVideoOutput>();
+ 	}
+ 
+-	if (config_get_int(main->Config(), "Stream1", "WHIPSimulcastTotalLayers") > 1) {
++	if (strcmp(obs_service_get_id(service), "helltube_whip") != 0 &&
++	    config_get_int(main->Config(), "Stream1", "WHIPSimulcastTotalLayers") > 1) {
+ 		whipSimulcastEncoders = make_unique<WHIPSimulcastEncoders>();
+ 	}
+ }
+diff --git a/plugins/obs-webrtc/whip-service.cpp b/plugins/obs-webrtc/whip-service.cpp
+index 33690fb39..63d05b87e 100644
+--- a/plugins/obs-webrtc/whip-service.cpp
++++ b/plugins/obs-webrtc/whip-service.cpp
+@@ -95,4 +95,46 @@ void register_whip_service()
+ 		return static_cast<WHIPService *>(priv_data)->GetConnectInfo((enum obs_service_connect_info)type);
+ 	};
+ 	obs_register_service(&info);
++
++	// Helltube uses the same WHIP output, with codecs and limits supported by
++	// its room relay. A separate service ID survives service-list updates.
++	info.id = "helltube_whip";
++	info.get_name = [](void *) -> const char * {
++		return "Helltube";
++	};
++	info.get_supported_video_codecs = [](void *) -> const char ** {
++		static const char *codecs[] = {"h264", nullptr};
++		return codecs;
++	};
++	info.can_try_to_connect = [](void *priv_data) -> bool {
++		auto *service = static_cast<WHIPService *>(priv_data);
++		return service->CanTryToConnect() && !service->bearer_token.empty();
++	};
++	info.apply_encoder_settings = [](void *, obs_data_t *video, obs_data_t *audio) {
++		WHIPService::ApplyEncoderSettings(video, audio);
++		if (video) {
++			obs_data_set_string(video, "profile", "baseline");
++			obs_data_set_string(video, "rate_control", "CBR");
++			obs_data_set_int(video, "keyint_sec", 2);
++			if (obs_data_get_int(video, "bitrate") > 6000)
++				obs_data_set_int(video, "bitrate", 6000);
++		}
++		if (audio && obs_data_get_int(audio, "bitrate") > 128)
++			obs_data_set_int(audio, "bitrate", 128);
++	};
++	info.get_max_bitrate = [](void *, int *video, int *audio) {
++		if (video)
++			*video = 6000;
++		if (audio)
++			*audio = 128;
++	};
++	info.get_max_fps = [](void *, int *fps) {
++		*fps = 60;
++	};
++	info.get_supported_resolutions = [](void *, struct obs_service_resolution **resolutions, size_t *count) {
++		static struct obs_service_resolution sizes[] = {{854, 480}, {1280, 720}, {1920, 1080}};
++		*resolutions = sizes;
++		*count = sizeof(sizes) / sizeof(sizes[0]);
++	};
++	obs_register_service(&info);
+ }

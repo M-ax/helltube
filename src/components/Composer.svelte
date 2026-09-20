@@ -2,6 +2,7 @@
     import {tick} from 'svelte';
     import Icon from './Icon.svelte';
     import SeekJoystick from './SeekJoystick.svelte';
+    import ObsStream from './ObsStream.svelte';
     import {api} from '../lib/api.js';
     import {time} from '../lib/format.js';
     import {sourceKind, twitchURL, youtubeMixVideoURL} from '../../shared/media-source.js';
@@ -322,6 +323,7 @@
         {#if room?.current?.kind === 'desktop' && $desktopState.status === 'idle'}
             <p class="field-help">Join in by sharing your desktop. Skip the live shares to return everyone to videos.</p>
         {/if}
+        {#if room}{#key room.id}<ObsStream {room} {connected}/>{/key}{/if}
     {/if}
     {#if $desktopState.status !== 'idle'}
         <div class="desktop-sharing-status" role="status">

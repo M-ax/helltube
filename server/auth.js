@@ -221,7 +221,7 @@ export class Accounts {
     for (const token of revoked) this.sessions.delete(token);
   }
 
-  async create(body) {
+  async create(body, { beforeCommit = () => {} } = {}) {
     if (!isObject(body)) throw httpError(400, 'Invalid account.');
     const username = text(body.username, 'Username', 32);
     if (!/^[a-zA-Z0-9_-]{3,32}$/.test(username)) throw httpError(400, 'Invalid username.');
@@ -229,6 +229,8 @@ export class Accounts {
     const role = body.role || 'user';
     if (!['admin', 'user'].includes(role)) throw httpError(400, 'Invalid role.');
     const passwordHash = await hashPassword(body.password);
+    // Password work yields; HTTP callers must still be authorized at commit.
+    beforeCommit();
     if (this.users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
       throw httpError(409, 'That username is already taken.');
     }
@@ -239,7 +241,7 @@ export class Accounts {
     return user;
   }
 
-  async update(id, body, { self = false, token } = {}) {
+  async update(id, body, { self = false, token, beforeCommit = () => {} } = {}) {
     const user = this.users.find(u => u.id === id);
     if (!user) throw httpError(404, 'User not found.');
     if (!isObject(body)) throw httpError(400, 'Invalid account update.');
@@ -253,6 +255,7 @@ export class Accounts {
       changes.passwordHash = await hashPassword(body.password);
       changes.defaultPassword = false;
     }
+    beforeCommit();
     if (!this.users.includes(user)) throw httpError(404, 'User not found.');
     if (changes.passwordHash && user.passwordHash !== originalPasswordHash) {
       throw httpError(409, 'The password changed while processing your request. Please try again.');

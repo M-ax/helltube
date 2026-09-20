@@ -35,7 +35,7 @@ export class DesktopShares {
     if (this.closed || this.sessions.get(session.ws.id) !== session || peer?.closed) throw httpError(409, 'This desktop connection has ended.');
   }
 
-  async start(room, ws, user, message) {
+  async start(room, ws, user, message, {prepare, h264Level} = {}) {
     this.rooms.requireManual(room);
     if (!validRequest(message.requestId)) throw httpError(400, 'Invalid sharing request.');
     if (message.transport !== 'mediasoup') throw httpError(400, 'Reload the page to use metal desktop sharing.');
@@ -52,11 +52,13 @@ export class DesktopShares {
       publisher: endpoint(ws, message.requestId), producers: new Map(), viewers: new Map()};
     this.sessions.set(ws.id, session);
     try {
-      const router = await this.relay.createRouter();
+      const router = await this.relay.createRouter({h264Level});
       try { this.active(session); } catch (error) { router.close(); throw error; }
       session.router = router;
       await this.createTransport(session, session.publisher);
+      if (prepare) await prepare(session);
       this.active(session);
+      if (this.rooms.rooms.get(room.id) !== room) throw httpError(404, 'Room not found.');
       if (room.current?.kind !== 'desktop') {
         if (room.current && room.queue.length >= this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
         if (room.current) {
