@@ -13,7 +13,7 @@ class FakeStream {
     addTrack(track) { this.tracks.push(track); }
     removeTrack(track) { this.tracks = this.tracks.filter(value => value !== track); }
 }
-function fixture(t, {audio = true, capture, connectTimeout, peerStart} = {}) {
+function fixture(t, {audio = true, capture, connectTimeout, peerStart, quality, watchRemote} = {}) {
     const tracks = ['video', ...(audio ? ['audio'] : [])].map(kind => Object.assign(new EventTarget(), {
         id: kind, kind, label: 'Test screen', readyState: 'live', stop() { this.readyState = 'ended'; },
     }));
@@ -35,7 +35,7 @@ function fixture(t, {audio = true, capture, connectTimeout, peerStart} = {}) {
         return peer;
     };
     const devices = {getDisplayMedia: options => { assert.equal(options, desktopCaptureOptions); return capture ? capture() : Promise.resolve(stream); }};
-    const share = createDesktopShare(client, {devices, Peer: class {}, Stream: FakeStream, makePeer, secure: true, connectTimeout});
+    const share = createDesktopShare(client, {devices, Peer: class {}, Stream: FakeStream, makePeer, secure: true, connectTimeout, quality, watchRemote});
     t.after(() => share.dispose());
     const current = id => client.state.update(value => ({...value, room: {id: 'lobby', current: {id, kind: 'desktop'}}}));
     const accept = () => {
@@ -214,7 +214,7 @@ test('failed or cancelled asynchronous publishing never leaves capture running',
     assert.equal(h.peers[0].closed, true);
 });
 
-function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilities = null, failProduce, getStats,
+function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilities = null, failProduce, getStats, quality,
     videoEnabled = true, rpcError, beforeConsume} = {}) {
     const commands = [], produced = [], consumed = [], events = [];
     const connection = {requestId: 'capture', peerId: 'peer', itemId: 'desktop', transportOptions: {id: 'transport'},
@@ -271,7 +271,7 @@ function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilitie
     const stats = [], videoErrors = [];
     const peer = createDesktopPeer({client, connection, stream, Stream: FakeStream,
         loadDevice: load || (async () => device), mediaCapabilities, onStream: stream => { received = stream; },
-        videoEnabled, onVideoError: error => videoErrors.push(error),
+        videoEnabled, quality, onVideoError: error => videoErrors.push(error),
         onStats: report => stats.push(report)});
     t.after(() => peer.close());
     return {peer, client, connection, commands, produced, consumed, transports, stats, videoErrors,
@@ -418,6 +418,30 @@ test('transport publishes one encoding per track with a fixed upload ceiling and
     assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 6_000_000, maxFramerate: 60}]);
     assert.deepEqual(h.commands.map(message => message.action), ['connect', 'produce', 'produce', 'ready']);
     assert.ok(h.commands.every(message => message.itemId === 'desktop' && message.peerId === 'peer' && message.requestId === 'capture'));
+});
+
+test('native publisher applies bounded quality, selected codecs and Opus mix settings', async t => {
+    const tracks = ['video', 'audio'].map(kind => ({kind, readyState: 'live'}));
+    const h = relayHarness(t, {stream: {getTracks: () => tracks}, codecs: videoCodecs,
+        quality: {videoBitrate: 2_500_000, frameRate: 30, audioBitrate: 64000, codec: 'vp8', stereo: false, dtx: true}});
+    await h.peer.start();
+    assert.equal(h.produced[0].codec.mimeType, 'video/VP8');
+    assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 2_500_000, maxFramerate: 30}]);
+    assert.equal(h.produced[1].codecOptions.opusMaxAverageBitrate, 64000);
+    assert.equal(h.produced[1].codecOptions.opusStereo, false);
+    assert.equal(h.produced[1].codecOptions.opusDtx, true);
+});
+
+test('native publisher-only mode retains local lifecycle without subscribing to other desktops', async t => {
+    const quality = {contentHint: 'text', frameRate: 30};
+    const h = fixture(t, {watchRemote: false, quality: () => quality});
+    h.current('other-desktop');
+    assert.equal(h.commands.length, 0);
+    await h.share.start(); h.accept(); await flush();
+    assert.equal(h.peers[0].quality, quality);
+    assert.equal(h.tracks[0].contentHint, 'text');
+    assert.equal(playback(h.share).local, true);
+    assert.equal(h.commands.some(command => command.type === 'desktop:watch'), false);
 });
 
 test('late producer announcements install each consumer once before resuming; audio/video closure removes tracks', async t => {

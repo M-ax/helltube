@@ -96,7 +96,8 @@ export class YouTube {
           cookieDir = await mkdtemp(path.join(os.tmpdir(), 'helltube-youtube-'));
           await chmod(cookieDir, 0o700);
           const cookieFile = path.join(cookieDir, 'cookies.txt');
-          // Read once so an atomic helper refresh cannot mix cookies and browser identity.
+          // Read the live file for every extraction, then keep that snapshot:
+          // atomic refreshes cannot mix cookies and identity or alter an active job.
           const contents = await readFile(this.config.ytdlpCookiesFile);
           const userAgent = cookieUserAgent(contents.toString('utf8'));
           // yt-dlp rewrites its cookie jar; never share it between concurrent extractions.

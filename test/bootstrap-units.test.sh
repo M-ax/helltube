@@ -16,6 +16,10 @@ chmod 644 "$workspace/helltube-update.service" "$workspace/helltube-update.timer
 systemd-analyze verify --man=no "$workspace/helltube-update.service" "$workspace/helltube-update.timer" "$workspace/helltube-update.path"
 printf 'PASS: systemd parses the rendered update service, timer and path and their dependencies\n'
 
+render_service yes > "$workspace/helltube.service"
+systemd-analyze verify --man=no "$workspace/helltube.service"
+printf 'PASS: systemd parses the backend unit with live cookie refresh\n'
+
 proxy_binary=${TINYPROXY_TEST_BIN:-/usr/bin/tinyproxy}
 [[ -x $proxy_binary && $proxy_binary == /* && $proxy_binary != *'|'* ]] || die 'Set TINYPROXY_TEST_BIN to an absolute Tinyproxy executable path.'
 render_vpn_service > "$workspace/helltube-vpn.service"

@@ -22,7 +22,8 @@ const connectionError = 'The desktop connection to metal failed. Retry playback.
 
 export function createDesktopShare(client, {devices = globalThis.navigator?.mediaDevices,
     Peer = globalThis.RTCPeerConnection, Stream = globalThis.MediaStream, secure = globalThis.isSecureContext,
-    makePeer = createDesktopPeer, connectTimeout = 20000, disconnectTimeout = 5000} = {}) {
+    makePeer = createDesktopPeer, connectTimeout = 20000, disconnectTimeout = 5000,
+    quality, watchRemote = true} = {}) {
     const state = writable({status: 'idle', roomId: null, error: '', label: '', hasAudio: false});
     const playback = writable({});
     let operation;
@@ -68,7 +69,8 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
         const unsupported = desktopSupport({devices, Peer, secure});
         if (unsupported) { stop(unsupported); return; }
         if (!room.joined || room.status !== 'connected' || !room.room) { stop('Join a room before sharing.'); return; }
-        const pending = {roomId: room.room.id, requestId: crypto.randomUUID(), restarts: 0};
+        const pending = {roomId: room.room.id, requestId: crypto.randomUUID(), restarts: 0,
+            quality: typeof quality === 'function' ? quality() : quality};
         operation = pending;
         state.set({status: 'choosing', roomId: pending.roomId, error: '', label: '', hasAudio: false});
         try {
@@ -79,7 +81,7 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
             if (!stream.getVideoTracks().some(track => track.readyState === 'live')) throw new Error('The selected screen is no longer available. Choose it again.');
             const hasAudio = stream.getAudioTracks().some(track => track.readyState === 'live');
             for (const track of stream.getTracks()) {
-                if (track.kind === 'video') track.contentHint = 'motion';
+                if (track.kind === 'video') track.contentHint = pending.quality?.contentHint || 'motion';
                 track.addEventListener('ended', () => {
                     if (operation !== pending) return;
                     if (track.kind === 'video') stop();
@@ -145,7 +147,7 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
                 pending.itemId = message.itemId;
                 pending.connectionTimer = setTimeout(() => { if (operation === pending) stop(connectionError); }, connectTimeout);
                 try {
-                    pending.peer = makePeer({client, connection: message, Stream, stream: pending.stream,
+                    pending.peer = makePeer({client, connection: message, Stream, stream: pending.stream, quality: pending.quality,
                         onStats: stats => {
                             if (operation !== pending) return;
                             pending.stats = stats;
@@ -222,7 +224,7 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
                 views.set(itemId, {itemId, local: true});
                 updateView(itemId, {...emptyPlayback(), itemId, stream: operation.stream, local: true,
                     stats: operation.stats || null, connectionState: operation.connectionState || 'new'});
-            } else watch(itemId, 0, items.find(item => item.id === itemId)?.provider !== 'spotify');
+            } else if (watchRemote) watch(itemId, 0, items.find(item => item.id === itemId)?.provider !== 'spotify');
         }
     });
 

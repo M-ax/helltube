@@ -1,13 +1,15 @@
 import {desktopVideoCodecs, desktopVideoEncoding} from './desktop-encoding.js';
 import {createDesktopStats} from './desktop-stats.js';
+import {normalizeDesktopQuality} from '../../shared/desktop-quality.js';
 
 // mediasoup carries a single publishing connection to metal. All negotiation
 // stays scoped to this capture/subscription on the authenticated room socket.
 export function createDesktopPeer({client, connection, stream, Stream = globalThis.MediaStream,
     loadDevice = async () => (await import('mediasoup-client')).Device.factory(),
     onStream = () => {}, onState = () => {}, onStats = () => {}, onVideoError = null,
-    videoEnabled = true, requestTimeout = 15000,
+    videoEnabled = true, requestTimeout = 15000, quality,
     mediaCapabilities = globalThis.navigator?.mediaCapabilities}) {
+    const encoding = normalizeDesktopQuality(quality);
     let closed = false;
     let device;
     let transport;
@@ -55,13 +57,24 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
     }
 
     async function produceVideo(track) {
-        const codecs = await desktopVideoCodecs(device.sendRtpCapabilities?.codecs, track, {mediaCapabilities});
+        const ranked = await desktopVideoCodecs(device.sendRtpCapabilities?.codecs, track, {mediaCapabilities});
+        const codecs = encoding.codec === 'auto' ? ranked : ranked.filter(codec => codec.mimeType.toLowerCase() === `video/${encoding.codec}`);
+        if (encoding.codec !== 'auto' && !codecs.length) throw new Error('The selected video codec is not offered by this relay. Choose Automatic.');
         const choices = codecs.length ? codecs : [undefined];
         for (let index = 0; index < choices.length; index++) {
             active();
             try {
-                return await transport.produce({track, stopTracks: false, codec: choices[index],
-                    encodings: [{...desktopVideoEncoding}], codecOptions: {videoGoogleStartBitrate: 2000}});
+                const producer = await transport.produce({track, stopTracks: false, codec: choices[index],
+                    encodings: [{...desktopVideoEncoding, maxBitrate: encoding.videoBitrate, maxFramerate: encoding.frameRate}],
+                    codecOptions: {videoGoogleStartBitrate: Math.min(2000, Math.floor(encoding.videoBitrate / 1000))}});
+                if (quality && producer.rtpSender) {
+                    const parameters = producer.rtpSender.getParameters();
+                    parameters.degradationPreference = encoding.degradationPreference;
+                    // Some platforms don't implement this preference. Codec and
+                    // bitrate selection remain valid if the optional hint fails.
+                    await producer.rtpSender.setParameters(parameters).catch(() => {});
+                }
+                return producer;
             } catch (error) {
                 active();
                 if (signalingFailed || track.readyState === 'ended' || transport.closed || index === choices.length - 1) throw error;
@@ -190,7 +203,9 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
                     if (track.readyState !== 'live') continue;
                     active();
                     const producer = track.kind === 'video' ? await produceVideo(track) :
-                        await transport.produce({track, stopTracks: false, codecOptions: {opusStereo: true, opusMaxAverageBitrate: 128000}});
+                        await transport.produce({track, stopTracks: false,
+                            codecOptions: {opusStereo: encoding.stereo, opusMaxAverageBitrate: encoding.audioBitrate,
+                                opusFec: true, opusDtx: encoding.dtx}});
                     if (closed) { producer.close(); return; }
                     producers.set(track.kind, producer);
                     const endAudio = () => {

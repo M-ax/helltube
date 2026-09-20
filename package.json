@@ -7,6 +7,14 @@
     "node": ">=22.13"
   },
   "scripts": {
+    "caster": "npm --prefix apps/caster start",
+    "caster:install": "npm --prefix apps/caster ci",
+    "caster:build-native": "npm --prefix apps/caster run build:native",
+    "caster:pack": "npm --prefix apps/caster run pack",
+    "caster:dist": "npm --prefix apps/caster run dist",
+    "test:caster": "node --test test/caster*.test.js",
+    "test:caster:native": "npm run caster:build-native && node --test test/caster-native.integration.js",
+    "test:caster:browser": "npm run build && npm --prefix apps/caster run build && node --test test/caster.browser.integration.js",
     "cookie-helper": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/cookie-helper/start.ps1",
     "test:cookie-helper": "node --test test/cookie-helper.test.js test/cookie-helper-identity.test.js",
     "dev": "concurrently -k -n server,web \"node --watch server/main.js\" \"vite --host 127.0.0.1\"",

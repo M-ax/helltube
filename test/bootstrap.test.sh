@@ -14,12 +14,12 @@ for disabled in "$(render_service)" "$(render_service no)"; do
     die 'Disabled cookies must not configure an optional credential.'
 done
 enabled=$(render_service yes)
-assert_contains "$enabled" 'LoadCredential=youtube-cookies:/etc/helltube/.secrets/youtube-cookies.txt'
-assert_contains "$enabled" 'Environment=YTDLP_COOKIES_FILE=%d/youtube-cookies'
+assert_contains "$enabled" 'Environment=YTDLP_COOKIES_FILE=/etc/helltube-cookies/youtube-cookies.txt'
+[[ $enabled != *LoadCredential=* ]] || die 'Cookies must refresh without a systemd credential snapshot.'
 [[ $enabled != *'ReadOnlyPaths=/etc/helltube/.secrets'* && $enabled != *'ReadWritePaths=/etc/helltube'* ]] ||
   die 'The service must not gain access to the other root-only secrets.'
 if (render_service invalid) >/dev/null 2>&1; then die 'Accepted an invalid cookie setting.'; fi
-printf 'PASS: optional cookie credential is rendered only when explicitly enabled\n'
+printf 'PASS: optional live cookie file is rendered only when explicitly enabled\n'
 
 for hostname in metal.example.net example.com xn--bcher-kva.example; do
   valid_hostname "$hostname" || die "Rejected valid hostname: $hostname"
@@ -252,6 +252,19 @@ cookie_cases() (
     printf -v "$1" '%s' "$value"
   }
   exec 3> "$workspace/prompts"
+  # Legacy snapshots migrate on reuse; a newer live file takes precedence.
+  cp -- "$destination" "$workspace/legacy-cookies.txt"
+  rm -- "$destination"
+  printf 'reuse\n' > "$workspace/input"
+  exec 4< "$workspace/input"
+  configure_youtube_cookies "$destination" "$workspace/legacy-cookies.txt"
+  [[ $YOUTUBE_COOKIES_ENABLED == yes ]] || die 'Legacy reuse did not enable live cookies.'
+  cmp -s "$workspace/legacy-cookies.txt" "$destination" || die 'Legacy cookies were not migrated.'
+  printf 'invalid old export\n' > "$workspace/legacy-cookies.txt"
+  printf 'reuse\n' > "$workspace/input"
+  exec 4< "$workspace/input"
+  configure_youtube_cookies "$destination" "$workspace/legacy-cookies.txt"
+  cmp -s "$workspace/saved.txt" "$destination" || die 'Legacy cookies overwrote the live file.'
   for choice in '' skip; do
     printf '%s\n' "$choice" > "$workspace/input"
     exec 4< "$workspace/input"
@@ -775,7 +788,7 @@ printf 'PASS: deployment rsync excludes secret directories and common cookie exp
 
 help=$(main --help)
 for information in 'filesystem path' 'Netscape' 'youtube.com only' 'reuse/replace/disable' \
-  '/etc/helltube/.secrets/youtube-cookies.txt' 'not an API key or pasted content' \
+  '/etc/helltube-cookies' 'no service restart' 'not an API key or pasted content' \
   'https://github.com/M-ax/helltube.git' 'main' 'npm dependencies' 'brief restarts' \
   '5 minutes' '2 minutes' '30 seconds' 'default no' 'enabled state' 'Worker' 'separate'; do
   assert_contains "$help" "$information"

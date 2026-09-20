@@ -114,16 +114,22 @@ import_youtube_cookies() (
 )
 
 configure_youtube_cookies() {
-  local destination=$1 choice cookie_path
+  local destination=$1 legacy=${2:-} choice cookie_path stored=$1
   YOUTUBE_COOKIES_ENABLED=no
   [[ ! -L $destination && ( ! -e $destination || -f $destination ) ]] || die 'Refusing an unsafe cookie destination.'
   printf 'Optional YouTube authentication: import a pre-exported Netscape cookies file from a filesystem path.\n' >&3
   printf 'Export youtube.com only. Cookies are sensitive account credentials, not a YouTube Data API key; do not paste their contents.\n' >&3
-  if [[ -f $destination ]]; then
+  # Migrate the old root-only snapshot source on explicit reuse. Once a live
+  # file exists it is authoritative; never fall back to an older export.
+  if [[ ! -f $destination && -n $legacy ]]; then
+    [[ ! -L $legacy ]] || die 'Refusing a symlinked legacy cookie file.'
+    if [[ -f $legacy ]]; then stored=$legacy; fi
+  fi
+  if [[ -f $stored ]]; then
     prompt choice 'Stored YouTube cookies: [reuse/replace/disable] (blank disables; stored file is kept): '
     case $choice in
       ''|disable) return ;;
-      reuse) cookie_path=$destination ;;
+      reuse) cookie_path=$stored ;;
       replace)
         prompt cookie_path 'Path to the replacement Netscape cookies file: '
         [[ -n $cookie_path ]] || die 'A replacement file path is required.'
@@ -584,8 +590,7 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/var/lib/helltube
 EOF
   if [[ $cookies_enabled == yes ]]; then
-    printf '%s\n' 'LoadCredential=youtube-cookies:/etc/helltube/.secrets/youtube-cookies.txt' \
-      'Environment=YTDLP_COOKIES_FILE=%d/youtube-cookies'
+    printf '%s\n' 'Environment=YTDLP_COOKIES_FILE=/etc/helltube-cookies/youtube-cookies.txt'
   fi
   if [[ $vpn_enabled == yes ]]; then
     printf '%s\n' 'Environment=YOUTUBE_PROXY=http://169.254.77.2:8888'
@@ -658,7 +663,7 @@ main() {
     printf 'Usage: sudo bash scripts/bootstrap-ubuntu.sh\nRun interactively from a trusted checkout in an Ubuntu 26.04 LXC with systemd.\n'
     printf 'Optional YouTube authentication accepts a filesystem path to a pre-exported Netscape cookies file (youtube.com only), not an API key or pasted content.\n'
     printf 'Blank/skip leaves authentication disabled. Reruns offer reuse/replace/disable; blank disables without deleting stored cookies.\n'
-    printf 'Cookies stay root-only in /etc/helltube/.secrets/youtube-cookies.txt and are passed to the service only when enabled, using systemd credentials.\n'
+    printf 'Cookies stay in /etc/helltube-cookies, readable only by root and the backend, with atomic refresh and no service restart.\n'
     printf 'Optional WireGuard profile: /etc/helltube/.secrets/youtube-wireguard.conf (root:root 600); yt-dlp and YouTube FFmpeg traffic share a fail-closed VPN proxy.\n'
     printf 'Stored VPN profiles default to reuse; explicitly choose disable to restore direct YouTube traffic. Profiles need Address, numeric DNS and a full-tunnel peer; hooks are rejected.\n'
     printf 'Optional automatic backend updates: public https://github.com/M-ax/helltube.git main; trust automatic main code including npm dependencies and expect brief restarts. Worker deployment stays separate and manual.\n'
@@ -681,7 +686,7 @@ main() {
   source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
   [[ -f $source_dir/package-lock.json && -f $source_dir/server/main.js &&
     -f $source_dir/scripts/bootstrap-admin.mjs && -f $source_dir/scripts/wireguard.py &&
-    -f $source_dir/scripts/update-helltube.py ]] ||
+    -f $source_dir/scripts/update-helltube.py && -f $source_dir/scripts/import-youtube-cookies.py ]] ||
     die 'Run this script from a complete Helltube checkout.'
   [[ $source_dir != /opt/helltube && $source_dir != /opt/helltube/* ]] || die 'Keep the source checkout outside /opt/helltube.'
 
@@ -705,7 +710,7 @@ main() {
   local AUTO_UPDATE_ENABLED=no
   configure_auto_update
 
-  for directory in /opt/helltube /etc/helltube /etc/helltube/.secrets /var/lib/helltube /usr/local/lib/helltube; do
+  for directory in /opt/helltube /etc/helltube /etc/helltube/.secrets /etc/helltube-cookies /var/lib/helltube /usr/local/lib/helltube; do
     [[ ! -L $directory ]] || die "Refusing symlinked deployment directory: $directory"
   done
   [[ ! -e /opt/helltube/app || -f /etc/helltube/bootstrap-managed ]] || die '/opt/helltube/app exists but is not managed by this bootstrap.'
@@ -733,13 +738,16 @@ main() {
     unset credential
   fi
 
-  local YOUTUBE_COOKIES_ENABLED=no
-  configure_youtube_cookies "$secrets/youtube-cookies.txt"
-
   WORK_DIR=$(mktemp -d /opt/helltube/.bootstrap.XXXXXX)
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  local YOUTUBE_COOKIES_ENABLED=no stored_cookies=/etc/helltube-cookies/youtube-cookies.txt
+  [[ ! -L $stored_cookies && ( ! -e $stored_cookies || -f $stored_cookies ) ]] || die 'Refusing an unsafe cookie destination.'
+  if [[ ! -f $stored_cookies ]]; then stored_cookies=$secrets/youtube-cookies.txt; fi
+  # Stage choices until maintenance begins. Cancelling or failing setup must
+  # not revoke read access to the live cookie file of the running backend.
+  configure_youtube_cookies "$WORK_DIR/youtube-cookies.txt" "$stored_cookies"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   if ! apt-cache show python3-certbot-dns-cloudflare >/dev/null 2>&1; then
@@ -800,6 +808,14 @@ main() {
   if systemctl cat helltube.service >/dev/null 2>&1; then
     systemctl stop helltube.service
   fi
+  install -d -o root -g root -m 700 /etc/helltube-cookies
+  if [[ $YOUTUBE_COOKIES_ENABLED == yes ]]; then
+    import_youtube_cookies "$WORK_DIR/youtube-cookies.txt" /etc/helltube-cookies/youtube-cookies.txt
+    chown root:helltube /etc/helltube-cookies /etc/helltube-cookies/youtube-cookies.txt
+    chmod 750 /etc/helltube-cookies
+    chmod 640 /etc/helltube-cookies/youtube-cookies.txt
+  fi
+  install -o root -g root -m 755 "$source_dir/scripts/import-youtube-cookies.py" /usr/local/sbin/helltube-import-cookies
   local vpn_unit
   for vpn_unit in helltube-youtube-proxy.service helltube-vpn.service; do
     if systemctl cat "$vpn_unit" >/dev/null 2>&1; then
@@ -907,9 +923,9 @@ main() {
   printf 'Initial admin password: /etc/helltube/.secrets/admin-password (root only; existing passwords are not reset).\n'
   printf 'Cloudflare credentials: /etc/helltube/.secrets/cloudflare.ini (root only).\n'
   if [[ $YOUTUBE_COOKIES_ENABLED == yes ]]; then
-    printf 'YouTube cookies: enabled via systemd credentials; source /etc/helltube/.secrets/youtube-cookies.txt (root only).\n'
+    printf 'YouTube cookies: live refresh enabled; source /etc/helltube-cookies/youtube-cookies.txt (root:helltube, mode 640).\n'
   else
-    printf 'YouTube cookies: disabled; any stored /etc/helltube/.secrets/youtube-cookies.txt is kept for reuse.\n'
+    printf 'YouTube cookies: disabled; any stored live or legacy export is kept for reuse with root-only access.\n'
   fi
   printf 'Rerun this bootstrap to reuse, replace expired cookies, or disable YouTube authentication.\n'
   if [[ $YOUTUBE_VPN_ENABLED == yes ]]; then

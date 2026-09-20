@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -158,6 +158,39 @@ test('malformed user agent metadata fails closed, is redacted and removes the wo
     assert.deepEqual(await readdir(f.temporary), []);
     assert.equal(f.youtube.pending.size, 0);
   }
+});
+
+test('atomic cookie refresh reaches new extractions while an existing extraction stays alive', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const ready = path.join(f.dir, 'ready.json');
+  const running = f.youtube.extract(['--fixture-wait', ready]);
+  const settled = running.then(() => null, error => error);
+  let existing;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    try { existing = JSON.parse(await readFile(ready, 'utf8')); break; }
+    catch { await delay(20); }
+  }
+  assert.ok(existing, 'The first extraction holds its private cookie snapshot');
+  assert.equal(existing.contents, cookieText);
+  // Windows marks the fixture read-only; POSIX permits replacing a read-only
+  // file via its writable parent, as the root-owned importer does on metal.
+  await chmod(f.source, 0o600);
+  const userAgent = 'Synthetic Chrome/154.0.0.0';
+  const refreshed = cookieText.replace('test-secret-cookie', 'refreshed-secret') +
+    `# Helltube-User-Agent: ${userAgent}\n`;
+  const replacement = f.source + '.next';
+  await writeFile(replacement, refreshed, { mode: 0o600 });
+  await rename(replacement, f.source);
+  const next = await f.youtube.extract([]);
+  assert.equal(next.contents, refreshed);
+  assert.equal(next.http_headers['User-Agent'], userAgent);
+  assert.notEqual(next.file, existing.file);
+  assert.equal(f.youtube.pending.size, 1, 'The original extraction was not cancelled by refresh');
+  assert.equal(await readFile(existing.file, 'utf8'), '# rewritten by extractor\n');
+  assert.equal(await readFile(f.source, 'utf8'), refreshed, 'yt-dlp cannot overwrite the refreshed source');
+  f.youtube.close();
+  assert.equal((await settled)?.name, 'AbortError');
+  assert.deepEqual(await readdir(f.temporary), []);
 });
 
 test('a missing configured secret fails closed without starting anonymous extraction', async t => {

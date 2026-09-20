@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 
-DESTINATION = Path('/etc/helltube/.secrets/youtube-cookies.txt')
+DESTINATION = Path('/etc/helltube-cookies/youtube-cookies.txt')
 LOCK = '/run/lock/helltube-deploy.lock'
 LIMIT = 1048576
 USER_AGENT_MARKER = '# Helltube-User-Agent:'
@@ -61,39 +61,59 @@ def validate(data):
 
 
 def systemctl(*arguments):
-    return subprocess.run(['/usr/bin/systemctl', *arguments], capture_output=True, timeout=45 if arguments[0] == 'restart' else 10,
+    return subprocess.run(['/usr/bin/systemctl', *arguments], capture_output=True, timeout=10,
                           env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'}, check=False)
 
 
 def credentials_configured():
-    # systemctl show renders LoadCredential as [unprintable] on newer systemd.
-    # Query the effective unit property through its stable D-Bus representation.
+    # Only the managed live-file configuration opts in. Never restart an older
+    # installation that still consumes a systemd credential snapshot.
     result = subprocess.run(['/usr/bin/busctl', '--json=short', 'get-property', 'org.freedesktop.systemd1',
                              '/org/freedesktop/systemd1/unit/helltube_2eservice',
-                             'org.freedesktop.systemd1.Service', 'LoadCredential'],
+                             'org.freedesktop.systemd1.Service', 'Environment'],
                             capture_output=True, timeout=10, check=False,
                             env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
     if result.returncode:
         return False
     data = json.loads(result.stdout)
-    if data.get('type') != 'a(ss)' or not isinstance(data.get('data'), list):
+    if data.get('type') != 'as' or not isinstance(data.get('data'), list):
         return False
-    paths = [entry[1] for entry in data['data'] if isinstance(entry, list) and len(entry) == 2 and entry[0] == 'youtube-cookies']
-    return paths == [str(DESTINATION)]
+    paths = [entry for entry in data['data'] if isinstance(entry, str) and entry.startswith('YTDLP_COOKIES_FILE=')]
+    return paths == [f'YTDLP_COOKIES_FILE={DESTINATION}']
 
 
-def trusted_directory(directory, private=False):
+def running_credentials_configured():
+    result = systemctl('show', 'helltube.service', '--property=ActiveState', '--property=MainPID')
+    if result.returncode:
+        return False
+    properties = dict(line.split('=', 1) for line in result.stdout.decode().splitlines() if '=' in line)
+    if properties.get('ActiveState') in ('inactive', 'failed'):
+        return properties.get('MainPID') == '0'
+    pid = properties.get('MainPID', '')
+    if properties.get('ActiveState') != 'active' or not pid.isdecimal() or int(pid) <= 0:
+        return False
+    # daemon-reload does not change an existing process's environment. Refuse
+    # to claim a live refresh until that process has migrated from the snapshot.
+    environment = Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
+    paths = [entry for entry in environment if entry.startswith(b'YTDLP_COOKIES_FILE=')]
+    return paths == [f'YTDLP_COOKIES_FILE={DESTINATION}'.encode()]
+
+
+def trusted_directory(directory, gid=None):
     info = directory.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & (0o077 if private else 0o022):
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or
+            (gid is not None and (info.st_gid != gid or stat.S_IMODE(info.st_mode) != 0o750))):
         raise ValueError('Unsafe destination directory.')
 
 
-def replace(data):
+def replace(data, gid):
     fd, temporary = tempfile.mkstemp(prefix='.youtube-cookies-', dir=DESTINATION.parent)
     try:
         with os.fdopen(fd, 'wb') as target:
             target.write(data)
             target.flush()
+            os.fchown(target.fileno(), 0, gid)
+            os.fchmod(target.fileno(), 0o640)
             os.fsync(target.fileno())
         os.replace(temporary, DESTINATION)
         directory_fd = os.open(DESTINATION.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -108,39 +128,32 @@ def replace(data):
 
 def install(data):
     import fcntl
+    import grp
     if os.geteuid() != 0:
         raise ValueError('Run the installed importer through sudo.')
     # Check all ancestors before creating any privileged file.
     for directory in reversed(DESTINATION.parent.parents):
         trusted_directory(directory)
-    trusted_directory(DESTINATION.parent, private=True)
+    gid = grp.getgrnam('helltube').gr_gid
+    if gid == 0:
+        raise ValueError('The Helltube group must not be root.')
+    trusted_directory(DESTINATION.parent, gid=gid)
     fd = os.open(LOCK, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     with os.fdopen(fd, 'wb') as lock:
         info = os.fstat(lock.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077 or info.st_nlink != 1:
             raise ValueError('Unsafe deployment lock.')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if not credentials_configured():
-            raise ValueError('Enable YouTube cookies with the Helltube bootstrap first.')
+        if not credentials_configured() or not running_credentials_configured():
+            raise ValueError('Enable live YouTube cookies with the updated Helltube bootstrap first.')
         info = DESTINATION.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size >= LIMIT:
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != gid or
+                stat.S_IMODE(info.st_mode) != 0o640 or info.st_nlink != 1 or info.st_size >= LIMIT):
             raise ValueError('Unsafe existing cookie file.')
         previous = DESTINATION.read_bytes()
         if previous == data:
             return
-        state = systemctl('show', 'helltube.service', '--property=ActiveState', '--value')
-        if state.returncode or state.stdout.strip() not in (b'active', b'inactive', b'failed'):
-            raise ValueError('Server is changing state; retry later.')
-        running = state.stdout.strip() == b'active'
-        replace(data)
-        if running:
-            try:
-                if systemctl('restart', 'helltube.service').returncode:
-                    raise ValueError('Server restart failed.')
-            except (ValueError, subprocess.TimeoutExpired):
-                replace(previous)
-                systemctl('restart', 'helltube.service')
-                raise ValueError('Server restart failed; previous cookies restored.')
+        replace(data, gid)
 
 
 def main():
