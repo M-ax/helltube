@@ -5,6 +5,7 @@ import path from 'node:path';
 import { youtubeNetwork } from './youtube-network.js';
 import { FILE_INPUT_FORMATS, HOSTED_INPUT_FORMATS, probeCommand, probeDuration } from './media-metadata.js';
 import { sponsorPosition } from '../shared/sponsorblock.js';
+import { ROOM_BUFFER_SECONDS } from '../shared/playback-buffer.js';
 import { createProgressReader } from './media-progress.js';
 import { EncryptedFmp4 } from './encrypted-fmp4.js';
 import { encryptedMediaFile } from '../shared/media-files.js';
@@ -157,7 +158,7 @@ export class Media {
         // A completed rendition has no missing tail. Keep it even if the clock
         // passes EOF before Rooms.tick advances, otherwise we restart past EOF.
         const prepared = job.item.media?.qualities.some(quality => position >= quality.baseTime &&
-          (quality.complete || position <= quality.bufferedUntil - 4));
+          (quality.complete || position <= quality.bufferedUntil - ROOM_BUFFER_SECONDS));
         // Interrupted streams can serve their cached buffer, then prepare the missing range.
         if (!prepared) {
           this.dispose(job);

@@ -31,6 +31,54 @@ test('server timeline starts only with buffer, is clock anchored, and rejects st
   assert.throws(() => rooms.control(room, { action: 'play', revision: oldRevision }), /changed/);
 });
 
+test('automatic and requested playback wait for ten seconds of prepared media', () => {
+  const { rooms, room, items, elapse } = fixture();
+  rooms.add(room, [items[0]]);
+  for (const bufferedUntil of [4, 9.99]) {
+    ready(items[0], bufferedUntil, false);
+    rooms.tick();
+    assert.equal(room.playback.paused, true);
+    command(rooms, room, 'play');
+    elapse(1000);
+    assert.equal(room.playback.paused, true, 'Play cannot bypass the buffer wait.');
+    assert.equal(rooms.position(room), 0);
+  }
+  ready(items[0], 10, false);
+  rooms.tick();
+  assert.equal(room.playback.paused, false);
+  elapse(1000);
+  assert.equal(rooms.position(room), 1);
+});
+
+test('complete short clips and tails start immediately; incomplete ones keep buffering', () => {
+  for (const [duration, startAt] of [[3, 0], [60, 57], [null, 0]]) {
+    const { rooms, room, items } = fixture();
+    const item = items[0];
+    Object.assign(item, {duration, startAt});
+    rooms.add(room, [item]);
+    ready(item, startAt + 3, false);
+    item.media.baseTime = startAt;
+    rooms.tick();
+    assert.equal(room.playback.paused, true);
+    item.media.complete = true;
+    rooms.tick();
+    assert.equal(room.playback.paused, false);
+    assert.equal(rooms.position(room), startAt);
+  }
+});
+
+test('pausing during startup cancels automatic playback once the buffer is ready', () => {
+  const { rooms, room, items } = fixture();
+  rooms.add(room, [items[0]]);
+  ready(items[0], 4, false);
+  command(rooms, room, 'pause');
+  ready(items[0], 10, false);
+  rooms.tick();
+  assert.equal(room.playback.paused, true);
+  command(rooms, room, 'play');
+  assert.equal(room.playback.paused, false);
+});
+
 test('queue insertion, reorder and whole-playlist removal preserve current video', () => {
   const { rooms, room, items } = fixture();
   items[0].playlistId = items[1].playlistId = items[2].playlistId = 'group';
@@ -63,13 +111,16 @@ test('skip history is capped at five and previous does not lose the interrupted 
 test('buffer underrun freezes the shared clock and refilling resumes everyone', () => {
   const { rooms, room, items, elapse } = fixture();
   rooms.add(room, items.slice(0, 2));
-  ready(items[0], 8, false);
+  ready(items[0], 10, false);
   rooms.tick();
-  elapse(7600);
+  elapse(9600);
   rooms.tick();
   assert.equal(room.playback.paused, true);
-  assert.equal(rooms.position(room), 7.25);
-  ready(items[0], 16, false);
+  assert.equal(rooms.position(room), 9.25);
+  ready(items[0], 19, false);
+  rooms.tick();
+  assert.equal(room.playback.paused, true, 'Refilling also waits for the full buffer.');
+  ready(items[0], 19.25, false);
   rooms.tick();
   assert.equal(room.playback.paused, false);
   ready(items[0]);
@@ -116,7 +167,7 @@ test('chosen starts anchor immediate, queued and replayed playback without chang
   items[0].media.baseTime = 20;
   rooms.tick();
   assert.equal(room.playback.paused, true, 'The buffer threshold is relative to the chosen start.');
-  ready(items[0], 26, false);
+  ready(items[0], 30, false);
   items[0].media.baseTime = 20;
   rooms.tick();
   assert.equal(room.playback.paused, false);

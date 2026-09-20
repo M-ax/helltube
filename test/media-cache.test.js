@@ -255,10 +255,13 @@ test('interrupted buffers are reused, then missing media is prepared from the sa
   assert.equal(restored.current.media.url, item.media.url);
   assert.equal(restored.current.media.complete, false);
   assert.equal(started.mock.callCount(), 0);
-  restarted.rooms.stamp(restored, 117, true);
+  restarted.rooms.stamp(restored, 110, true);
+  restarted.media.schedule();
+  assert.equal(started.mock.callCount(), 0, 'Ten cached seconds still cover the room buffer target.');
+  restarted.rooms.stamp(restored, 111, true);
   restarted.media.schedule();
   assert.equal(started.mock.callCount(), 1);
-  assert.equal(started.mock.calls[0].arguments[1], 117);
+  assert.equal(started.mock.calls[0].arguments[1], 111, 'Refill before the cached buffer can strand a paused room.');
   await restarted.cleanup();
   await restarted.close();
 });

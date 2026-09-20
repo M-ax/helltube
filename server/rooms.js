@@ -4,6 +4,7 @@ import { httpError, text } from './config.js';
 import { sponsorPosition } from '../shared/sponsorblock.js';
 import { sourceKind, spotifyLink } from '../shared/media-source.js';
 import { roomNowPlayingTitle } from '../shared/room-title.js';
+import { ROOM_BUFFER_SECONDS } from '../shared/playback-buffer.js';
 
 const BEN_ZONE = {
   id: 'the-ben-zone', name: 'The Ben Zone', pinned: true,
@@ -257,7 +258,7 @@ export class Rooms extends EventEmitter {
     const media = item?.media;
     const position = this.position(room);
     return !!media && item.status === 'ready' && position >= media.baseTime &&
-      (media.complete || media.bufferedUntil - position >= 4);
+      (media.complete || media.bufferedUntil - position >= ROOM_BUFFER_SECONDS);
   }
 
   mutateQueue(room, message) {

@@ -33,15 +33,31 @@ test('concurrent uploading and transcoding report independent measured progress 
     assert.match(rows.find(row => row.id === 'transcode').detail, /1.5x/);
 });
 
-test('unknown durations stay indeterminate; first segments and short complete clips can start playback', () => {
+test('unknown durations stay indeterminate while the ten-second startup buffer builds', () => {
     const item = {kind: 'http', preparation: {stage: 'buffering', seconds: 2},
         media: {baseTime: 50, bufferedUntil: 52, complete: false}};
     const rows = startupRows(item, null, true);
     assert.equal(rows.find(row => row.id === 'transcode').progress, null);
-    assert.equal(rows.find(row => row.id === 'buffer').progress, 50);
+    assert.equal(rows.find(row => row.id === 'buffer').progress, 20);
+    assert.equal(rows.find(row => row.id === 'buffer').detail, '2.0 / 10.0 s');
+    assert.equal(rows.find(row => row.id === 'playback').state, 'wait');
+    item.media.bufferedUntil = 60;
+    assert.equal(startupRows(item, null, true).find(row => row.id === 'playback').state, 'busy');
+    item.media.bufferedUntil = 52;
     item.media.complete = true;
     assert.equal(startupRows(item, null, true).find(row => row.id === 'playback').state, 'busy');
     assert.equal(terminalBar(50), '██████████░░░░░░░░░░');
+});
+
+test('short clips and tails report their remaining duration but wait for completion', () => {
+    const item = {kind: 'http', duration: 53, preparation: {stage: 'buffering'},
+        media: {baseTime: 50, bufferedUntil: 53, complete: false}};
+    const rows = startupRows(item, null, true);
+    assert.equal(rows.find(row => row.id === 'buffer').detail, '3.0 / 3.0 s');
+    assert.equal(rows.find(row => row.id === 'playback').state, 'wait');
+    item.media.complete = true;
+    assert.equal(startupRows(item, null, true).find(row => row.id === 'buffer').state, 'ok');
+    assert.equal(startupRows(item, null, true).find(row => row.id === 'playback').state, 'busy');
 });
 
 test('failures and disconnections halt active work; unrelated submissions cannot poison the current item', () => {

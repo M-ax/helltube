@@ -152,7 +152,7 @@ test('the server and viewers skip on the same clock, including multiple windows 
 });
 
 test('a post-ad seek beyond generated HLS pauses at the destination and resumes when ready', () => {
-  const { rooms, room, item, elapse } = roomFixture({ complete: false, bufferedUntil: 9 });
+  const { rooms, room, item, elapse } = roomFixture({ complete: false, bufferedUntil: 10 });
   rooms.tick();
   const seeks = [];
   rooms.on('seek', (_room, position) => { seeks.push(position); item.media = null; });
@@ -162,7 +162,7 @@ test('a post-ad seek beyond generated HLS pauses at the destination and resumes 
   assert.equal(room.playback.position, 20.25);
   assert.equal(room.playback.paused, true);
   assert.equal(room.resumeWhenReady, true);
-  item.media = { baseTime: 20.25, bufferedUntil: 28, complete: false };
+  item.media = { baseTime: 20.25, bufferedUntil: 30.25, complete: false };
   rooms.tick();
   assert.equal(room.playback.paused, false);
   assert.equal(room.playback.position, 20.25);

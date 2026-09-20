@@ -405,6 +405,8 @@ A normal proxied backend response is not assigned a Worker error code: signed-ou
 
 ### Encryption, caching, and privacy limits
 
+Rooms wait for ten seconds of prepared media ahead of the shared position before starting or resuming after a buffer underrun. Fully prepared clips and endings can start immediately with less than ten seconds remaining. This gives viewers time to build their buffers before the shared clock advances, reducing premature quality fallback.
+
 FFmpeg encrypts MPEG-TS HLS using **AES-128**, with a random 16-byte key per rendition and a sequence-derived IV per segment. Seeks outside the prepared buffer create new jobs and keys; restarts reuse retained jobs and keys. Keys and FFmpeg key-info files are kept separately from public segment directories and cleaned up with their jobs. Standard `hls.js` and native HLS decrypt during playback; no custom player crypto is required.
 
 YouTube selects the highest available resolution, including **4K**, without the former 1080p cap. Known H.264, VP9 and AV1 video with AAC-LC or Opus audio (or no audio) produces an **Original** rendition by copying the encoded packets, including when video and audio arrive separately. YouTube supports extracted HTTP(S) files and HLS; Twitch supports extracted HLS. Unknown codecs or DRM do not qualify for copying. Browser codec support varies; Original playback errors select Standard. The existing **Standard (up to 720p)** H.264/AAC conversion runs concurrently.

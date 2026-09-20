@@ -1,4 +1,5 @@
 import {time, bytes} from './format.js';
+import {ROOM_BUFFER_SECONDS} from '../../shared/playback-buffer.js';
 
 export function startupRows(item, pending, connected) {
     const rows = [
@@ -34,8 +35,8 @@ export function startupRows(item, pending, connected) {
         progress: transcoding ? (complete ? 100 : percent(preparation?.seconds, item?.duration - (preparation?.baseTime || 0))) : undefined,
         detail: transcoding ? `${time(preparation?.seconds || 0)} encoded${preparation?.speed > 0 ? ` · ${preparation.speed.toFixed(1)}x` : ''}` : undefined});
     const buffered = Math.max(0, (item?.media?.bufferedUntil || 0) - (item?.media?.baseTime || 0));
-    const target = Math.max(0, Math.min(4, (item?.duration || Infinity) - (item?.media?.baseTime || 0)));
-    const bufferReady = complete || buffered >= target;
+    const target = Math.max(0, Math.min(ROOM_BUFFER_SECONDS, (item?.duration || Infinity) - (item?.media?.baseTime || 0)));
+    const bufferReady = complete || buffered >= ROOM_BUFFER_SECONDS;
     rows.push({id: 'buffer', label: 'Building playback buffer', state: bufferReady ? 'ok' : transcoding ? 'busy' : 'wait',
         progress: transcoding ? (bufferReady ? 100 : percent(buffered, target)) : undefined,
         detail: transcoding ? `${Math.min(buffered, target).toFixed(1)} / ${target.toFixed(1)} s` : undefined});
