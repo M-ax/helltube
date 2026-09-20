@@ -9,7 +9,7 @@ This replaces the experimental caster apps with [OBS Studio](https://github.com/
 3. In OBS, select **Settings → Stream → Helltube**. Copy the room's **Server URL** and **Bearer token** into the corresponding fields.
 4. Add capture sources and mix audio in OBS, then select **Start Streaming**. Select **Stop Streaming** when finished.
 
-The Helltube service selects H.264 Baseline and Opus, disables B-frames and simulcast, and recommends up to 1920×1080 at 60 fps, 6,000 Kbps video and 128 Kbps audio, with a two-second keyframe interval. Keep **Ignore streaming service setting recommendations** off. Use SDR video and stereo audio. Standard OBS's **WHIP** service can use the same URL/token; configure these encoder settings yourself when using that service.
+The Helltube service selects H.264 Baseline and Opus, disables B-frames and simulcast, and recommends up to 1920×1080 at 60 fps, 12,000 Kbps video and 192 Kbps audio, with a two-second keyframe interval. Keep **Ignore streaming service setting recommendations** off. Use SDR video and stereo audio. Standard OBS's **WHIP** service can use the same URL/token; configure these encoder settings yourself when using that service.
 
 Streams use the same player, viewer limit, four-hour duration limit, and queue interruption/resumption behavior as browser desktop shares. Multiple people can stream to the same room. Each user has one OBS token per room and one active stream per token. Closing the browser does not stop OBS. Skipping the room's live shares, deleting the room, revoking/replacing the token, or signing out ends the stream. A failed connection is released automatically.
 

@@ -57,6 +57,7 @@ test('WHIP negotiates H264/Opus through the native relay and DELETE resumes the 
     assert.ok(answer.media.every(m => m.direction === 'recvonly' && m.setup === 'passive' && m.candidates.length));
     assert.ok(answer.media[1].fmtp[0].config.includes('profile-level-id=42e02a'));
     const session = [...h.instance.desktop.sessions.values()][0];
+    assert.equal((await session.publisher.transport.getStats())[0].maxIncomingBitrate, 12_200_000);
     assert.equal(session.producers.size, 2);
     assert.equal(session.ready, undefined, 'Wait for the DTLS connection before declaring the stream ready');
     assert.equal(room.current.id, session.item.id);

@@ -57,7 +57,8 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
     }
 
     async function produceVideo(track) {
-        const ranked = await desktopVideoCodecs(device.sendRtpCapabilities?.codecs, track, {mediaCapabilities});
+        const ranked = await desktopVideoCodecs(device.sendRtpCapabilities?.codecs, track,
+            {mediaCapabilities, videoBitrate: encoding.videoBitrate});
         const codecs = encoding.codec === 'auto' ? ranked : ranked.filter(codec => codec.mimeType.toLowerCase() === `video/${encoding.codec}`);
         if (encoding.codec !== 'auto' && !codecs.length) throw new Error('The selected video codec is not offered by this relay. Choose Automatic.');
         const choices = codecs.length ? codecs : [undefined];
@@ -226,6 +227,15 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
             const options = await request('restart-ice');
             active();
             await transport.restartIce(options);
+        },
+        async setVideoBitrate(value) {
+            active();
+            const producer = producers.get('video');
+            if (!producer) throw new Error('Wait for desktop sharing to start before changing the bitrate.');
+            const videoBitrate = normalizeDesktopQuality({videoBitrate: value}).videoBitrate;
+            await producer.setRtpEncodingParameters({maxBitrate: videoBitrate});
+            active();
+            encoding.videoBitrate = videoBitrate;
         },
         setVideoEnabled(enabled) {
             videoEnabled = !!enabled;

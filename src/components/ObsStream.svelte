@@ -1,5 +1,6 @@
 <script>
     import {api} from '../lib/api.js';
+    import {desktopLimits} from '../../shared/desktop-quality.js';
 
     export let room;
     export let connected;
@@ -39,8 +40,20 @@
 
 <details class="obs-stream">
     <summary>Stream with OBS Studio</summary>
-    <p>In OBS, open Settings → Stream and choose <strong>Helltube</strong>. Create a token here, then paste the server URL and bearer token into OBS and start streaming.</p>
-    <p>Use H.264 Baseline video, Opus audio, and one video layer. Recommended limits: 1080p, 60 fps, 6,000 Kbps video and 128 Kbps audio. Standard OBS also works with its WHIP service.</p>
+    <p>In OBS, open <strong>Settings → Stream</strong> and select <strong>WHIP</strong> (also called <strong>WHIP Service</strong>) as the service.
+        Create a token below, then paste the <strong>Server URL</strong> and <strong>Bearer token</strong> into the matching OBS fields.</p>
+    <ul class="obs-settings">
+        <li><strong>Stream:</strong> If Simulcast is shown, set <strong>Total Layers</strong> to <strong>1</strong>.</li>
+        <li><strong>Output:</strong> Set Output Mode to <strong>Advanced</strong>. Under Streaming, select the <strong>x264</strong> video encoder (H.264),
+            <strong>baseline</strong> profile, <strong>CBR</strong> rate control, up to <strong>{(desktopLimits.videoBitrate / 1000).toLocaleString()} Kbps</strong>,
+            and a <strong>2-second</strong> keyframe interval. Baseline uses no B-frames.</li>
+        <li><strong>Audio:</strong> Under Output → Streaming, select the <strong>Opus</strong> audio encoder.
+            Under Output → Audio, set the streaming track to <strong>{desktopLimits.audioBitrate / 1000} Kbps</strong>.
+            Under Settings → Audio, use <strong>48 kHz</strong> and <strong>Stereo</strong>.</li>
+        <li><strong>Video:</strong> Set Output (Scaled) Resolution to at most <strong>{desktopLimits.width}×{desktopLimits.height}</strong>
+            and FPS to at most <strong>{desktopLimits.frameRate}</strong>. Under Advanced → Video, use <strong>NV12</strong> and <strong>Rec. 709</strong> for SDR.</li>
+    </ul>
+    <p>Apply the settings, add your capture sources, and select <strong>Start Streaming</strong>. Lower the video bitrate, resolution, or FPS if your connection or computer cannot keep up.</p>
     <div class="actions">
         <button class="button secondary" disabled={!connected || busy} on:click={generate}>
             {credentials ? 'Replace OBS token' : 'Create OBS token'}
@@ -67,6 +80,8 @@
     .obs-stream {margin-top: 1rem; padding: 1rem; border: 1px solid var(--border, #454047); border-radius: 12px;}
     summary {cursor: pointer; font-weight: 700;}
     p {margin: .75rem 0;}
+    .obs-settings {margin: .75rem 0; padding-left: 1.25rem;}
+    .obs-settings li + li {margin-top: .5rem;}
     label {display: block; margin-top: .75rem;}
     .actions, .field {display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem;}
     input {flex: 1 1 220px; min-width: 0;}

@@ -29,6 +29,7 @@ function fixture(t, {audio = true, capture, connectTimeout, peerStart, quality, 
                 if (!this.closed && options.stream) options.onState('connected');
             },
             async restartIce() { this.restarts++; },
+            async setVideoBitrate(value) { this.videoBitrate = value; },
             async setVideoEnabled(enabled) { this.videoEnabled = enabled; },
             close() { this.closed = true; }};
         peers.push(peer);
@@ -78,6 +79,49 @@ test('video-only capture and ending audio preserve the video share', async t => 
     assert.equal(a.share.active(), true);
     assert.equal(get(a.share.state).hasAudio, false);
     assert.equal(a.tracks[0].readyState, 'live');
+});
+
+test('browser bitrate selection applies before capture and live without replacing the share', async t => {
+    const h = fixture(t);
+    assert.equal(get(h.share.state).videoBitrate, 12_000_000);
+    await h.share.setVideoBitrate(4_000_000);
+    await h.share.start(); h.accept(); await flush();
+    assert.equal(h.peers[0].quality.videoBitrate, 4_000_000);
+    await h.share.setVideoBitrate(20_000_000);
+    assert.equal(h.peers[0].videoBitrate, 12_000_000);
+    assert.equal(get(h.share.state).videoBitrate, 12_000_000);
+    assert.equal(get(h.share.state).status, 'sharing');
+    assert.equal(h.peers.length, 1);
+    assert.ok(h.tracks.every(track => track.readyState === 'live'));
+    await h.share.setVideoBitrate(2_000_000);
+    h.share.stop();
+    assert.equal(get(h.share.state).videoBitrate, 2_000_000, 'Keep the selection for the next share');
+});
+
+test('failed bitrate changes keep the prior setting and leave capture running', async t => {
+    const h = fixture(t);
+    await h.share.start();
+    await assert.rejects(h.share.setVideoBitrate(2_000_000), /Wait for desktop sharing/);
+    h.accept(); await flush();
+    h.peers[0].setVideoBitrate = async () => { throw new Error('Encoder rejected the change'); };
+    await assert.rejects(h.share.setVideoBitrate(2_000_000), /Encoder rejected/);
+    assert.equal(get(h.share.state).videoBitrate, 12_000_000);
+    assert.equal(get(h.share.state).status, 'sharing');
+    assert.ok(h.tracks.every(track => track.readyState === 'live'));
+});
+
+for (const failed of [false, true]) test(`stopping during a ${failed ? 'failed' : 'successful'} bitrate update ignores its stale result`, async t => {
+    const h = fixture(t);
+    await h.share.start(); h.accept(); await flush();
+    const pending = Promise.withResolvers();
+    h.peers[0].setVideoBitrate = () => pending.promise;
+    const updating = h.share.setVideoBitrate(2_000_000);
+    h.share.stop();
+    await h.share.setVideoBitrate(4_000_000);
+    if (failed) pending.reject(new Error('Closed')); else pending.resolve();
+    await updating;
+    assert.equal(get(h.share.state).status, 'idle');
+    assert.equal(get(h.share.state).videoBitrate, 4_000_000);
 });
 
 test('cancelling a pending picker releases a subsequently selected screen', async t => {
@@ -216,7 +260,7 @@ test('failed or cancelled asynchronous publishing never leaves capture running',
 
 function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilities = null, failProduce, getStats, quality,
     videoEnabled = true, rpcError, beforeConsume} = {}) {
-    const commands = [], produced = [], consumed = [], events = [];
+    const commands = [], produced = [], consumed = [], events = [], encodingChanges = [];
     const connection = {requestId: 'capture', peerId: 'peer', itemId: 'desktop', transportOptions: {id: 'transport'},
         rtcConfig: {iceServers: [], iceTransportPolicy: 'all'}, routerRtpCapabilities: {}, producers: []};
     const client = {desktopMessages: writable(null), command(message) {
@@ -249,7 +293,8 @@ function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilitie
                 }
                 await failProduce?.(options);
                 const data = await new Promise((resolve, reject) => this.emit('produce', {kind: options.track.kind, rtpParameters: {}}, resolve, reject));
-                return Object.assign(new EventEmitter(), {id: data.id, close() {}});
+                return Object.assign(new EventEmitter(), {id: data.id, close() {},
+                    async setRtpEncodingParameters(parameters) { encodingChanges.push({kind: options.track.kind, ...parameters}); }});
             },
             async consume(options) {
                 await beforeConsume?.(options);
@@ -274,7 +319,7 @@ function relayHarness(t, {stream, load, respond = true, codecs, mediaCapabilitie
         videoEnabled, quality, onVideoError: error => videoErrors.push(error),
         onStats: report => stats.push(report)});
     t.after(() => peer.close());
-    return {peer, client, connection, commands, produced, consumed, transports, stats, videoErrors,
+    return {peer, client, connection, commands, produced, consumed, transports, stats, videoErrors, encodingChanges,
         get transport() { return transports.at(-1); }, events, received: () => received};
 }
 
@@ -415,7 +460,7 @@ test('transport publishes one encoding per track with a fixed upload ceiling and
     await h.peer.start();
     assert.deepEqual(h.produced.map(options => options.track), tracks);
     assert.ok(h.produced.every(options => options.stopTracks === false));
-    assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 6_000_000, maxFramerate: 60}]);
+    assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 12_000_000, maxFramerate: 60}]);
     assert.deepEqual(h.commands.map(message => message.action), ['connect', 'produce', 'produce', 'ready']);
     assert.ok(h.commands.every(message => message.itemId === 'desktop' && message.peerId === 'peer' && message.requestId === 'capture'));
 });
@@ -430,6 +475,19 @@ test('native publisher applies bounded quality, selected codecs and Opus mix set
     assert.equal(h.produced[1].codecOptions.opusMaxAverageBitrate, 64000);
     assert.equal(h.produced[1].codecOptions.opusStereo, false);
     assert.equal(h.produced[1].codecOptions.opusDtx, true);
+});
+
+test('live bitrate changes adjust only the video sender and enforce the ceiling', async t => {
+    const tracks = ['video', 'audio'].map(kind => ({kind, readyState: 'live'}));
+    const h = relayHarness(t, {stream: {getTracks: () => tracks}});
+    await h.peer.start();
+    await h.peer.setVideoBitrate(2_000_000);
+    await h.peer.setVideoBitrate(20_000_000);
+    assert.deepEqual(h.encodingChanges, [{kind: 'video', maxBitrate: 2_000_000}, {kind: 'video', maxBitrate: 12_000_000}]);
+    assert.equal(h.produced.length, 2, 'The existing tracks stay published');
+    assert.equal(h.transports.length, 1);
+    h.peer.close();
+    await assert.rejects(h.peer.setVideoBitrate(4_000_000), /closed/);
 });
 
 test('native publisher-only mode retains local lifecycle without subscribing to other desktops', async t => {

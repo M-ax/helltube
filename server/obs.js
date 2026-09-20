@@ -2,6 +2,7 @@ import express from 'express';
 import {createHash, randomBytes, randomUUID} from 'node:crypto';
 import {httpError} from './config.js';
 import {parseObsOffer, obsRtpParameters, obsAnswer} from './obs-sdp.js';
+import {desktopLimits} from '../shared/desktop-quality.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 
@@ -88,7 +89,8 @@ export class ObsStreams {
           await this.desktop.perform(session, session.publisher, {action: 'produce', kind: media.type, rtpParameters: tracks[index]});
         }
         if (!this.valid(key) || this.keys.get(key.id) !== key) throw httpError(401, 'OBS stream token was revoked.');
-        await transport.setMaxIncomingBitrate(6_200_000);
+        // Leave room for Opus audio and transport overhead above the video ceiling.
+        await transport.setMaxIncomingBitrate(desktopLimits.videoBitrate + 200_000);
         this.desktop.active(session);
         if (!this.valid(key) || this.keys.get(key.id) !== key) throw httpError(401, 'OBS stream token was revoked.');
         transport.on('dtlsstatechange', state => {

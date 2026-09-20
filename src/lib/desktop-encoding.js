@@ -1,10 +1,12 @@
-export const desktopVideoEncoding = {maxBitrate: 6_000_000, maxFramerate: 60};
+import {desktopLimits} from '../../shared/desktop-quality.js';
+
+export const desktopVideoEncoding = {maxBitrate: desktopLimits.videoBitrate, maxFramerate: desktopLimits.frameRate};
 
 // WebRTC has no API to force a GPU encoder. Prefer the browser's power-efficiency
 // signal for the negotiated profile; the browser still owns hardware/software
 // fallback. Keep all codec profiles even when a capability probe reports unsupported.
 export async function desktopVideoCodecs(codecs, track, {
-    mediaCapabilities = globalThis.navigator?.mediaCapabilities, timeout = 750,
+    mediaCapabilities = globalThis.navigator?.mediaCapabilities, timeout = 750, videoBitrate = desktopLimits.videoBitrate,
 } = {}) {
     const candidates = (codecs || []).filter(codec => /^video\/(h264|vp8)$/i.test(codec.mimeType));
     if (candidates.length < 2) return candidates;
@@ -20,7 +22,7 @@ export async function desktopVideoCodecs(codecs, track, {
                         const info = await mediaCapabilities.encodingInfo({type: 'webrtc', video: {
                             contentType: [codec.mimeType, ...parameters].join(';'),
                             width: settings.width || 1920, height: settings.height || 1080,
-                            bitrate: desktopVideoEncoding.maxBitrate,
+                            bitrate: videoBitrate,
                             framerate: Math.min(settings.frameRate || desktopVideoEncoding.maxFramerate, desktopVideoEncoding.maxFramerate),
                         }});
                         results.set(codec, info);

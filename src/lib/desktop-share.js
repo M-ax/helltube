@@ -1,6 +1,7 @@
 import {get, writable} from 'svelte/store';
 import {createDesktopPeer} from './desktop-peer.js';
 import {desktopVideoEncoding} from './desktop-encoding.js';
+import {normalizeDesktopQuality} from '../../shared/desktop-quality.js';
 
 export const desktopCaptureOptions = {
     video: {width: {ideal: 1920, max: 1920}, height: {ideal: 1080, max: 1080},
@@ -24,9 +25,11 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
     Peer = globalThis.RTCPeerConnection, Stream = globalThis.MediaStream, secure = globalThis.isSecureContext,
     makePeer = createDesktopPeer, connectTimeout = 20000, disconnectTimeout = 5000,
     quality, watchRemote = true} = {}) {
-    const state = writable({status: 'idle', roomId: null, error: '', label: '', hasAudio: false});
+    const state = writable({status: 'idle', roomId: null, error: '', label: '', hasAudio: false,
+        videoBitrate: normalizeDesktopQuality(typeof quality === 'function' ? undefined : quality).videoBitrate});
     const playback = writable({});
     let operation;
+    let selectedBitrate;
     const views = new Map();
     let viewingRoom = null;
 
@@ -60,7 +63,21 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
             if (views.get(previous.itemId)?.local) closeView(previous.itemId, false);
             if (notifyServer && previous.requested) client.command({type: 'desktop:stop', requestId: previous.requestId});
         }
-        state.set({status: 'idle', roomId: null, error, label: '', hasAudio: false});
+        state.update(value => ({...value, status: 'idle', roomId: null, error, label: '', hasAudio: false}));
+    }
+
+    async function setVideoBitrate(value) {
+        const videoBitrate = normalizeDesktopQuality({videoBitrate: value}).videoBitrate;
+        const pending = operation;
+        if (pending) {
+            if (get(state).status !== 'sharing') throw new Error('Wait for desktop sharing to start before changing the bitrate.');
+            try { await pending.peer.setVideoBitrate(videoBitrate); }
+            catch (error) { if (operation === pending) throw error; }
+            if (operation !== pending) return;
+            pending.quality = {...pending.quality, videoBitrate};
+        }
+        selectedBitrate = videoBitrate;
+        state.update(value => ({...value, videoBitrate}));
     }
 
     async function start() {
@@ -71,8 +88,10 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
         if (!room.joined || room.status !== 'connected' || !room.room) { stop('Join a room before sharing.'); return; }
         const pending = {roomId: room.room.id, requestId: crypto.randomUUID(), restarts: 0,
             quality: typeof quality === 'function' ? quality() : quality};
+        if (selectedBitrate !== undefined) pending.quality = {...pending.quality, videoBitrate: selectedBitrate};
         operation = pending;
-        state.set({status: 'choosing', roomId: pending.roomId, error: '', label: '', hasAudio: false});
+        state.set({status: 'choosing', roomId: pending.roomId, error: '', label: '', hasAudio: false,
+            videoBitrate: normalizeDesktopQuality(pending.quality).videoBitrate});
         try {
             // Keep this call in the button's activation, before any other await.
             const stream = await devices.getDisplayMedia(desktopCaptureOptions);
@@ -89,7 +108,7 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
                 }, {once: true});
             }
             pending.requested = true;
-            state.set({status: 'starting', roomId: pending.roomId, error: '', label: stream.getVideoTracks()[0].label || 'Your desktop', hasAudio});
+            state.update(value => ({...value, status: 'starting', label: stream.getVideoTracks()[0].label || 'Your desktop', hasAudio}));
             pending.timer = setTimeout(() => { if (operation === pending) stop('The server did not start sharing. Please try again.'); }, 15000);
             if (!client.command({type: 'desktop:start', requestId: pending.requestId, transport: 'mediasoup', audio: hasAudio})) {
                 stop('The room connection was lost. Please try again.');
@@ -238,7 +257,7 @@ export function createDesktopShare(client, {devices = globalThis.navigator?.medi
         });
     }
     return {state, playback, start, stop, active: () => !!operation,
-        setVideoEnabled,
+        setVideoBitrate, setVideoEnabled,
         retryVideo(itemId) { setVideoEnabled(itemId, views.get(itemId)?.videoEnabled, true); },
         retryView(itemId) {
             const view = views.get(itemId);

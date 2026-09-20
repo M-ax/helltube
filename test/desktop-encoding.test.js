@@ -28,9 +28,16 @@ test('prefers the power-efficient negotiated profile and probes actual capture s
     assert.deepEqual(ordered, [h264, vp8]);
     assert.deepEqual(queries[1], {type: 'webrtc', video: {
         contentType: 'video/H264;packetization-mode=1;profile-level-id=42e01f',
-        width: 1280, height: 720, framerate: 60, bitrate: 6_000_000,
+        width: 1280, height: 720, framerate: 60, bitrate: 12_000_000,
     }});
     assert.deepEqual(codecs, [vp8, h264], 'Shared capabilities are not reordered');
+});
+
+test('capability probes use the selected video bitrate', async () => {
+    const queries = [];
+    await desktopVideoCodecs(codecs, track, {videoBitrate: 2_000_000,
+        mediaCapabilities: {async encodingInfo(query) { queries.push(query); return {supported: true}; }}});
+    assert.ok(queries.length > 0 && queries.every(query => query.video.bitrate === 2_000_000));
 });
 
 for (const powerEfficient of [true, false]) {

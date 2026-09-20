@@ -1,6 +1,6 @@
 // The relay forwards one encoding to every viewer, within this media budget.
 export const desktopLimits = Object.freeze({width: 1920, height: 1080, frameRate: 60,
-    videoBitrate: 6_000_000, audioBitrate: 128_000});
+    videoBitrate: 12_000_000, audioBitrate: 192_000});
 
 const bounded = (value, fallback, min, max) => Math.round(Math.min(max, Math.max(min,
     typeof value === 'number' && Number.isFinite(value) ? value : fallback)));

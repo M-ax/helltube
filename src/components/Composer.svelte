@@ -24,6 +24,8 @@
     let insertAt = 'end';
     let busy = '';
     let error = '';
+    let bitrateBusy = false;
+    let bitrateError = '';
     let hasStartTime = false;
     let startTimeEnabled = false;
     let startTimeText = '';
@@ -46,6 +48,18 @@
     $: if (uploadUnavailable) resetFileDrag();
     $: if (mode !== 'upload') dropzoneDragDepth = 0;
     $: resetLinkOptions(url);
+
+    async function changeDesktopBitrate(event) {
+        const select = event.currentTarget;
+        bitrateBusy = true;
+        bitrateError = '';
+        try { await desktop.setVideoBitrate(Number(select.value)); }
+        catch { bitrateError = 'Could not change the video bitrate. The previous setting is still in use. Try again.'; }
+        finally {
+            select.value = String($desktopState.videoBitrate);
+            bitrateBusy = false;
+        }
+    }
 
     function resetLinkOptions(value) {
         includeMixPlaylist = false;
@@ -319,6 +333,19 @@
                         on:click={desktop.start}>Choose screen to share</button>
             {/if}
         </div>
+        <div class="desktop-bitrate-control">
+            <label for="desktop-bitrate">Video bitrate
+                <select id="desktop-bitrate" value={$desktopState.videoBitrate} on:change={changeDesktopBitrate}
+                        aria-describedby="desktop-bitrate-help" disabled={bitrateBusy || !!desktopUnavailable ||
+                            ['choosing', 'starting'].includes($desktopState.status)}>
+                    {#each [0.3, 0.5, 1, 2, 4, 6, 8, 10, 12] as mbps}
+                        <option value={mbps * 1_000_000}>{mbps} Mbps</option>
+                    {/each}
+                </select>
+            </label>
+            <p id="desktop-bitrate-help" class="field-help">Maximum video bitrate for this browser share. You can change it while sharing; the actual rate adapts to your connection.</p>
+        </div>
+        {#if bitrateError}<p class="form-error" role="alert">{bitrateError}</p>{/if}
         {#if desktopUnavailable}<p class="inline-note">{desktopUnavailable}</p>{/if}
         {#if room?.current?.kind === 'desktop' && $desktopState.status === 'idle'}
             <p class="field-help">Join in by sharing your desktop. Skip the live shares to return everyone to videos.</p>

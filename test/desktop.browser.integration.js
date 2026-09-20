@@ -325,6 +325,10 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     }, {withAudio, codecScenario});
     await join(sender, url);
     await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
+    const bitrateControl = sender.getByRole('combobox', {name: 'Video bitrate', exact: true});
+    assert.equal(await bitrateControl.inputValue(), '12000000');
+    const initialBitrate = withAudio ? 4_000_000 : 12_000_000;
+    if (withAudio) await bitrateControl.selectOption(String(initialBitrate));
     await sender.getByRole('button', {name: 'Choose screen to share'}).click();
     await sender.getByRole('button', {name: 'Stop sharing', exact: true}).waitFor();
     await until(() => instance.rooms.get('lobby').current?.transport === 'mediasoup' && [...instance.desktop.sessions.values()][0]?.ready);
@@ -388,7 +392,34 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
         const {maxBitrate, maxFramerate} = window.desktopPeers.find(peer => peer.connectionState !== 'closed').getSenders()
             .find(sender => sender.track?.kind === 'video').getParameters().encodings[0];
         return {maxBitrate, maxFramerate, captureFrameRate: window.captureOptions.video.frameRate};
-    }), {maxBitrate: 6_000_000, maxFramerate: 60, captureFrameRate: {ideal: 60, max: 60}});
+    }), {maxBitrate: initialBitrate, maxFramerate: 60, captureFrameRate: {ideal: 60, max: 60}});
+    const publisherTransport = publisher.publisher.transport.id;
+    const producerId = publisher.producers.get('video').id;
+    const getVideoBitrate = () => sender.evaluate(() => window.desktopPeers.find(peer => peer.connectionState !== 'closed')
+        .getSenders().find(sender => sender.track?.kind === 'video').getParameters().encodings[0].maxBitrate);
+    for (const bitrate of [2_000_000, 12_000_000]) {
+        const frames = await viewer.locator('video').evaluate(video => video.getVideoPlaybackQuality().totalVideoFrames);
+        await until(() => bitrateControl.isEnabled());
+        await bitrateControl.selectOption(String(bitrate));
+        await until(async () => await getVideoBitrate() === bitrate);
+        await until(() => viewer.locator('video').evaluate((video, frames) =>
+            !video.paused && video.getVideoPlaybackQuality().totalVideoFrames > frames, frames));
+        assert.equal(publisher.publisher.transport.id, publisherTransport);
+        assert.equal(publisher.producers.get('video').id, producerId, 'Live bitrate changes retain the existing video producer');
+    }
+    if (!split && !withAudio) {
+        await sender.evaluate(() => {
+            window.originalSetParameters = RTCRtpSender.prototype.setParameters;
+            RTCRtpSender.prototype.setParameters = () => Promise.reject(new Error('Simulated bitrate update failure'));
+        });
+        await bitrateControl.selectOption('8000000');
+        await sender.getByRole('alert').filter({hasText: 'Could not change the video bitrate'}).waitFor();
+        assert.equal(await bitrateControl.inputValue(), '12000000');
+        assert.equal(await getVideoBitrate(), 12_000_000);
+        await sender.evaluate(() => { RTCRtpSender.prototype.setParameters = window.originalSetParameters; });
+        await bitrateControl.selectOption('12000000');
+        await until(() => sender.getByRole('alert').filter({hasText: 'Could not change the video bitrate'}).count().then(count => count === 0));
+    }
     const encoding = await sender.evaluate(async () => {
         const peer = window.desktopPeers.find(peer => peer.connectionState !== 'closed');
         const stats = await peer.getSenders().find(sender => sender.track?.kind === 'video').getStats();
@@ -569,6 +600,7 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
         });
     } else await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
     await until(() => instance.rooms.get('lobby').current === null && instance.desktop.sessions.size === 0);
+    assert.equal(await bitrateControl.inputValue(), '12000000', 'The bitrate selection survives stopping capture');
     assert.equal(await sender.evaluate(() => window.captureTracks.every(track => track.readyState === 'ended')), true);
     assert.equal(instance.rooms.get('lobby').history.length, 0);
     assert.equal(instance.media.jobs.has(item.id), false);
