@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 import { HelperError, privateDirectory } from './core.mjs';
 import { chromeUserAgentOverride, loadChromeIdentity } from './chrome-identity.mjs';
+import { prepareBrowserProfile } from './browser-recovery.mjs';
 
 const exec = promisify(execFile);
 
@@ -24,6 +25,7 @@ export async function browserExecutable(browser) {
 export async function openSignInBrowser(directory, browserName, { executable, url = 'https://www.youtube.com/' } = {}) {
   const profile = path.join(directory, `profile-${browserName}`);
   await privateDirectory(profile);
+  await prepareBrowserProfile(profile);
   const child = spawn(executable || await browserExecutable(browserName), [
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-mode', '--new-window', url,
@@ -64,6 +66,7 @@ export async function openBrowser(directory, browserName, { executable, identity
   await privateDirectory(profile);
   const identity = selectedIdentity || await loadChromeIdentity(directory);
   const override = chromeUserAgentOverride(identity.major);
+  await prepareBrowserProfile(profile);
   const portFile = path.join(profile, 'DevToolsActivePort');
   await rm(portFile, { force: true });
   const child = spawn(executable || await browserExecutable(browserName), [

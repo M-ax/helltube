@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
-import { openBrowser, openSignInBrowser, refreshCookies } from '../tools/cookie-helper/browser.mjs';
+import { chromium } from 'playwright';
+import { browserExecutable, openBrowser, openSignInBrowser, refreshCookies } from '../tools/cookie-helper/browser.mjs';
 import { youtubeCookies } from '../tools/cookie-helper/core.mjs';
 import { cookieUserAgent } from '../shared/youtube-cookie-metadata.js';
 import { chromeUserAgent } from '../tools/cookie-helper/chrome-identity.mjs';
@@ -50,6 +52,8 @@ test('ordinary sign-in browser has no debugger and hands its saved profile to ba
       await assert.rejects(access(path.join(directory, `profile-${browserName}`, 'DevToolsActivePort')), { code: 'ENOENT' });
       assert.equal(signIn.isOpen, true);
       await assert.rejects(signIn.finish(), /Close all windows/);
+      await assert.rejects(openBrowser(directory, browserName, { identity: { major: 151 } }), /sign-in browser is still open/);
+      assert.equal(signIn.isOpen, true, 'A failed refresh leaves the regular sign-in browser alone.');
       closeWindow = true;
       for (let attempt = 0; signIn.isOpen && attempt < 100; attempt++) await delay(100);
       assert.equal(signIn.isOpen, false, 'The browser finishes saving its profile before export starts.');
@@ -74,6 +78,77 @@ test('ordinary sign-in browser has no debugger and hands its saved profile to ba
       await signIn?.close();
       server.closeAllConnections();
       await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+test('an active background browser keeps its connection file and cannot be taken over',
+  { skip: process.platform !== 'win32', timeout: 30000 }, async () => {
+    await mkdir('test-artifacts', { recursive: true });
+    const directory = await mkdtemp(path.resolve('test-artifacts/cookie-active-'));
+    const identity = { major: 151 };
+    const session = await openBrowser(directory, browserName, { identity });
+    try {
+      const portFile = path.join(directory, `profile-${browserName}`, 'DevToolsActivePort');
+      const original = await readFile(portFile, 'utf8');
+      await assert.rejects(openBrowser(directory, browserName, { identity }), /background browser is already in use/);
+      await assert.rejects(openSignInBrowser(directory, browserName, { url: 'about:blank' }), /background browser is already in use/);
+      assert.equal(await readFile(portFile, 'utf8'), original, 'A retry must not erase a running browser connection.');
+      assert.equal(await session.page.evaluate(() => 42), 42, 'The original browser is still usable.');
+    } finally { await session.close(); }
+  });
+
+test('an orphaned background browser is recovered without its port file and retains saved cookies',
+  { skip: process.platform !== 'win32', timeout: 45000 }, async () => {
+    await mkdir('test-artifacts', { recursive: true });
+    const directory = await mkdtemp(path.resolve('test-artifacts/cookie orphan [fixture]-'));
+    const profile = path.join(directory, `profile-${browserName}`);
+    const portFile = path.join(profile, 'DevToolsActivePort');
+    const seed = await openBrowser(directory, browserName, { identity: { major: 151 } });
+    try {
+      await seed.context.addCookies([{ url: 'https://example.test/', name: 'recovery_fixture', value: 'persisted', expires: 2147483647 }]);
+    } finally { await seed.close(); }
+    await rm(portFile, { force: true });
+    const script = `
+      import { spawn } from 'node:child_process';
+      import { access } from 'node:fs/promises';
+      import { setTimeout as delay } from 'node:timers/promises';
+      const browser = spawn(${JSON.stringify(await browserExecutable(browserName))}, [
+        ${JSON.stringify(`--user-data-dir=${profile}`)}, '--headless=new', '--remote-debugging-address=127.0.0.1',
+        '--remote-debugging-port=0', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', 'about:blank',
+      ], { detached: true, windowsHide: true, stdio: 'ignore' });
+      browser.unref();
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try { await access(${JSON.stringify(portFile)}); process.exit(0); } catch {}
+        await delay(100);
+      }
+      browser.kill();
+      process.exit(1);
+    `;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.resume();
+    let diagnostics = '';
+    child.stderr.on('data', data => { diagnostics += data; });
+    const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+    assert.equal(code, 0, diagnostics);
+    const [port, endpoint] = (await readFile(portFile, 'utf8')).trim().split(/\r?\n/);
+    let session, neighbor;
+    try {
+      // A similarly named profile owned by a live process must remain untouched.
+      neighbor = await openBrowser(`${directory}-other`, browserName, { identity: { major: 151 } });
+      await rm(portFile);
+      session = await openBrowser(directory, browserName, { identity: { major: 152 } });
+      assert.equal((await session.context.cookies('https://example.test/')).find(cookie => cookie.name === 'recovery_fixture')?.value, 'persisted');
+      assert.equal(await session.page.evaluate(() => navigator.userAgent), chromeUserAgent(152));
+      assert.equal(await neighbor.page.evaluate(() => 42), 42);
+      await assert.rejects(chromium.connectOverCDP(`ws://127.0.0.1:${port}${endpoint}`, { timeout: 1000 }), 'The abandoned browser has exited.');
+    } finally {
+      await session?.close();
+      await neighbor?.close();
+      // Keep the fixture isolated even if recovery fails before returning a session.
+      try {
+        const leftover = await chromium.connectOverCDP(`ws://127.0.0.1:${port}${endpoint}`, { timeout: 1000 });
+        try { await (await leftover.newBrowserCDPSession()).send('Browser.close'); } finally { await leftover.close(); }
+      } catch {}
     }
   });
 
