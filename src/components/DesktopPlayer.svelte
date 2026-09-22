@@ -14,6 +14,10 @@
     export let inputDisabled = false;
     export let visualized = false;
     export let nativeControls = true;
+    export let focusAvailable = false;
+    export let focused = false;
+    export let thumbnail = false;
+    export let onFocus;
     export let videoRequested = false;
     export let onVideoReady;
     export let onRetry;
@@ -32,12 +36,31 @@
     let originalAudioStream = null;
     let audioGeneration = 0;
     let hidden = false;
+    let individuallyMuted = false;
+    let appliedMuted = false;
 
     $: forcedMute = captureMuted || !!playback?.local;
     $: if (video) video.volume = volume;
-    $: if (video) video.muted = muted || forcedMute;
+    $: if (video) applyMute(video, muted || forcedMute, individuallyMuted);
     $: updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !hidden, audioAnalysis);
     $: renderedStream = boostedStream && boostedStream.original === playback?.stream ? boostedStream.stream : playback?.stream;
+
+    function applyMute(node, masterMuted, streamMuted) {
+        appliedMuted = masterMuted || streamMuted;
+        node.muted = appliedMuted;
+    }
+
+    function rememberMute() {
+        // Volume and mute writes queue the same event. Only a native mute change
+        // that differs from our last applied value is an individual preference.
+        if (!video || video.muted === appliedMuted) return;
+        if (muted || forcedMute) {
+            video.muted = true;
+            return;
+        }
+        individuallyMuted = video.muted;
+        appliedMuted = video.muted;
+    }
 
     async function updateBassBoost(stream, enabled, analysis, gesture = false) {
         const version = ++audioGeneration;
@@ -128,7 +151,7 @@
             loading = true;
             node.pause();
             node.srcObject = stream || null;
-            node.muted = muted || captureMuted || !!playback?.local;
+            applyMute(node, muted || captureMuted || !!playback?.local, individuallyMuted);
             node.volume = volume;
             if (stream && connected) void play(node);
         }
@@ -139,22 +162,32 @@
 
 <svelte:document on:fullscreenchange={() => fullscreen = document.fullscreenElement === tile}/>
 
-<div class="desktop-tile" class:visualized bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}>
+<div class="desktop-tile" class:visualized class:focused class:thumbnail bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}>
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
     <video bind:this={video} use:attachStream={{stream: renderedStream, connected}}
            use:watchVideoFrame={{stream: renderedStream, original: playback?.stream, enabled: videoRequested && connected && !blocked && !error && !playback?.error && !playback?.videoError}}
-           controls={nativeControls && !inputDisabled && !visualized} controlslist="nofullscreen" inert={inputDisabled || visualized || !nativeControls} playsinline aria-label={`Shared desktop: ${item.title}`}
+           controls={nativeControls && !inputDisabled && !visualized && !thumbnail} controlslist="nofullscreen" inert={inputDisabled || visualized || !nativeControls || thumbnail} playsinline aria-label={`Shared desktop: ${item.title}`}
            on:dblclick|preventDefault={toggleFullscreen}
-           on:volumechange={() => { if (forcedMute && video && !video.muted) video.muted = true; }}
+           on:volumechange={rememberMute}
            on:loadeddata={() => loading = false} on:playing={() => { loading = false; error = ''; blocked = false; }}
            on:waiting={() => loading = true}
            on:error={() => error = 'This desktop could not be played. Retry playback.'}></video>
-    <span class="desktop-name" title={item.title}>{item.addedBy || item.title}{playback?.local ? ' (you)' : ''}</span>
-    {#if nativeControls}<button class="icon-button desktop-fullscreen" type="button"
-            aria-label={fullscreen ? 'Exit fullscreen' : `Fullscreen ${item.title}`} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen this desktop'}
-            disabled={fullscreenPending || (inputDisabled && !fullscreen)} on:click={toggleFullscreen}>
-        <Icon name="fullscreen" size={17}/>
-    </button>{/if}
+    <div class="desktop-heading">
+        <span class="desktop-name" title={item.title}>{item.addedBy || item.title}{playback?.local ? ' (you)' : ''}</span>
+        {#if focusAvailable}
+            <button class="desktop-focus" type="button" disabled={inputDisabled}
+                    aria-label={focused ? 'Show all desktops' : `Focus on ${item.addedBy || item.title}`}
+                    title={focused ? 'Show all desktops' : `Focus on ${item.addedBy || item.title}`}
+                    on:click={() => onFocus?.(focused ? null : item.id)}>
+                <span>{focused ? 'Show all desktops' : thumbnail ? item.addedBy || item.title : `Focus on ${item.addedBy || item.title}`}</span>
+            </button>
+        {/if}
+        {#if nativeControls && !thumbnail}<button class="icon-button desktop-fullscreen" type="button"
+                aria-label={fullscreen ? 'Exit fullscreen' : `Fullscreen ${item.title}`} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen this desktop'}
+                disabled={fullscreenPending || (inputDisabled && !fullscreen)} on:click={toggleFullscreen}>
+            <Icon name="fullscreen" size={17}/>
+        </button>{/if}
+    </div>
     {#if fullscreenError}<p class="desktop-fullscreen-error" role="status">{fullscreenError}</p>{/if}
     {#if playback?.error || error}
         <div class="desktop-message" role="alert">
@@ -194,15 +227,61 @@
     }
     video { width: 100%; height: 100%; display: block; object-fit: contain; }
     .visualized video { opacity: 0; }
-    .visualized .desktop-name, .visualized .desktop-fullscreen { display: none; }
+    .visualized .desktop-heading { display: none; }
+    .focused { grid-column: 1 / -1; grid-row: 1; width: 100%; height: 100%; }
+    .thumbnail { grid-row: 2; justify-self: center; width: auto; max-width: 100%; height: 100%; aspect-ratio: 16 / 9; }
+    .desktop-heading {
+        position: absolute;
+        top: 7px;
+        right: 8px;
+        left: 8px;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        pointer-events: none;
+    }
+    .desktop-heading button { pointer-events: auto; }
+    .desktop-focus {
+        min-width: 0;
+        max-width: 65%;
+        min-height: 30px;
+        margin-left: auto;
+        padding: 5px 8px;
+        border: 1px solid #ffffff38;
+        border-radius: 4px;
+        background: #000b;
+        color: #eee;
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+    }
+    .desktop-focus span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .desktop-focus:hover { background: #29232eee; border-color: var(--accent); }
+    .desktop-focus:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .thumbnail .desktop-heading { inset: 0; }
+    .thumbnail .desktop-name { display: none; }
+    .thumbnail .desktop-focus {
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+        width: 100%;
+        max-width: none;
+        height: 100%;
+        min-height: 0;
+        padding: 0;
+        background: transparent;
+        border-color: #ffffff28;
+    }
+    .thumbnail .desktop-focus span { max-width: 100%; padding: 4px 6px; background: #000c; border-radius: 3px; }
+    .thumbnail .desktop-focus:hover { border-color: var(--accent); }
+    .desktop-tile:fullscreen .desktop-focus { display: none; }
     video::-webkit-media-controls-fullscreen-button { display: none; }
     .desktop-tile:fullscreen { width: 100%; height: 100%; border-radius: 0; }
     .desktop-tile::backdrop { background: #050506; }
     .desktop-fullscreen {
-        position: absolute;
-        top: 7px;
-        right: 8px;
-        z-index: 1;
+        flex: 0 0 30px;
+        margin-left: auto;
         width: 30px;
         height: 30px;
         background: #000b;
@@ -219,10 +298,7 @@
         font-size: 12px;
     }
     .desktop-name {
-        position: absolute;
-        top: 7px;
-        left: 8px;
-        max-width: calc(100% - 56px);
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;

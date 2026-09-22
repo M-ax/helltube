@@ -61,6 +61,7 @@
     let effectsCanvas;
     let desktopWidth = 960;
     let desktopHeight = 480;
+    let focusedDesktopId = null;
     let renderer;
     let audioAnalysis;
     let analyser = null;
@@ -144,6 +145,7 @@
     $: updateAnalysis(sharedSpotify ? !!spotifyStream : audioOnly && !spotify, video, audioAnalysis, false, spotifyStream);
     $: desktops = live ? room.desktops ?? [item] : [];
     $: desktopGrid = desktopLayout(desktops.length, desktopWidth, desktopHeight);
+    $: if (desktops.length < 2 || !desktops.some(desktop => desktop.id === focusedDesktopId)) focusedDesktopId = null;
     $: qualities = availableQualities(item?.media);
     $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
     $: crtVisible = !live && !spotify && (!media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error'));
@@ -821,13 +823,15 @@
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + (live ? 8 : 28)}px`}>
         {#if live}
-            <div class="desktop-grid" bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
+            <div class="desktop-grid" class:desktop-focused={focusedDesktopId !== null} bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
                  data-columns={desktopGrid.columns} data-rows={desktopGrid.rows}
-                 style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}`}>
+                 style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${Math.max(1, desktops.length - 1)}`}>
                 {#each desktops as desktop (desktop.id)}
                     <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {connected} {volume} {muted}
                                    {captureMuted} {audioAnalysis} {bassBoost} inputDisabled={reactionInputActive}
-                                   nativeControls={!sharedSpotify}
+                                   focusAvailable={desktops.length > 1} focused={focusedDesktopId === desktop.id}
+                                   thumbnail={focusedDesktopId !== null && focusedDesktopId !== desktop.id}
+                                   onFocus={id => focusedDesktopId = id} nativeControls={!sharedSpotify}
                                    videoRequested={sharedSpotify && spotifyView === 'desktop'}
                                    onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}
                                    visualized={spotifyVisualization && webglEffectsActive} onRetry={onRetryDesktop}
@@ -1172,6 +1176,12 @@
         gap: 8px;
         min-width: 0;
         min-height: 0;
+    }
+    .video-viewport:has(.desktop-focused) { min-height: min(320px, 100dvh); }
+    .desktop-grid.desktop-focused {
+        display: grid;
+        grid-template-columns: repeat(var(--desktop-thumbnails), minmax(0, 1fr));
+        grid-template-rows: minmax(0, 1fr) min(25%, 120px);
     }
 </style>
 {#if fallbackNotice && media}

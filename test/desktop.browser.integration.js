@@ -29,7 +29,7 @@ async function availablePort() {
     return port;
 }
 
-test('multiple users tile independent native desktops and keep remaining shares playing', {timeout: 90000}, async t => {
+test('multiple users tile and focus independent desktops while preserving individual mute choices', {timeout: 120000}, async t => {
     const {instance, url, api} = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', desktopIceServers: '[]'});
     const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--autoplay-policy=no-user-gesture-required',
         '--disable-background-timer-throttling', '--disable-renderer-backgrounding']});
@@ -76,6 +76,7 @@ test('multiple users tile independent native desktops and keep remaining shares 
     });
     await startSharing(senders[0]);
     await playing(senders[0], 1);
+    assert.equal(await senders[0].locator('.desktop-focus').count(), 0, 'A single desktop has no focus control');
     await startSharing(senders[1]);
     for (const page of senders.slice(0, 2)) await playing(page, 2);
     assert.equal(room.desktops.length, 2);
@@ -99,6 +100,35 @@ test('multiple users tile independent native desktops and keep remaining shares 
     instance.rooms.changed(room);
     await until(() => firstVideo.evaluate(video => video.paused && video.muted && video.volume === 0.25));
     assert.equal(await secondVideo.evaluate(video => !video.paused && !video.muted && video.volume === 0.8), true);
+    const setVolume = async level => {
+        await viewer.getByRole('slider', {name: 'Volume on this device'}).evaluate((slider, level) => {
+            slider.value = String(level);
+            slider.dispatchEvent(new Event('input', {bubbles: true}));
+            slider.dispatchEvent(new Event('change', {bubbles: true}));
+        }, level);
+        const volume = (100 ** level - 1) / 99;
+        await until(() => viewer.locator('.desktop-tile video').evaluateAll((videos, volume) =>
+            videos.every(video => Math.abs(video.volume - volume) < 0.0001), volume));
+    };
+    await setVolume(0.6);
+    assert.equal(await firstVideo.evaluate(video => video.muted && video.paused), true, 'Main volume preserves a desktop mute and pause');
+    assert.equal(await secondVideo.evaluate(video => video.muted), false);
+    await viewer.getByRole('button', {name: 'Mute on this device', exact: true}).click();
+    await until(() => secondVideo.evaluate(video => video.muted));
+    await setVolume(0.7);
+    assert.equal(await firstVideo.evaluate(video => video.muted), true, 'Raising master volume never unmutes an individually muted desktop');
+    assert.equal(await secondVideo.evaluate(video => video.muted), false, 'Raising master volume clears only master mute');
+    await viewer.getByRole('button', {name: 'Mute on this device', exact: true}).click();
+    await until(() => secondVideo.evaluate(video => video.muted));
+    await viewer.getByRole('button', {name: 'Unmute on this device', exact: true}).click();
+    await until(() => secondVideo.evaluate(video => !video.muted));
+    assert.equal(await firstVideo.evaluate(video => video.muted), true);
+    await firstVideo.evaluate(video => { video.muted = false; });
+    await until(() => firstVideo.evaluate(video => !video.muted));
+    await setVolume(0.65);
+    assert.equal(await firstVideo.evaluate(video => video.muted), false, 'Native unmute clears the individual preference');
+    await firstVideo.evaluate(video => { video.muted = true; });
+    await until(() => firstVideo.evaluate(video => video.muted));
     await firstVideo.evaluate(video => video.play());
     await viewer.screenshot({path: 'test-artifacts/desktop-two-shares.png', fullPage: true});
     await startSharing(senders[2]);
@@ -112,6 +142,43 @@ test('multiple users tile independent native desktops and keep remaining shares 
     assert.ok(sessions.every(session => session.producers.size === 1));
     await viewer.screenshot({path: 'test-artifacts/desktop-three-shares.png', fullPage: true});
     const videos = viewer.locator('.desktop-tile video');
+    await videos.evaluateAll(videos => {
+        window.focusDesktops = videos.map(video => ({video, stream: video.srcObject, muted: video.muted, volume: video.volume}));
+    });
+    const checkFocus = async id => {
+        await until(() => viewer.locator('.desktop-tile.focused').getAttribute('data-item-id').then(value => value === id));
+        assert.equal(await checkBounds(viewer), true);
+        assert.equal(await viewer.locator('.desktop-grid').evaluate(grid => {
+            const main = grid.querySelector('.focused').getBoundingClientRect();
+            return [...grid.querySelectorAll('.thumbnail')].every(tile => {
+                const thumb = tile.getBoundingClientRect();
+                return thumb.top >= main.bottom && thumb.width <= main.width && thumb.height < main.height;
+            });
+        }), true, 'Other live desktops form a smaller row below the focused desktop');
+        assert.equal(await videos.evaluateAll(videos => videos.every((video, index) => {
+            const saved = window.focusDesktops[index];
+            return video === saved.video && video.srcObject === saved.stream && !video.paused &&
+                video.muted === saved.muted && video.volume === saved.volume;
+        })), true, 'Focus retains every player, stream and audio choice');
+    };
+    await viewer.getByRole('button', {name: 'Focus on Sharer 2', exact: true}).click();
+    await checkFocus(secondId);
+    assert.equal(await viewer.locator('.desktop-tile.thumbnail').count(), 2);
+    assert.equal(await senders[0].locator('.desktop-tile.focused').count(), 0, 'Focus is local to the viewer');
+    await viewer.screenshot({path: 'test-artifacts/desktop-focused.png', fullPage: true});
+    await viewer.getByRole('button', {name: 'Toggle fullscreen'}).click();
+    await until(() => viewer.evaluate(() => !!document.fullscreenElement));
+    await checkFocus(secondId);
+    await viewer.evaluate(() => document.exitFullscreen());
+    await viewer.setViewportSize({width: 390, height: 844});
+    await checkFocus(secondId);
+    await viewer.getByRole('button', {name: 'Focus on Sharer 1', exact: true}).click();
+    await checkFocus(firstId);
+    await viewer.screenshot({path: 'test-artifacts/desktop-focused-mobile.png', fullPage: true});
+    await viewer.getByRole('button', {name: 'Show all desktops', exact: true}).click();
+    await playing(viewer, 3);
+    assert.equal(await viewer.locator('.desktop-tile.thumbnail').count(), 0);
+    await viewer.setViewportSize({width: 1280, height: 720});
     const playbackBeforeReactions = await videos.evaluateAll(videos => {
         window.desktopInputEvents = [];
         for (const video of videos) for (const type of ['pointerdown', 'click', 'keydown']) {
@@ -125,6 +192,7 @@ test('multiple users tile independent native desktops and keep remaining shares 
         await until(() => videos.evaluateAll(videos => videos.every(video => video.inert && !video.controls &&
             getComputedStyle(video).pointerEvents === 'none')));
         assert.equal(await viewer.locator('.desktop-fullscreen:enabled').count(), 0, 'Reaction input also blocks per-stream fullscreen');
+        assert.equal(await viewer.locator('.desktop-focus:enabled').count(), 0, 'Reaction input also blocks focus controls');
         assert.equal(await videos.evaluateAll(videos => videos.every(video => {
             video.focus();
             return document.activeElement !== video;
@@ -192,13 +260,18 @@ test('multiple users tile independent native desktops and keep remaining shares 
     await viewer.setViewportSize({width: 390, height: 844});
     assert.equal(await checkBounds(viewer), true);
     await viewer.screenshot({path: 'test-artifacts/desktop-three-shares-mobile.png', fullPage: true});
+    await viewer.getByRole('button', {name: 'Focus on Sharer 1', exact: true}).click();
+    await until(() => viewer.locator('.desktop-tile.focused').count());
     await senders[0].getByRole('button', {name: 'Stop sharing', exact: true}).click();
     await playing(viewer, 2);
+    assert.equal(await viewer.locator('.desktop-tile.focused').count(), 0, 'Ending the focused desktop returns to the grid');
     assert.equal(room.current.id, secondId);
     assert.equal(await secondVideo.evaluate(video => video === window.retainedDesktop.video && video.srcObject === window.retainedDesktop.stream), true);
     assert.equal(await checkBounds(viewer), true);
+    await viewer.getByRole('button', {name: 'Focus on Sharer 2', exact: true}).click();
     await senders[2].close();
     await playing(viewer, 1);
+    assert.equal(await viewer.locator('.desktop-focus').count(), 0, 'Focus controls disappear when one desktop remains');
     assert.equal(instance.desktop.sessions.size, 1);
     await viewer.getByRole('button', {name: 'Skip video for everyone'}).click();
     await until(() => instance.desktop.sessions.size === 0 && room.current === null);
