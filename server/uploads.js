@@ -137,14 +137,15 @@ export class Uploads {
     }
     const files = body.files.map(file => this.validateFile(file));
     if (room.queue.length + files.length > this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
-    const reserved = [...this.uploads.values()].reduce((total, upload) => total + upload.size, 0);
+    const reservations = [...this.uploads.values(), ...(this.otherReservations?.() || [])];
+    const reserved = reservations.reduce((total, upload) => total + upload.size, 0);
     const requested = files.reduce((total, file) => total + file.size, 0);
-    const own = [...this.uploads.values()].filter(upload => upload.userId === user.id);
+    const own = reservations.filter(upload => upload.userId === user.id);
     if (own.length + files.length > this.config.maxUserUploads ||
       own.reduce((total, upload) => total + upload.size, 0) + requested > this.config.maxUserStorageBytes) {
       throw httpError(409, 'Your upload reservation limit is full. Remove unneeded uploads before adding more.');
     }
-    if (this.uploads.size + files.length > this.config.maxUploads || reserved + requested > this.config.maxStorageBytes) {
+    if (reservations.length + files.length > this.config.maxUploads || reserved + requested > this.config.maxStorageBytes) {
       throw httpError(507, 'Upload storage budget is full. Remove unneeded queue items.');
     }
     const playlistId = files.length > 1 ? randomUUID() : null;

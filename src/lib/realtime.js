@@ -14,6 +14,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     const emptyReactions = () => ({roomId: null, clientId: null, ball: null, fingers: [], serverTime: 0, events: []});
     const reactions = writable(emptyReactions());
     const whiteboard = writable(emptyWhiteboard());
+    const sharedFiles = writable(null);
     const desktopMessages = writable(null);
     const state = writable({
         status: 'offline', rooms: [], room: null, selectedRoomId: null,
@@ -131,6 +132,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         state.update(current => ({...current, status: 'reconnecting', joined: false}));
         reactions.set(emptyReactions());
         whiteboard.set(emptyWhiteboard());
+        sharedFiles.set(null);
         checkSession();
         const delay = Math.min(15000, 750 * 2 ** attempt++) + Math.random() * 350;
         retryTimer = setTimeout(open, delay);
@@ -173,6 +175,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     function join(roomId) {
         reactions.set(emptyReactions());
         whiteboard.set(emptyWhiteboard());
+        sharedFiles.set(null);
         state.update((current) => ({...current, selectedRoomId: roomId, joined: false, room: null, overlay: null}));
         try {
             windowTarget.localStorage.setItem(storageKey, roomId);
@@ -185,6 +188,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         if (stopped) return;
         reactions.set(emptyReactions());
         whiteboard.set(emptyWhiteboard());
+        sharedFiles.set(null);
         if (windowTarget.navigator.onLine === false) {
             state.update((current) => ({...current, status: 'offline', joined: false}));
             return;
@@ -248,6 +252,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
                 if (selected && !message.rooms.some((room) => room.id === selected)) {
                     reactions.set(emptyReactions());
                     whiteboard.set(emptyWhiteboard());
+                    sharedFiles.set(null);
                     state.update((current) => ({...current, selectedRoomId: null, room: null, joined: false}));
                 }
             } else if (message.type === 'state') {
@@ -259,6 +264,9 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
                         clockOffset: current.clockReady ? current.clockOffset : message.serverTime - Date.now(),
                     };
                 });
+            } else if (message.type === 'files:state') {
+                const current = get(state);
+                if (current.joined && message.roomId === current.selectedRoomId) sharedFiles.set(message);
             } else if (message.type === 'reactions:state' || message.type === 'reaction') {
                 const current = get(state);
                 if (!current.joined || message.roomId !== current.selectedRoomId) return;
@@ -329,6 +337,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         if (socket && !stopped) recordFailure('browser-offline');
         reactions.set(emptyReactions());
         whiteboard.set(emptyWhiteboard());
+        sharedFiles.set(null);
         closeSocket();
         cancelSessionCheck();
         state.update((current) => ({...current, status: 'offline', joined: false}));
@@ -337,6 +346,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     function disconnect() {
         reactions.set(emptyReactions());
         whiteboard.set(emptyWhiteboard());
+        sharedFiles.set(null);
         stopped = true;
         windowTarget.removeEventListener('offline', offline);
         windowTarget.removeEventListener('online', wake);
@@ -368,5 +378,5 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         open();
     }
 
-    return {state, reactions, whiteboard, desktopMessages, connect, disconnect, join, command, retry};
+    return {state, reactions, whiteboard, sharedFiles, desktopMessages, connect, disconnect, join, command, retry};
 }

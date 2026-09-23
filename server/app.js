@@ -16,6 +16,8 @@ import { Reactions } from './reactions.js';
 import { Whiteboards } from './whiteboard.js';
 import { startPointerTicker } from '../shared/reaction-pointer.js';
 import { Uploads, chunkSize } from './uploads.js';
+import { RoomFiles } from './room-files.js';
+import { roomFileRoutes } from './room-file-routes.js';
 import { YouTube } from './youtube.js';
 import { sponsorPlaylist } from './sponsorblock.js';
 import { Twitch } from './twitch.js';
@@ -73,6 +75,7 @@ export async function createApp(overrides = {}) {
   const remote = new RemoteMedia();
   let rooms;
   let uploads;
+  let roomFiles;
   let media;
   let benZone;
   try {
@@ -84,6 +87,8 @@ export async function createApp(overrides = {}) {
     media = new Media(config, rooms, uploads, youtube, twitch, soundcloud);
     benZone = new BenZone(rooms, youtube, media, config.benZone);
     await uploads.init();
+    roomFiles = new RoomFiles(config, rooms, store, uploads);
+    await roomFiles.init();
     await media.init();
   } catch (error) {
     store.delete('runtime', 'owner');
@@ -99,6 +104,9 @@ export async function createApp(overrides = {}) {
   const app = express();
   const server = createServer(app);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024, perMessageDeflate: false });
+  roomFiles.broadcast = (roomId, message) => {
+    for (const ws of wss.clients) if (ws.roomId === roomId) send(ws, message);
+  };
   const reportedDisconnects = new Map();
   const desktop = new DesktopShares(rooms, send, {rtcConfig, config, maxViewers: config.desktopMaxViewers});
   const obs = new ObsStreams({accounts, rooms, desktop, store, rtcConfig});
@@ -123,8 +131,11 @@ export async function createApp(overrides = {}) {
     if (req.headers['x-helltube-edge'] !== undefined && !req.edge) return next(httpError(403, 'Invalid edge proxy credentials.'));
     const direct = req.path === '/direct' || req.path.startsWith('/direct/');
     const trustedDirect = direct && config.bareMetalOrigin && config.origins.includes(req.headers.origin);
+    // Attachment navigations omit Origin. The download route still validates its scoped grant.
+    const grantedDownload = config.bareMetalOrigin && ['GET', 'HEAD'].includes(req.method) &&
+      /^\/direct\/files\/[a-f0-9-]{36}\/download$/.test(req.path) && typeof req.query.grant === 'string';
     if (!validOrigin(req.headers.origin, req.headers.host, config) ||
-      (req.headers['sec-fetch-site'] === 'cross-site' && !trustedDirect)) {
+      (req.headers['sec-fetch-site'] === 'cross-site' && !trustedDirect && !grantedDownload)) {
       return next(httpError(403, 'Cross-origin requests are not allowed.'));
     }
     if (direct) {
@@ -182,7 +193,7 @@ export async function createApp(overrides = {}) {
   const admin = (req, _res, next) => next(req.auth.user.role === 'admin' ? undefined : httpError(403, 'Administrator access required.'));
   const membership = (req, id = req.params.id) => {
     const room = rooms.get(id);
-    if (![...room.members.values()].some(u => u.id === req.auth.user.id)) throw httpError(403, 'Join this room before adding videos.');
+    if (![...room.members.values()].some(u => u.id === req.auth.user.id)) throw httpError(403, 'Join this room to access its contents.');
     return room;
   };
   const requireMedia = () => { if (!capabilities.ffmpeg) throw httpError(503, 'FFmpeg is missing. Install it and restart the server.'); };
@@ -224,6 +235,7 @@ export async function createApp(overrides = {}) {
     limit, clientIP, cookie, config, capabilities });
   obsIngestRoutes(app, obs, {limit, clientIP});
   app.use('/api', identify, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  roomFileRoutes(app, {files: roomFiles, membership, reauthorize, identifyDirect, directUrl, config, limit});
   app.post('/api/rooms/:id/obs-token', (req, res) => {
     limit(`obs-token:${req.auth.user.id}`, 12);
     res.status(201).json(obs.issue(req.auth, membership(req)));
@@ -305,6 +317,7 @@ export async function createApp(overrides = {}) {
   });
   app.delete('/api/rooms/:id', async (req, res) => {
     rooms.remove(req.params.id, req.auth.user);
+    await roomFiles.removeRoom(req.params.id);
     await Promise.all([...uploads.uploads.values()].filter(upload => upload.roomId === req.params.id && !upload.creating)
       .map(upload => uploads.discard(upload)));
     res.json({ ok: true });
@@ -544,6 +557,7 @@ export async function createApp(overrides = {}) {
           broadcastRooms();
           send(ws, {...reactions.snapshot(room.id), clientId: ws.id});
           send(ws, whiteboards.snapshot(room.id));
+          send(ws, roomFiles.snapshot(room.id));
           return;
         }
         if (!ws.roomId) throw httpError(403, 'Join a room first.');
@@ -616,7 +630,7 @@ export async function createApp(overrides = {}) {
   let closing = null;
   const cleanup = () => {
     if (cleaning) return cleaning;
-    cleaning = (async () => { await media.cleanup(); await uploads.cleanup(); })()
+    cleaning = (async () => { await media.cleanup(); await uploads.cleanup(); await roomFiles.cleanup(); })()
       .finally(() => { cleaning = null; });
     return cleaning;
   };
@@ -624,7 +638,7 @@ export async function createApp(overrides = {}) {
     cleanup().catch(error => console.error('Storage cleanup:', error.message));
   }, Math.max(100, config.cleanupIntervalMs || 60000));
   housekeeping.unref();
-  return { app, server, accounts, accountRequests, rooms, benZone, reactions, whiteboards, desktop, obs, spotifyDesktop, uploads, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
+  return { app, server, accounts, accountRequests, rooms, benZone, reactions, whiteboards, desktop, obs, spotifyDesktop, uploads, roomFiles, media, youtube, twitch, soundcloud, spotify, remote, capabilities, store, cleanup,
     async listen(port = config.port) {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, config.host, resolve); });
       media.port = server.address().port;
@@ -655,6 +669,7 @@ export async function createApp(overrides = {}) {
         await cleaning;
         await media.close();
         await uploads.close();
+        await roomFiles.close();
         server.closeAllConnections();
         await stopped;
         await deployment.pending;

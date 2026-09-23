@@ -2,6 +2,8 @@
 
 A Svelte 5 + Node.js watch-together app. Every room has one authoritative playback clock, a collaborative queue, and a shared two-second HLS stream for videos. Desktop shares use low-latency WebRTC. No full YouTube download is required before playback.
 
+Every room also has a **Shared files** dropbox below the player: drag in files or choose several at once, then download them from any member's browser. Files persist across restarts and stay out of the playback queue. Uploads retry interrupted connections; after leaving or reloading, use **Resume** to reselect the original file. The uploader, room owner and administrators can remove files. Room deletion removes its files too. Existing upload storage/count limits also cover shared files; inactive unfinished transfers expire under `UPLOAD_IDLE_TIMEOUT_MS`. Run `npm run test:files` for server, transfer recovery and browser checks.
+
 ## Run locally
 
 Requirements: Node.js **22.13+**, npm, **FFmpeg** with `libx264`/AAC, and a current **yt-dlp** with a supported JavaScript runtime (Node is enabled explicitly). Keep yt-dlp updated as YouTube changes.
@@ -559,3 +561,12 @@ npm run test:youtube
 `test:worker` uses local Wrangler and Chrome with distinct frontend/backend origins. It checks real WebSocket proxying, direct upload and encrypted playback, cookie-free key delivery, shared segment caching, and authorization of warm cache hits using synthetic media; it does not deploy to Cloudflare or contact YouTube. Production DNS/TLS configuration, global cache behavior, and Safari/native HLS still require deployment smoke tests.
 
 Implementation: `server\rooms.js` (state engine), `server\media.js` (job scheduler/HLS), `server\uploads.js` (growing sources/pacing), `server\youtube.js` (extraction), `server\auth.js` (accounts), `server\app.js` (HTTP/WebSockets), and `src` (Svelte client). See `CONTRACT.md` for API details.
+
+### No-login test page
+
+Run `npm run dev:test` to open the local reaction test page at http://localhost:5173/.
+It automatically enters a guest session in a disposable test room, with a sample
+video and audio when FFmpeg is installed. Press Play or upload your own video.
+Stop an existing server on port 5173 before starting this preview.
+The launcher uses temporary data under `test-artifacts` and removes it on exit.
+The normal `dev`, `start`, and production builds keep their usual login flow.

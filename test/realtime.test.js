@@ -115,6 +115,27 @@ test('finger snapshots preserve the local socket identity, ignore other rooms an
     assert.equal(get(h.client.reactions).clientId, null);
 });
 
+test('file snapshots require current membership and clear across room switches and disconnects', t => {
+    const h = fixture(t);
+    const ws = h.sockets[0];
+    const snapshot = {type: 'files:state', roomId: 'lobby', files: [{id: 'one'}]};
+    ws.open(); ws.receive(snapshot);
+    assert.equal(get(h.client.sharedFiles), null);
+    ws.room(); ws.receive(snapshot);
+    assert.deepEqual(get(h.client.sharedFiles), snapshot);
+    ws.receive({...snapshot, roomId: 'other', files: []});
+    assert.deepEqual(get(h.client.sharedFiles), snapshot);
+    ws.fail();
+    assert.equal(get(h.client.sharedFiles), null);
+    h.advance(750);
+    const next = h.sockets.at(-1);
+    next.open(); next.room(); next.receive(snapshot);
+    h.client.join('other');
+    assert.equal(get(h.client.sharedFiles), null);
+    next.receive(snapshot);
+    assert.equal(get(h.client.sharedFiles), null);
+});
+
 test('whiteboard snapshots and deltas stay in their room and reset across clear and reconnect', t => {
     const h = fixture(t);
     const ws = h.sockets[0];

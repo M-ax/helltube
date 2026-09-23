@@ -21,12 +21,14 @@
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:media": "node --test test/media.integration.js",
     "test:ben-zone": "npm run build && node --test --test-concurrency=1 test/ben-zone.test.js test/ben-zone-media.integration.js test/ben-zone.browser.integration.js",
-    "test:browser": "npm run build && node --test --test-concurrency=1 test/browser.integration.js test/reactions.browser.integration.js test/jpeg.browser.integration.js test/media-reactions.browser.integration.js test/whiteboard.browser.integration.js test/desktop.browser.integration.js test/deployment.browser.integration.js test/frontend-loading.browser.integration.js test/account-requests.browser.integration.js",
+    "test:browser": "npm run build && node --test --test-concurrency=1 test/browser.integration.js test/reactions.browser.integration.js test/jpeg.browser.integration.js test/media-reactions.browser.integration.js test/new-reactions.browser.integration.js test/whiteboard.browser.integration.js test/room-files.browser.integration.js test/desktop.browser.integration.js test/deployment.browser.integration.js test/frontend-loading.browser.integration.js test/account-requests.browser.integration.js",
+    "test:files": "npm run build && node --test --test-concurrency=1 test/room-files.test.js test/room-files-client.test.js test/room-files.browser.integration.js",
     "test:whiteboard": "npm run build && node --test --test-concurrency=1 test/whiteboard.test.js test/whiteboard.browser.integration.js",
     "test:desktop": "npm run build && node --test test/desktop.browser.integration.js",
     "test:firefox": "npm run build && node --test test/firefox.browser.integration.js",
     "test:worker": "npm run build && node --test test/worker.integration.js",
-    "test:youtube": "node --test test/youtube.integration.js"
+    "test:youtube": "node --test test/youtube.integration.js",
+    "dev:test": "node scripts/test-page.mjs"
   },
   "dependencies": {
     "butterchurn": "2.6.7",

@@ -8,6 +8,7 @@
     import BenZonePanel from './components/BenZonePanel.svelte';
     import Composer from './components/Composer.svelte';
     import Uploads from './components/Uploads.svelte';
+    import FileDropbox from './components/FileDropbox.svelte';
     import {api} from './lib/api.js';
     import {initials} from './lib/format.js';
     import {createRealtime} from './lib/realtime.js';
@@ -29,6 +30,7 @@
     let sessionMessage = '';
     let modal = null;
     let manager;
+    let sharingFiles = false;
     let composer;
     let preparation = null;
     let roomName = '';
@@ -55,6 +57,7 @@
     const desktopPlayback = desktop.playback;
     const reactions = client.reactions;
     const whiteboard = client.whiteboard;
+    const sharedFiles = client.sharedFiles;
     $: room = $realtimeState.room;
     $: if (!$realtimeState.selectedRoomId) theaterMode = false;
     $: connected = $realtimeState.status === 'connected' && $realtimeState.joined && browserOnline;
@@ -167,6 +170,7 @@
         manager?.dispose();
         manager = createUploadManager(user.id, {onError: message => notify(message, 'error')});
         client.connect(user.id);
+        if (import.meta.env.DEV && import.meta.env.MODE === 'test-page') client.join('lobby');
         void refreshRooms();
     }
 
@@ -291,7 +295,7 @@
             },
         });
         const stopWatching = watchDeployment({
-            buildId: import.meta.env.PROD ? __BUILD_ID__ : null, canReload: () => !manager?.hasPendingFiles() && !desktop.active(),
+            buildId: import.meta.env.PROD ? __BUILD_ID__ : null, canReload: () => !manager?.hasPendingFiles() && !sharingFiles && !desktop.active(),
             onBackendCommit: commit => backendCommit = commit,
         });
         void checkSession();
@@ -531,6 +535,11 @@
                                       onPreparation={value => preparation = value}/>
                         {/if}
                         <Uploads {manager}/>
+                        {#key $realtimeState.selectedRoomId}
+                            {#if room}
+                                <FileDropbox {room} {user} {connected} snapshot={$sharedFiles} bind:busy={sharingFiles}/>
+                            {/if}
+                        {/key}
                         <section class="room-company" aria-label="People in this room">
                             <div class="section-heading">
                                 <h3>
@@ -586,7 +595,7 @@
             {#if editingRoom}
                 <div class="stack-form room-delete">
                     {#if confirmRoomDelete}
-                        <p>Delete “{editingRoom.name}” and its queue? Everyone in this room will return to the room list. This cannot be undone.</p>
+                        <p>Delete “{editingRoom.name}”, its queue and shared files? Everyone in this room will return to the room list. This cannot be undone.</p>
                         <button class="button danger-button" disabled={roomBusy} on:click={deleteRoom}>Confirm delete room</button>
                         <button class="button secondary" disabled={roomBusy} on:click={() => confirmRoomDelete = false}>Cancel</button>
                     {:else}

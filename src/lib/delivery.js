@@ -49,6 +49,17 @@ export function uploadTransferUrl(id, transferUrl, config) {
     throw new DeliveryError('The server supplied an invalid direct upload URL. Pause and try resuming the file.');
 }
 
+export function sharedFileUrl(id, value, config, download = false) {
+    const origin = deliveryOrigin(config);
+    if (typeof id === 'string' && /^[a-z0-9-]+$/i.test(id)) {
+        const suffix = `/files/${encodeURIComponent(id)}${download ? '/download' : ''}`;
+        if (!origin && (download ? value === `/api${suffix}` : value == null)) return `/api${suffix}`;
+        const url = directUrl(value, origin, `/direct${suffix}`);
+        if (url) return url;
+    }
+    throw new DeliveryError('The server supplied an invalid shared file URL.');
+}
+
 export function createDeliveryClient({request = api, origin = () => window.location.origin} = {}) {
     let configPromise;
 

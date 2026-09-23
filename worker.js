@@ -14,7 +14,8 @@ function route(pathname, method) {
   if (/^\/(api|media|ws)(?:\/|$)/i.test(decoded) && decoded !== pathname) return { status: 404 };
   if (/^\/api(?:\/|$)/i.test(pathname)) {
     if (!/^\/api(?:\/|$)/.test(pathname)) return { status: 404 };
-    if (method === 'PUT' && /^\/api\/uploads\/[^/]+\/?$/i.test(pathname)) return { status: 405 };
+    if (method === 'PUT' && /^\/api\/(uploads|files)\/[^/]+\/?$/i.test(pathname)) return { status: 405 };
+    if (/^\/api\/files\/[^/]+\/download\/?$/i.test(pathname)) return { status: 405 };
     return { proxy: true };
   }
   if (/^\/ws(?:\/|$)/i.test(pathname)) return pathname === '/ws' ? { proxy: true } : { status: 404 };

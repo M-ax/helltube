@@ -9,6 +9,16 @@ const jobId = '12345678-1234-4234-8234-123456789abc';
 const segment = `/media/${jobId}/segment-000001.ts`;
 const env = { BARE_METAL_ORIGIN: origin, EDGE_PROXY_SECRET: 'test-edge-secret' };
 
+test('shared-file bytes bypass the Worker while metadata remains proxied', async () => {
+  const h = harness();
+  assert.equal((await h.request('/api/files/abc', {method: 'PUT', body: 'bytes'})).status, 405);
+  assert.equal((await h.request('/api/files/abc/download')).status, 405);
+  assert.equal((await h.request('/direct/files/abc/download?grant=token')).status, 404);
+  assert.equal(h.calls.length, 0);
+  assert.equal((await h.request('/api/rooms/lobby/files')).status, 200);
+  assert.equal(h.calls.length, 1);
+});
+
 test('proxy replaces caller client identity with the Cloudflare visitor address', async () => {
   for (const path of ['/api/login', segment]) {
     const h = harness();
