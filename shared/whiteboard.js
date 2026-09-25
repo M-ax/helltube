@@ -1,4 +1,10 @@
-export const WHITEBOARD_TOOLS = ['pen', 'line', 'arrow', 'rectangle', 'ellipse'];
+export const WHITEBOARD_TOOLS = ['spray', 'pen', 'line', 'arrow', 'rectangle', 'ellipse'];
+export const SPRAY_TIPS = [
+    {id: 'skinny', label: 'Skinny cap', radius: 8, density: 12, aspect: 1, flow: .7},
+    {id: 'fat', label: 'Fat cap', radius: 25, density: 26, aspect: 1, flow: 1.4},
+    {id: 'soft', label: 'Soft cap', radius: 35, density: 14, aspect: 1, flow: .6},
+    {id: 'chisel', label: 'Chisel cap', radius: 24, density: 20, aspect: .23, flow: 1},
+];
 export const WHITEBOARD_COLORS = ['#ffffff', '#ff975e', '#ff657a', '#ffd866', '#80d9a4', '#73c7ff', '#c4a1ff'];
 export const WHITEBOARD_WIDTHS = [2, 4, 8];
 export const WHITEBOARD_BATCH = 32;
@@ -31,7 +37,7 @@ export function reduceWhiteboard(state, message) {
     if (message.action === 'draw' || message.action === 'end') {
         shapes = shapes.map(shape => shape.id !== message.id ? shape : message.action === 'end'
             ? {...shape, complete: true}
-            : {...shape, points: shape.tool === 'pen' ? [...shape.points, ...message.points]
+            : {...shape, points: ['pen', 'spray'].includes(shape.tool) ? [...shape.points, ...message.points]
                 : [shape.points[0], message.points.at(-1)]});
     }
     return {...state, shapes, revision: message.revision};

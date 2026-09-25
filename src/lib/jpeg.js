@@ -30,7 +30,7 @@ export function createJpegCompressor(canvas, viewport) {
         async render(settings) {
             if (destroyed || busy || !input || !output) return;
             const bounds = viewport.getBoundingClientRect();
-            const videos = [...viewport.querySelectorAll('video')].filter(video => {
+            const videos = [...viewport.querySelectorAll('video:not([data-reaction-source])')].filter(video => {
                 const style = getComputedStyle(video);
                 return video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0
                     && style.visibility !== 'hidden' && Number(style.opacity) > 0

@@ -179,6 +179,24 @@ test('multiple users tile and focus independent desktops while preserving indivi
     await playing(viewer, 3);
     assert.equal(await viewer.locator('.desktop-tile.thumbnail').count(), 0);
     await viewer.setViewportSize({width: 1280, height: 720});
+    // Adding video keeps every native desktop player, even while media preparation fails.
+    await viewer.getByRole('button', {name: 'Focus on Sharer 2', exact: true}).click();
+    const addedVideo = makeItem({kind: 'http', url: `${url}/missing-desktop-video.mp4`}, {title: 'Video alongside desktops'});
+    instance.rooms.add(room, [addedVideo]);
+    await until(() => viewer.locator('.desktop-tile.thumbnail').count().then(count => count === 3));
+    assert.equal(room.current.id, addedVideo.id);
+    assert.equal(instance.desktop.sessions.size, 3);
+    assert.equal(await checkBounds(viewer), true);
+    assert.equal(await videos.evaluateAll(videos => videos.every((video, index) =>
+        video === window.focusDesktops[index].video && video.srcObject === window.focusDesktops[index].stream && !video.paused)), true);
+    await viewer.getByRole('button', {name: 'Focus on Sharer 2', exact: true}).click();
+    await checkFocus(secondId);
+    await viewer.getByRole('button', {name: 'Back to video', exact: true}).click();
+    await until(() => viewer.locator('.desktop-tile.thumbnail').count().then(count => count === 3));
+    instance.rooms.advance(room);
+    await playing(viewer, 3);
+    assert.equal(room.current.id, firstId);
+    assert.equal(await viewer.locator('.desktop-tile.thumbnail').count(), 0);
     const playbackBeforeReactions = await videos.evaluateAll(videos => {
         window.desktopInputEvents = [];
         for (const video of videos) for (const type of ['pointerdown', 'click', 'keydown']) {
@@ -207,7 +225,7 @@ test('multiple users tile and focus independent desktops while preserving indivi
             await until(() => viewer.locator('.pointing-fingers').getAttribute('data-local-x').then(x => x !== null && x !== ''));
             await viewer.keyboard.press('Escape');
         } else if (name === 'Beach ball') await reaction.click();
-        else await until(() => viewer.locator('.hitmarker-target').count().then(count => count === 0));
+        else await viewer.keyboard.press('Escape');
         await until(() => videos.evaluateAll(videos => videos.every(video => !video.inert && video.controls &&
             getComputedStyle(video).pointerEvents !== 'none')));
     }
@@ -277,7 +295,7 @@ test('multiple users tile and focus independent desktops while preserving indivi
     await until(() => instance.desktop.sessions.size === 0 && room.current === null);
     await until(() => viewer.locator('.desktop-tile').count().then(count => count === 0));
     assert.deepEqual(room.desktops, []);
-    assert.equal(room.history.length, 0);
+    assert.deepEqual(room.history, [addedVideo]);
     assert.deepEqual((await instance.desktop.relay.webRtcServer.dump()).webRtcTransportIds, []);
     assert.deepEqual(errors, []);
 });
@@ -461,6 +479,10 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
             throw error;
         });
     assert.equal(await viewer.locator('video').evaluate(video => video.srcObject instanceof MediaStream && !video.getAttribute('src')), true);
+    assert.equal(await viewer.locator('video').evaluate(video => video.muted), true,
+        'A desktop shared by this account starts muted in another browser session');
+    await viewer.locator('video').evaluate(video => { video.muted = false; });
+    await until(() => viewer.locator('video').evaluate(video => !video.muted));
     assert.deepEqual(await sender.evaluate(() => {
         const {maxBitrate, maxFramerate} = window.desktopPeers.find(peer => peer.connectionState !== 'closed').getSenders()
             .find(sender => sender.track?.kind === 'video').getParameters().encodings[0];
@@ -688,7 +710,7 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
 }
 }
 
-test('desktop WebRTC interrupts HLS and returns both viewers to the saved video position', {timeout: 60000}, async t => {
+test('desktop WebRTC resumes HLS and survives added video without replacing streams', {timeout: 90000}, async t => {
     const {instance, url, dir} = await start(t);
     const sample = path.join(dir, 'desktop-resume.mp4');
     await promisify(execFile)(instance.media.config.ffmpeg, ['-v', 'error', '-y', '-f', 'lavfi', '-i',
@@ -732,6 +754,50 @@ test('desktop WebRTC interrupts HLS and returns both viewers to the saved video 
             video.readyState >= 2 && !video.paused && video.currentTime >= resume - 0.75, resumeAt));
         assert.equal(await page.getByRole('button', {name: 'Pause for everyone'}).isDisabled(), false);
     }
+    await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
+    await sender.getByRole('button', {name: 'Choose screen to share'}).click();
+    await until(() => viewer.locator('.desktop-tile video').evaluate(video => video.srcObject && video.readyState >= 2 && !video.paused));
+    await viewer.locator('.desktop-tile video').evaluate(video => {
+        video.muted = true;
+        window.concurrentDesktop = {video, stream: video.srcObject};
+    });
+    const session = [...instance.desktop.sessions.values()][0];
+    const added = makeItem({...item.source}, {title: 'Added during sharing', duration: 45});
+    instance.rooms.add(room, [added], 0);
+    assert.equal(room.current.id, added.id);
+    for (const page of [sender, viewer]) {
+        await until(() => page.locator('.video-viewport > video').evaluate(video => video.readyState >= 2 && !video.paused));
+        assert.equal(await page.locator('.desktop-tile.thumbnail').count(), 1);
+    }
+    const checkConcurrent = async () => {
+        assert.equal(await viewer.locator('.desktop-tile video').evaluate(video =>
+            video === window.concurrentDesktop.video && video.srcObject === window.concurrentDesktop.stream &&
+            !video.paused && video.muted && video.srcObject.getTracks().every(track => track.readyState === 'live')), true);
+        assert.equal(await viewer.locator('.video-viewport').evaluate(viewport => {
+            const main = viewport.querySelector(':scope > video').getBoundingClientRect();
+            const thumb = viewport.querySelector('.desktop-tile').getBoundingClientRect();
+            const controls = viewport.querySelector('.player-controls').getBoundingClientRect();
+            return main.width > 0 && main.height > 0 && thumb.width > 0 && thumb.height > 0 &&
+                thumb.top >= main.bottom && thumb.bottom <= controls.top + 1;
+        }), true, 'The ongoing desktop occupies a separate row below video and above controls');
+    };
+    await checkConcurrent();
+    await viewer.setViewportSize({width: 390, height: 844});
+    await checkConcurrent();
+    await viewer.getByRole('button', {name: 'Toggle fullscreen'}).click();
+    await until(() => viewer.evaluate(() => !!document.fullscreenElement));
+    await checkConcurrent();
+    await viewer.evaluate(() => document.exitFullscreen());
+    await viewer.getByRole('button', {name: /^Focus on /}).click();
+    await viewer.getByRole('button', {name: 'Back to video'}).click();
+    await checkConcurrent();
+    assert.equal(session.router.closed, false);
+    const revision = room.playback.revision;
+    await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
+    await until(() => room.desktops.length === 0);
+    assert.equal(room.current.id, added.id, 'Stopping the last desktop does not skip the video');
+    assert.equal(room.playback.revision, revision);
+    await until(() => viewer.locator('.desktop-tile').count().then(count => count === 0));
     assert.equal(room.history.some(item => item.kind === 'desktop'), false);
     assert.deepEqual(errors, []);
 });

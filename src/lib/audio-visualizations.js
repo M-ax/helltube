@@ -95,29 +95,29 @@ export function createAudioAnalysis() {
             if (!video || !await ready(gesture)) return null;
             return mediaSource(video).analyser;
         },
-        async bassBoost(video, enabled, gesture = false) {
+        async bassBoost(video, enabled, gesture = false, wacko = false) {
             if (!video || destroyed) return false;
             const request = {};
             effectRequests.set(video, request);
-            if (!enabled) {
+            if (!enabled && !wacko) {
                 sources.get(video)?.effect?.set(false, video.volume);
                 return false;
             }
             if (!await ready(gesture) || effectRequests.get(video) !== request) return false;
             const audio = mediaSource(video);
             audio.effect ||= createBassBoost(context, audio.source);
-            audio.effect.set(true, video.muted ? 0 : video.volume);
+            audio.effect.set(wacko ? 'wacko' : true, video.muted ? 0 : video.volume);
             return true;
         },
         async sampleStream(stream, gesture = false) {
             if (!stream?.getAudioTracks().length || !await ready(gesture)) return null;
             return streamSource(stream).analyser;
         },
-        async boostStream(stream, enabled, gesture = false) {
+        async boostStream(stream, enabled, gesture = false, wacko = false) {
             if (!stream || destroyed) return stream;
             const request = {};
             effectRequests.set(stream, request);
-            if (!enabled) {
+            if (!enabled && !wacko) {
                 const audio = streams.get(stream);
                 audio?.syncVideo?.();
                 audio?.effect?.set(false, 1);
@@ -148,7 +148,7 @@ export function createAudioAnalysis() {
                 stream.addEventListener('removetrack', audio.syncVideo);
             }
             audio.syncVideo();
-            audio.effect.set(true, 1);
+            audio.effect.set(wacko ? 'wacko' : true, 1);
             return audio.processed;
         },
         releaseStream,

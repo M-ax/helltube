@@ -179,7 +179,7 @@ test('a viewer watches several desktops and reconnects or stops one without affe
     assert.equal(h.room.history.length, 0);
 });
 
-test('skipping multiple desktops stops every publisher and resumes the queue exactly once', async t => {
+test('skipping to queued video preserves every desktop and resumes the queue exactly once', async t => {
     const h = fixture(t);
     const videos = [1, 2].map(() => makeItem({kind: 'http', url: 'https://example.com/video.mp4'}));
     h.rooms.add(h.room, videos);
@@ -187,11 +187,67 @@ test('skipping multiple desktops stops every publisher and resumes the queue exa
     await h.desktop.start(h.room, {id: 'second-sender'}, h.user, request);
     const sessions = [...h.desktop.sessions.values()];
     h.rooms.control(h.room, {action: 'skip', revision: h.room.playback.revision});
-    assert.equal(h.desktop.sessions.size, 0);
+    assert.equal(h.desktop.sessions.size, 2);
     assert.equal(h.room.current.id, videos[0].id);
     assert.deepEqual(h.room.queue.map(item => item.id), [videos[1].id]);
+    assert.deepEqual(h.room.desktops, sessions.map(session => session.item));
+    assert.ok(sessions.every(session => !session.router.closed && !session.publisher.transport.closed));
+});
+
+test('adding videos keeps desktop publishers and subscribers through playback and queue exhaustion', async t => {
+    const h = fixture(t);
+    const {session} = await publish(h);
+    const viewer = {id: 'viewer'};
+    await h.desktop.watch(h.room, viewer, {itemId: session.item.id, requestId: 'watch'});
+    const subscription = [...session.viewers.values()][0];
+    await h.desktop.start(h.room, {id: 'second-sender'}, h.user, request);
+    const shares = [...h.room.desktops];
+    const videos = [1, 2].map(() => makeItem({kind: 'http', url: 'https://example.com/video.mp4'}, {
+        duration: 10, status: 'ready', media: {baseTime: 0, bufferedUntil: 10, complete: true},
+    }));
+    h.rooms.add(h.room, videos);
+    assert.equal(h.room.current, videos[0]);
+    assert.deepEqual(h.room.desktops, shares);
+    assert.equal(h.room.history.length, 0);
+    h.rooms.tick();
+    assert.equal(h.room.playback.paused, false);
+    h.advance(11000);
+    h.rooms.tick();
+    assert.equal(h.room.current, videos[1]);
+    assert.equal(h.desktop.sessions.size, 2);
+    assert.equal(subscription.transport.closed, false);
+    assert.equal(session.router.closed, false);
+    h.rooms.control(h.room, {action: 'skip', revision: h.room.playback.revision});
+    assert.equal(h.room.current, shares[0]);
+    assert.equal(h.room.playback.paused, false);
+    assert.deepEqual(h.room.history, [videos[1], videos[0]]);
+    assert.deepEqual(h.room.desktops, shares);
+    assert.equal(subscription.transport.closed, false);
+    h.rooms.control(h.room, {action: 'skip', revision: h.room.playback.revision});
+    assert.equal(h.room.current, null);
+    assert.equal(h.desktop.sessions.size, 0);
+});
+
+test('starting and stopping additional desktops leaves concurrent video playback unchanged', async t => {
+    const h = fixture(t);
+    await publish(h);
+    const videos = [1, 2].map(() => makeItem({kind: 'http', url: 'https://example.com/video.mp4'}));
+    h.rooms.add(h.room, videos);
+    h.rooms.stamp(h.room, 7, true);
+    const playback = {...h.room.playback};
+    h.rooms.maxQueue = 1;
+    const secondSender = {id: 'second-sender'};
+    await h.desktop.start(h.room, secondSender, h.user, request);
+    assert.equal(h.room.current, videos[0]);
+    assert.deepEqual(h.room.queue, [videos[1]]);
+    assert.deepEqual(h.room.playback, playback);
+    h.desktop.stop(h.ws);
+    h.desktop.stop(secondSender);
+    assert.equal(h.room.current, videos[0]);
+    assert.deepEqual(h.room.playback, playback);
+    assert.deepEqual(h.room.queue, [videos[1]]);
     assert.deepEqual(h.room.desktops, []);
-    assert.ok(sessions.every(session => session.router.closed && session.publisher.transport.closed));
+    assert.deepEqual(h.room.history, []);
 });
 
 test('capture persists only the interrupted video and unready publishers time out', async t => {

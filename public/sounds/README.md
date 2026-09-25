@@ -60,3 +60,9 @@ normalized clip retains headroom at full viewer volume.
 Live frames are JPEG-encoded locally at progressively lower quality and resolution
 during the same six-second timeline; normal video returns when it ends. No video is uploaded or transcoded
 on the server. Repeated triggers replace the active effect and voice.
+
+`intervention.mp3` contains the original shot and bolt sounds from the
+[MW2 green-screen clip](https://www.youtube.com/watch?v=wJ_Igr3Y0Os),
+normalized to -18 LUFS / -2 dBTP and encoded as mono 96 kbps MP3.
+It follows the MLG overlay after its 600 ms entrance, at 80% of viewer volume.
+Spray paint uses a locally synthesized high-frequency aerosol hiss, with no asset downloads.

@@ -366,19 +366,17 @@ test('two browsers share positioned reactions, audio, cursor physics and late-jo
     const rendered = await b.locator('[data-reaction="hitmarker"]').evaluate(node => ({left: parseFloat(node.style.left), top: parseFloat(node.style.top)}));
     assert.ok(Math.abs(rendered.left - 31) < .5 && Math.abs(rendered.top - 28) < .5);
     await until(async () => await a.evaluate(() => window.reactionSounds) === 1 && await b.evaluate(() => window.reactionSounds) === 1);
-    assert.equal(await marker.getAttribute('aria-pressed'), 'false');
+    assert.equal(await marker.getAttribute('aria-pressed'), 'true', 'The hit marker stays armed for repeated placements.');
     await a.screenshot({path: 'test-artifacts/reactions-desktop.png', fullPage: true});
     await until(async () => await b.locator('[data-reaction="hitmarker"]').count() === 0);
 
     await b.getByRole('button', {name: 'Mute reaction sounds', exact: true}).click();
-    await marker.click();
     await target.press('ArrowRight');
     await target.press('Enter');
     await until(async () => await a.evaluate(() => window.reactionSounds) === 2);
     assert.equal(await b.evaluate(() => window.reactionSounds), 1, 'Sound mute is local.');
     const keyboardHit = messages.get(b).filter(message => message.type === 'reaction' && message.kind === 'hitmarker').at(-1);
     assert.equal(keyboardHit.x, .53);
-    await marker.click();
     await target.press('Escape');
     assert.equal(await target.count(), 0);
     for (const [label, kind] of [['Love', 'heart'], ['Laugh', 'laugh'], ['Applause', 'clap']]) {

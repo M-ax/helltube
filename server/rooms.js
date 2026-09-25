@@ -160,16 +160,17 @@ export class Rooms extends EventEmitter {
     if (room.queue.length + items.length > this.maxQueue) throw httpError(409, 'The room queue is full.');
     const draft = { ...room, queue: [...room.queue], version: room.version + 1 };
     draft.queue.splice(insertAt, 0, ...items);
-    const starting = !room.current;
+    const starting = !room.current || room.current.kind === 'desktop';
     if (starting) {
       draft.current = draft.queue.shift();
       draft.resumeWhenReady = true;
-      this.stamp(draft, sponsorPosition(draft.current, draft.current.startAt || 0), true);
+      this.stamp(draft, sponsorPosition(draft.current, draft.current.resumeAt ?? draft.current.startAt ?? 0), true);
     }
     const save = () => { persistItems(); this.persist(draft); };
     if (this.store) this.store.transaction(save);
     else save();
     Object.assign(room, draft);
+    if (starting) delete room.current.resumeAt;
     if (starting && (room.current.source.startAt || 0) !== room.playback.position) {
       this.emit('seek', room, room.playback.position);
     }
@@ -180,13 +181,15 @@ export class Rooms extends EventEmitter {
 
   advance(room) {
     if (room.automation) { this.emit('automation:advance', room, 'skip'); return; }
-    // Consecutive Spotify entries share one VM capture and the same subscriptions.
-    room.desktops = this.spotifyDesktopEnabled && room.current?.kind === 'spotify' && room.queue[0]?.kind === 'spotify'
-      ? room.desktops.filter(item => item.provider === 'spotify') : [];
+    // User captures survive video changes. Skip ends them only from an empty desktop-only queue.
+    const stopDesktops = room.current?.kind === 'desktop' && !room.queue.length;
+    const keepSpotify = this.spotifyDesktopEnabled && room.current?.kind === 'spotify' && room.queue[0]?.kind === 'spotify';
+    room.desktops = room.desktops.filter(item => item.provider === 'spotify' ? keepSpotify : !stopDesktops);
     if (room.current && room.current.kind !== 'desktop') room.history = [room.current, ...room.history.filter(i => i.id !== room.current.id)].slice(0, 5);
-    room.current = room.queue.shift() || null;
-    room.resumeWhenReady = !!room.current;
-    this.stamp(room, sponsorPosition(room.current, room.current?.resumeAt ?? room.current?.startAt ?? 0), true);
+    room.current = room.queue.shift() || room.desktops[0] || null;
+    const live = room.current?.kind === 'desktop';
+    room.resumeWhenReady = !!room.current && !live;
+    this.stamp(room, sponsorPosition(room.current, room.current?.resumeAt ?? room.current?.startAt ?? 0), !live);
     if (room.current) delete room.current.resumeAt;
     if (room.current && (room.current.source.startAt || 0) !== room.playback.position) {
       this.emit('seek', room, room.playback.position);

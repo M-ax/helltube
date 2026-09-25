@@ -4,6 +4,7 @@
     import {waitForDesktopFrame} from '../lib/desktop-video-ready.js';
 
     export let item;
+    export let userId = null;
     export let playback = null;
     export let connected = false;
     export let volume = 0.8;
@@ -11,11 +12,13 @@
     export let captureMuted = false;
     export let audioAnalysis;
     export let bassBoost = false;
+    export let wacko = false;
     export let inputDisabled = false;
     export let visualized = false;
     export let nativeControls = true;
     export let focusAvailable = false;
     export let focused = false;
+    export let unfocusLabel = 'Show all desktops';
     export let thumbnail = false;
     export let onFocus;
     export let videoRequested = false;
@@ -36,13 +39,14 @@
     let originalAudioStream = null;
     let audioGeneration = 0;
     let hidden = false;
-    let individuallyMuted = false;
+    // Apply ownership only as the initial preference so native unmute stays available.
+    let individuallyMuted = !!userId && item.sharedBy === userId;
     let appliedMuted = false;
 
     $: forcedMute = captureMuted || !!playback?.local;
     $: if (video) video.volume = volume;
     $: if (video) applyMute(video, muted || forcedMute, individuallyMuted);
-    $: updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !hidden, audioAnalysis);
+    $: updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !hidden, audioAnalysis, false, wacko && connected && !forcedMute && !hidden);
     $: renderedStream = boostedStream && boostedStream.original === playback?.stream ? boostedStream.stream : playback?.stream;
 
     function applyMute(node, masterMuted, streamMuted) {
@@ -62,7 +66,7 @@
         appliedMuted = video.muted;
     }
 
-    async function updateBassBoost(stream, enabled, analysis, gesture = false) {
+    async function updateBassBoost(stream, enabled, analysis, gesture = false, warp = false) {
         const version = ++audioGeneration;
         if (stream !== originalAudioStream) {
             analysis?.releaseStream(originalAudioStream);
@@ -71,14 +75,14 @@
         }
         if (!stream || !analysis) return;
         try {
-            const processed = await analysis.boostStream(stream, enabled, gesture);
+            const processed = await analysis.boostStream(stream, enabled, gesture, warp);
             if (version === audioGeneration) boostedStream = {original: stream, stream: processed};
         } catch { /* Keep native desktop playback when Web Audio is unavailable. */ }
     }
 
     onMount(() => {
         const visibility = () => hidden = document.hidden;
-        const gesture = () => void updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !document.hidden, audioAnalysis, true);
+        const gesture = () => void updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !document.hidden, audioAnalysis, true, wacko && connected && !forcedMute && !document.hidden);
         document.addEventListener('visibilitychange', visibility);
         document.addEventListener('pointerdown', gesture);
         document.addEventListener('keydown', gesture);
@@ -176,10 +180,10 @@
         <span class="desktop-name" title={item.title}>{item.addedBy || item.title}{playback?.local ? ' (you)' : ''}</span>
         {#if focusAvailable}
             <button class="desktop-focus" type="button" disabled={inputDisabled}
-                    aria-label={focused ? 'Show all desktops' : `Focus on ${item.addedBy || item.title}`}
-                    title={focused ? 'Show all desktops' : `Focus on ${item.addedBy || item.title}`}
+                    aria-label={focused ? unfocusLabel : `Focus on ${item.addedBy || item.title}`}
+                    title={focused ? unfocusLabel : `Focus on ${item.addedBy || item.title}`}
                     on:click={() => onFocus?.(focused ? null : item.id)}>
-                <span>{focused ? 'Show all desktops' : thumbnail ? item.addedBy || item.title : `Focus on ${item.addedBy || item.title}`}</span>
+                <span>{focused ? unfocusLabel : thumbnail ? item.addedBy || item.title : `Focus on ${item.addedBy || item.title}`}</span>
             </button>
         {/if}
         {#if nativeControls && !thumbnail}<button class="icon-button desktop-fullscreen" type="button"
@@ -246,7 +250,6 @@
         min-width: 0;
         max-width: 65%;
         min-height: 30px;
-        margin-left: auto;
         padding: 5px 8px;
         border: 1px solid #ffffff38;
         border-radius: 4px;
@@ -281,7 +284,6 @@
     .desktop-tile::backdrop { background: #050506; }
     .desktop-fullscreen {
         flex: 0 0 30px;
-        margin-left: auto;
         width: 30px;
         height: 30px;
         background: #000b;
@@ -299,6 +301,7 @@
     }
     .desktop-name {
         min-width: 0;
+        margin-right: auto;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;

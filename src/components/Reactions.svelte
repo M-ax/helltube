@@ -61,6 +61,10 @@
             <img class="biden-icon" src="/images/joe-biden-walking.png" alt="" width="17" height="27"
                  loading="lazy" decoding="async" fetchpriority="low"/>Joe wander
         </button>
+        <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('contentaware')}
+                title="Five seconds of content-aware squishing and wacko audio"><span aria-hidden="true">↔</span>Content aware</button>
+        <button type="button" class="reaction-button" disabled={!connected || !enabled} on:click={() => onReact('mlg')}
+                title="Bring up the MW2 Intervention and quickscope"><span aria-hidden="true">⌖</span>MLG Intervention</button>
         <button type="button" class="reaction-button jpeg-button" disabled={!connected || !enabled} on:click={() => onReact('jpeg')}
                 title="Hank Hill destroys the picture quality while he asks about JPEGs">
             <span class="jpeg-icon" aria-hidden="true">JPG</span><span>do i look like i know what a jpeg is</span>
@@ -80,7 +84,7 @@
     <p class="reaction-help" role="status">{!enabled ? 'Reactions are off on this device.' : !connected ? 'Reconnect to send reactions.' : whiteboardOpen
         ? 'Draw on the picture. Reopen tools from the edge tab; Escape finishes drawing. Everyone sees your marks.' : fingerArmed
         ? 'Point at the picture. Click to tap; hold and move to slide on the glass. Escape puts it away.' : armed
-        ? 'Click anywhere on the picture to place a hit marker. Escape cancels.'
+        ? 'Click repeatedly to place hit markers. Click MW2 hit marker again or press Escape to stop.'
         : beachBall ? 'Move your cursor into the ball to bump it. Everyone can play.'
         : 'React to the moment, or bring out a ball for the room.'}</p>
 </section>

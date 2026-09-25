@@ -24,11 +24,15 @@ export function createBassBoost(context, source, destination = context.destinati
     source.connect(dry);
     source.connect(bass);
     source.disconnect(destination);
+    let wacko;
     let active = false;
     let level = 0;
     return {
         set(enabled, volume) {
-            const next = enabled ? BASS_BOOST_OUTPUT_GAIN * Math.min(1, Math.max(0, volume)) : 0;
+            const mode = enabled === 'wacko';
+            if (mode) wacko ||= createWacko(context, source, destination);
+            wacko?.set(mode, volume);
+            const next = enabled && !mode ? BASS_BOOST_OUTPUT_GAIN * Math.min(1, Math.max(0, volume)) : 0;
             if (active === enabled && level === next) return;
             active = enabled;
             level = next;
@@ -37,6 +41,7 @@ export function createBassBoost(context, source, destination = context.destinati
             output.gain.setTargetAtTime(next, context.currentTime, .012);
         },
         destroy() {
+            wacko?.destroy();
             source.disconnect(dry);
             source.disconnect(bass);
             for (const node of [dry, bass, distortion, output]) node.disconnect();
@@ -49,7 +54,7 @@ export function createBassBoost(context, source, destination = context.destinati
 export function processBassBoost(node, initial) {
     let options = initial;
     function apply(gesture = false) {
-        void options.analysis?.bassBoost(node, options.enabled && !document.hidden, gesture).catch(() => {});
+        void options.analysis?.bassBoost(node, options.enabled && !document.hidden, gesture, options.wacko && !document.hidden).catch(() => {});
     }
     const gesture = () => apply(true);
     const volume = () => apply();
@@ -66,6 +71,38 @@ export function processBassBoost(node, initial) {
             document.removeEventListener('keydown', gesture);
             document.removeEventListener('visibilitychange', volume);
             options.analysis?.release(node);
+        },
+    };
+}
+
+// A modulated delay bends pitch continuously, with ring modulation and soft
+// saturation for the familiar rubbery content-aware meme sound.
+export function createWacko(context, source, destination = context.destination) {
+    const delay = context.createDelay(.1);
+    const lfo = context.createOscillator();
+    const depth = context.createGain();
+    const ring = context.createGain();
+    const carrier = context.createOscillator();
+    const ringDepth = context.createGain();
+    const shaper = context.createWaveShaper();
+    const output = context.createGain();
+    delay.delayTime.value = .03;
+    lfo.frequency.value = 5.3;
+    depth.gain.value = .023;
+    ring.gain.value = .65;
+    carrier.frequency.value = 31;
+    ringDepth.gain.value = .35;
+    shaper.curve = Float32Array.from({length: 2049}, (_, i) => Math.tanh((i / 1024 - 1) * 2));
+    output.gain.value = 0;
+    lfo.connect(depth).connect(delay.delayTime);
+    carrier.connect(ringDepth).connect(ring.gain);
+    source.connect(delay).connect(ring).connect(shaper).connect(output).connect(destination);
+    lfo.start(); carrier.start();
+    return {
+        set(enabled, volume) { output.gain.setTargetAtTime(enabled ? .55 * Math.min(1, Math.max(0, volume)) : 0, context.currentTime, .015); },
+        destroy() {
+            lfo.stop(); carrier.stop(); source.disconnect(delay);
+            for (const node of [delay, lfo, depth, ring, carrier, ringDepth, shaper, output]) node.disconnect();
         },
     };
 }

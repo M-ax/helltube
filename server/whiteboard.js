@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {httpError} from './config.js';
-import {WHITEBOARD_TOOLS, WHITEBOARD_COLORS, WHITEBOARD_WIDTHS, WHITEBOARD_BATCH,
+import {WHITEBOARD_TOOLS, SPRAY_TIPS, WHITEBOARD_COLORS, WHITEBOARD_WIDTHS, WHITEBOARD_BATCH,
     WHITEBOARD_MAX_POINTS, WHITEBOARD_MAX_SHAPES, WHITEBOARD_ROOM_POINTS,
     validWhiteboardPoint, whiteboardPoint} from '../shared/whiteboard.js';
 
@@ -54,6 +54,7 @@ export class Whiteboards {
         if (action === 'begin') {
             if (typeof id !== 'string' || !/^[\w-]{1,64}$/.test(id)
                 || !WHITEBOARD_TOOLS.includes(message.tool) || !WHITEBOARD_COLORS.includes(message.color)
+                || (message.tool === 'spray' && !SPRAY_TIPS.some(tip => tip.id === message.tip))
                 || !WHITEBOARD_WIDTHS.includes(message.width) || !validWhiteboardPoint(message.point)) {
                 throw httpError(400, 'Invalid whiteboard drawing.');
             }
@@ -63,6 +64,7 @@ export class Whiteboards {
             const removed = this.makeSpace(state, 1, true);
             const shape = {id, clientId, userId: user.id, author: user.displayName || user.username,
                 tool: message.tool, color: message.color, width: message.width,
+                ...(message.tool === 'spray' ? {tip: message.tip} : {}),
                 points: [whiteboardPoint(message.point)], complete: false};
             state.shapes.set(id, shape);
             this.publish(roomId, state, {action, shape, removed});
@@ -79,13 +81,13 @@ export class Whiteboards {
             }
             if (!Array.isArray(message.points) || !message.points.length || message.points.length > WHITEBOARD_BATCH
                 || !message.points.every(validWhiteboardPoint)
-                || (shape.tool === 'pen' && shape.points.length + message.points.length > WHITEBOARD_MAX_POINTS)) {
+                || (['pen', 'spray'].includes(shape.tool) && shape.points.length + message.points.length > WHITEBOARD_MAX_POINTS)) {
                 throw httpError(400, 'Invalid whiteboard points.');
             }
             const points = message.points.map(whiteboardPoint);
-            const extra = shape.tool === 'pen' ? points.length : Number(shape.points.length === 1);
+            const extra = ['pen', 'spray'].includes(shape.tool) ? points.length : Number(shape.points.length === 1);
             const removed = this.makeSpace(state, extra);
-            shape.points = shape.tool === 'pen' ? [...shape.points, ...points] : [shape.points[0], points.at(-1)];
+            shape.points = ['pen', 'spray'].includes(shape.tool) ? [...shape.points, ...points] : [shape.points[0], points.at(-1)];
             this.publish(roomId, state, {action, id, points, removed});
         } else if (action === 'erase' || action === 'undo') {
             if (action === 'erase' && (!Array.isArray(message.ids) || message.ids.length > WHITEBOARD_BATCH

@@ -1,10 +1,14 @@
 <script>
-    import {onDestroy} from 'svelte';
+    import {onMount, onDestroy} from 'svelte';
     import Icon from './Icon.svelte';
-    import {WHITEBOARD_COLORS, WHITEBOARD_WIDTHS, WHITEBOARD_BATCH, WHITEBOARD_MAX_POINTS,
+    import {SPRAY_TIPS, WHITEBOARD_COLORS, WHITEBOARD_WIDTHS, WHITEBOARD_BATCH, WHITEBOARD_MAX_POINTS,
         WHITEBOARD_INTERVAL, emptyWhiteboard, whiteboardPoint} from '../../shared/whiteboard.js';
     import {whiteboardPath} from '../lib/whiteboard.js';
 
+    import {sprayGeometry} from '../lib/spray.js';
+
+    export let onSpray = () => {};
+    export let onUnlock = () => {};
     export let board = emptyWhiteboard();
     export let roomId = null;
     export let userId = null;
@@ -16,10 +20,15 @@
     export let controlsHeight = 71;
     export let onCommand;
 
-    const tools = [['pen', 'Pen'], ['line', 'Line'], ['arrow', 'Arrow'],
+    const tools = [['spray', 'Spray paint'], ['pen', 'Pen'], ['line', 'Line'], ['arrow', 'Arrow'],
         ['rectangle', 'Rectangle'], ['ellipse', 'Circle'], ['eraser', 'Eraser']];
     const colorNames = ['White', 'Orange', 'Pink', 'Yellow', 'Green', 'Blue', 'Purple'];
     let tool = 'pen';
+    let sprayTip = 'fat';
+    let cursor = null;
+    let sprayTimer;
+    let sprayPoint;
+    const sprayActivity = new Map();
     let color = WHITEBOARD_COLORS[1];
     let strokeWidth = 4;
     let svg;
@@ -124,6 +133,7 @@
         pointerId = null;
         if (id !== null && svg?.hasPointerCapture(id)) svg.releasePointerCapture(id);
         previousErase = null;
+        clearInterval(sprayTimer); sprayTimer = null;
     }
 
     function reconcile(state, online) {
@@ -199,18 +209,25 @@
         const point = pointAt(event);
         if (tool === 'eraser') { eraseAt(point); return; }
         activeId = globalThis.crypto?.randomUUID?.() || `mark-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-        const shape = {id: activeId, userId, tool, color, width: strokeWidth, points: [point], complete: false};
-        if (!send('begin', {id: activeId, tool, color, width: strokeWidth, point})) { activeId = null; release(); return; }
+        const shape = {id: activeId, userId, tool, color, width: strokeWidth, tip: sprayTip, points: [point], complete: false};
+        if (!send('begin', {id: activeId, tool, color, width: strokeWidth, point, ...(tool === 'spray' ? {tip: sprayTip} : {})})) { activeId = null; release(); return; }
         localShapes = [...localShapes, shape];
+        if (tool === 'spray') {
+            onUnlock();
+            sprayPoint = point; cursor = point;
+            sprayTimer = setInterval(sprayTick, WHITEBOARD_INTERVAL);
+        }
     }
 
     function move(event) {
+        if (open && tool === 'spray') cursor = pointAt(event);
         if (pointerId !== event.pointerId || !open || !ready) return;
         event.preventDefault(); event.stopPropagation();
         const point = pointAt(event);
         if (tool === 'eraser') { eraseAt(point); return; }
         const shape = localShapes.find(value => value.id === activeId);
         if (!shape) return;
+        if (shape.tool === 'spray') { sprayPoint = point; return; }
         const previous = shape.points.at(-1);
         if (Math.hypot((point[0] - previous[0]) * width, (point[1] - previous[1]) * height) < 1) return;
         if (shape.tool === 'pen' && shape.points.length >= WHITEBOARD_MAX_POINTS) { finish(); return; }
@@ -220,6 +237,15 @@
         else pendingPoints = [point];
         if (pendingPoints.length >= WHITEBOARD_BATCH) flush();
         else schedule();
+    }
+
+    function sprayTick() {
+        const shape = localShapes.find(value => value.id === activeId);
+        if (!shape || !open || !ready || document.hidden) { finish(); return; }
+        if (shape.points.length >= WHITEBOARD_MAX_POINTS) { finish(); return; }
+        localShapes = localShapes.map(value => value.id === activeId ? {...value, points: [...value.points, sprayPoint]} : value);
+        pendingPoints.push(sprayPoint);
+        flush();
     }
 
     function end(event) {
@@ -260,6 +286,26 @@
         }
     }
 
+    onMount(() => {
+        const soundTimer = setInterval(() => {
+            const now = performance.now();
+            let active = 0;
+            const ids = new Set();
+            for (const shape of shapes) {
+                if (shape.tool !== 'spray' || shape.complete) continue;
+                ids.add(shape.id);
+                const previous = sprayActivity.get(shape.id);
+                // The first snapshot establishes a baseline: never replay old spray sounds on join.
+                if (!previous) sprayActivity.set(shape.id, {count: shape.points.length, at: -Infinity});
+                else if (previous.count !== shape.points.length) sprayActivity.set(shape.id, {count: shape.points.length, at: now});
+                if (now - sprayActivity.get(shape.id).at < 180) active++;
+            }
+            for (const id of sprayActivity.keys()) if (!ids.has(id)) sprayActivity.delete(id);
+            onSpray(enabled && ready && !document.hidden ? Math.min(3, active) : 0);
+        }, 40);
+        return () => { clearInterval(soundTimer); onSpray(0); };
+    });
+
     onDestroy(() => { finish(); clearTimeout(timer); clearTimeout(panelTimer); });
 </script>
 
@@ -269,23 +315,58 @@
 {#if enabled}
     <div class="whiteboard-layer-mount">
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Drawing uses a pointer; tools and undo are keyboard accessible.) -->
-    <svg class="whiteboard-canvas" class:drawing={open && ready} class:erasing={tool === 'eraser'}
+    <svg class="whiteboard-canvas" class:drawing={open && ready} class:spraying={tool === 'spray'} class:erasing={tool === 'eraser'}
          bind:this={svg} bind:clientWidth={width} bind:clientHeight={height}
          use:drawingLayer={viewport}
          viewBox={`0 0 ${width || 960} ${height || 540}`} role="img" aria-label="Shared whiteboard" tabindex="-1"
+         on:pointerleave={() => { if (pointerId === null) cursor = null; }}
          on:pointerdown={begin} on:pointermove={move} on:pointerup={end} on:pointercancel={end} on:lostpointercapture={end}>
         {#if ready}
             {#each shapes as shape (shape.id)}
                 <g data-whiteboard-id={shape.id} data-tool={shape.tool} data-complete={shape.complete}>
                     <title>{shape.author || 'You'} · {shape.tool}</title>
+                    {#if shape.tool === 'spray'}
+                        {@const paint = sprayGeometry(shape)}
+                        <g transform={`scale(${width / 960} ${height / 540})`}>
+                            <path d={paint.haze} stroke={shape.color} stroke-width={paint.radius * 1.1 * paint.aspect} opacity=".035" fill="none" stroke-linecap="round"/>
+                            <path d={paint.dots} stroke={shape.color} stroke-width="1" opacity=".45" fill="none" stroke-linecap="round"/>
+                            {#each paint.drips as drop}
+                                <ellipse cx={drop.x} cy={drop.y} rx={paint.radius * .45} ry={paint.radius * .45 * paint.aspect}
+                                         fill={shape.color} opacity={Math.min(.7, drop.length / 120)}/>
+                                <ellipse cx={drop.x} cy={drop.y} rx={paint.radius * .28} ry={paint.radius * .28 * paint.aspect}
+                                         fill={shape.color} opacity={Math.min(.6, drop.length / 100)}/>
+                                <path data-spray-drip d={`M${drop.x} ${drop.y}v${drop.length}`} stroke={shape.color} stroke-width={drop.width} stroke-linecap="round"/>
+                                <ellipse cx={drop.x} cy={drop.y + drop.length} rx={drop.width * .72} ry={drop.width} fill={shape.color}/>
+                            {/each}
+                        </g>
+                    {:else}
                     <path d={whiteboardPath(shape, width, height)} stroke={shape.color} stroke-width={shape.width}
                           fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                    {/if}
                     {#if open && tool === 'eraser'}
+                        {#if shape.tool === 'spray'}
+                            {#each sprayGeometry(shape).drips as drop}
+                                <path data-hit-id={shape.id} d={`M${drop.x * width / 960} ${drop.y * height / 540}v${drop.length * height / 540}`}
+                                      stroke="transparent" stroke-width={Math.max(20, drop.width * width / 960 + 12)} fill="none" stroke-linecap="round"/>
+                            {/each}
+                        {/if}
                         <path data-hit-id={shape.id} d={whiteboardPath(shape, width, height)} stroke="transparent"
-                              stroke-width={Math.max(20, shape.width + 12)} fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                              stroke-width={shape.tool === 'spray' ? sprayGeometry(shape).radius * 2 * width / 960 : Math.max(20, shape.width + 12)} fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                     {/if}
                 </g>
             {/each}
+        {/if}
+        {#if open && ready && tool === 'spray' && cursor}
+            <g class="spray-can" transform={`translate(${cursor[0] * width} ${cursor[1] * height})`} aria-hidden="true">
+                <circle r="4" fill="none" stroke={color} opacity=".65"/>
+                <g transform="translate(8 5) rotate(-20)">
+                    <path d="M3 14Q3 8 9 8H21Q27 8 27 14V53Q27 58 15 58T3 53Z" fill="#c4c5c8" stroke="#242429" stroke-width="1.5"/>
+                    <path d="M4 24H26V47H4Z" fill={color}/><path d="M7 25V46" stroke="#fff" opacity=".45" stroke-width="2"/>
+                    <path d="M10 8V2H20V8" fill="#33343b" stroke="#eee"/><circle cx="11" cy="4" r="1.5" fill="#111"/>
+                    <text x="15" y="38" fill="#19191d" font-size="8" font-weight="900" text-anchor="middle">PSST</text>
+                    <path d="M7 52H23" stroke="#777"/>
+                </g>
+            </g>
         {/if}
     </svg>
     </div>
@@ -315,6 +396,13 @@
                     </button>
                 {/each}
             </div>
+            {#if tool === 'spray'}
+                <div class="spray-tips" role="group" aria-label="Spray tips">
+                    {#each SPRAY_TIPS as tip}
+                        <button type="button" aria-pressed={sprayTip === tip.id} on:click={() => { finish(); sprayTip = tip.id; }}>{tip.label}</button>
+                    {/each}
+                </div>
+            {/if}
             <div class="palette" role="group" aria-label="Ink color">
                 {#each WHITEBOARD_COLORS as value, index}
                     <button type="button" class="swatch" style={`--ink: ${value}`} aria-label={`${colorNames[index]} ink`}
@@ -335,7 +423,7 @@
                 <button type="button" disabled={!shapes.length} on:click={clear} title="Clear the whiteboard for everyone"><Icon name="trash" size={15}/>Clear all</button>
             </div>
             </div>
-            <p>{tool === 'eraser' ? 'Drag across a mark to erase it for everyone.' : 'Draw on the picture. Tools tuck away as you draw.'} <span>Esc to finish.</span></p>
+            <p>{tool === 'spray' ? 'Hold to spray. Linger for wet paint and long drips.' : tool === 'eraser' ? 'Drag across a mark to erase it for everyone.' : 'Draw on the picture. Tools tuck away as you draw.'} <span>Esc to finish.</span></p>
         </section>
         </div>
     </div>
@@ -345,6 +433,10 @@
     .whiteboard-layer-mount { display: none; }
     .whiteboard-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; overflow: hidden; }
     .whiteboard-canvas.drawing { pointer-events: auto; cursor: crosshair; touch-action: none; user-select: none; }
+    .whiteboard-canvas.spraying.drawing { cursor: none; }
+    .spray-tips { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 10px; }
+    .spray-tips button { padding: 7px 2px; border: 1px solid #ffffff26; border-radius: 5px; font-size: 10px; color: #d2c9c4; }
+    .spray-tips button[aria-pressed=true] { border-color: var(--accent); background: var(--accent-dim); }
     .whiteboard-canvas.erasing.drawing { cursor: cell; }
     .whiteboard-canvas:focus { outline: none; }
     .whiteboard-canvas g { pointer-events: none; }
@@ -398,7 +490,8 @@
     .compact header > div { display: flex; align-items: center; gap: 12px; }
     .compact .live { margin: 0; }
     .compact .collapse { width: 40px; height: 36px; transform: none; }
-    .compact .tools { grid-template-columns: repeat(6, 1fr); gap: 4px; }
+    .compact .tools { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 3px; }
+    .compact .tools button { flex: 1 0 44px; }
     .compact .tools button { min-height: 48px; }
     .compact .palette { justify-content: space-around; margin: 3px 0; }
     .compact .swatch { width: 40px; height: 40px; }

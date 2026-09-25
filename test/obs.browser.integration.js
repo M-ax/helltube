@@ -9,11 +9,11 @@ test('WHIP publishes decoded H264 video and Opus audio to room viewers, includin
         args: ['--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding']});
     t.after(() => browser.close());
     const errors = [];
-    async function viewer() {
+    async function viewer(username = 'admin') {
         const page = await browser.newPage();
         page.on('pageerror', e => errors.push(e.message));
         await page.goto(h.url);
-        await page.getByLabel('Username', {exact: true}).fill('admin');
+        await page.getByLabel('Username', {exact: true}).fill(username);
         await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
         await page.getByRole('button', {name: 'Enter Helltube'}).click();
         await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
@@ -84,9 +84,30 @@ test('WHIP publishes decoded H264 video and Opus audio to room viewers, includin
         assert.ok(media.peak > 0.05, 'Opus audio must decode into non-silent samples');
     };
     await checkMedia(first);
+    const ownVideo = first.locator('.desktop-tile video');
+    assert.equal(await ownVideo.evaluate(video => video.muted), true, 'An OBS publisher starts muted in their browser');
+    await first.getByRole('button', {name: 'Mute on this device', exact: true}).click();
+    await first.getByRole('button', {name: 'Unmute on this device', exact: true}).click();
+    assert.equal(await ownVideo.evaluate(video => video.muted), true, 'Master unmute preserves the own-stream mute');
+    await ownVideo.evaluate(video => { video.muted = false; });
+    await until(() => ownVideo.evaluate(video => !video.muted));
+    h.instance.rooms.changed(h.instance.rooms.get('lobby'));
+    await first.getByRole('button', {name: 'Mute on this device', exact: true}).click();
+    await until(() => ownVideo.evaluate(video => video.muted));
+    await first.getByRole('button', {name: 'Unmute on this device', exact: true}).click();
+    await until(() => ownVideo.evaluate(video => !video.muted));
     const late = await viewer();
     await checkMedia(late);
-    assert.equal(session.viewers.size, 2);
+    assert.equal(await late.locator('.desktop-tile video').evaluate(video => video.muted), true,
+        'Another browser session for the publisher also starts muted');
+    const created = await h.api('/api/users', {method: 'POST', body: {username: 'obs_viewer',
+        displayName: h.instance.accounts.users.find(user => user.username === 'admin').displayName, password: 'garbageTime_'}});
+    assert.equal(created.status, 201);
+    const other = await viewer('obs_viewer');
+    await checkMedia(other);
+    assert.equal(await other.locator('.desktop-tile video').evaluate(video => video.muted), false,
+        'Other accounts hear the stream, even with the same display name');
+    assert.equal(session.viewers.size, 3);
     await first.close();
     await checkMedia(late);
     assert.equal(h.instance.desktop.sessions.size, 1, 'Closing the token-issuing page does not stop OBS');

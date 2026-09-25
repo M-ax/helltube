@@ -91,6 +91,9 @@ test('bass processing distorts real samples, attenuates after clipping, and rest
         analyser.getFloatTimeDomainData(samples);
         const cleanPeak = Math.max(...samples.map(Math.abs));
         const restored = await analysis.boostStream(stream.stream, true);
+        const warped = await analysis.boostStream(stream.stream, false, false, true);
+        const wackoUsesSameStream = warped === processed;
+        await analysis.boostStream(stream.stream, false);
         const sameVideo = processed.getVideoTracks()[0] === videoTrack;
         stream.stream.removeTrack(videoTrack);
         await analysis.boostStream(stream.stream, true);
@@ -105,12 +108,12 @@ test('bass processing distorts real samples, attenuates after clipping, and rest
         videoTrack.stop();
         tone.stop();
         await context.close();
-        return {boostedPeak, cleanPeak, sameVideo, removedVideo, restoredVideo, originalAlive, processedEnded,
+        return {boostedPeak, cleanPeak, wackoUsesSameStream, sameVideo, removedVideo, restoredVideo, originalAlive, processedEnded,
             untouched: untouched === stream.stream, reused: clean === processed && restored === processed};
     });
     assert.ok(streamResult.boostedPeak > .1 && streamResult.boostedPeak <= BASS_BOOST_OUTPUT_GAIN + .001);
     assert.ok(streamResult.cleanPeak > .99);
-    for (const property of ['sameVideo', 'removedVideo', 'restoredVideo', 'originalAlive', 'processedEnded', 'untouched', 'reused']) {
+    for (const property of ['wackoUsesSameStream', 'sameVideo', 'removedVideo', 'restoredVideo', 'originalAlive', 'processedEnded', 'untouched', 'reused']) {
         assert.equal(streamResult[property], true, property);
     }
 });
@@ -176,8 +179,9 @@ test('deep fried and bass boosted are shared, bounded, locally controlled, and l
     assert.equal(await effect(a, 'bassboost').getAttribute('data-reaction-id'), await effect(b, 'bassboost').getAttribute('data-reaction-id'));
     await until(async () => (await outputLevels(b)).length === 2 && (await outputLevels(b))[0] < .001);
     for (const page of [a, b]) {
+        await until(async () => Math.abs((await outputLevels(page))[1] - BASS_BOOST_OUTPUT_GAIN * .8) < .001, 1500);
         const levels = await outputLevels(page);
-        assert.ok(Math.abs(levels[1] - BASS_BOOST_OUTPUT_GAIN * .8) < .001);
+        assert.ok(Math.abs(levels[1] - BASS_BOOST_OUTPUT_GAIN * .8) < .001, JSON.stringify({levels, state: await page.locator('video').evaluate(v => ({volume:v.volume, muted:v.muted, hidden:document.hidden}))}));
     }
     const samples = await a.evaluate(async () => {
         const output = window.audioOutputs[1];
@@ -209,7 +213,8 @@ test('deep fried and bass boosted are shared, bounded, locally controlled, and l
     assert.ok(samples.muted < .0001, `The final signal respects native player mute: ${JSON.stringify(samples)}`);
     await mute(b).click();
     await until(async () => (await outputLevels(b))[0] > .99 && (await outputLevels(b))[1] < .001);
-    assert.ok((await outputLevels(a))[0] < .001, 'Reaction mute is local.');
+    await until(async () => (await outputLevels(a))[0] < .001, 1500);
+    assert.ok((await outputLevels(a))[0] < .001, 'Reaction mute is local: ' + JSON.stringify({levels:await outputLevels(a), state:await a.locator('video').evaluate(v => ({volume:v.volume,muted:v.muted,hidden:document.hidden})), active:await effect(a, 'bassboost').count()}));
     const previousId = await effect(a, 'bassboost').getAttribute('data-reaction-id');
     await a.getByRole('button', {name: 'Bass boosted', exact: true}).click();
     await until(async () => await effect(a, 'bassboost').getAttribute('data-reaction-id') !== previousId);
@@ -225,6 +230,29 @@ test('deep fried and bass boosted are shared, bounded, locally controlled, and l
     await until(async () => await effect(b, 'deepfried').count() === 0 && await effect(b, 'bassboost').count() === 0);
     assert.ok(await a.locator('video').evaluate(video => video.currentTime) > before + 3);
     assert.equal(room.playback.revision, revision);
+
+    // Content-aware squishing works on the real decoded video and shares the
+    // existing media source with bass processing.
+    await mute(b).click();
+    await a.getByRole('button', {name: 'Content aware', exact: true}).click();
+    for (const page of [a, b]) {
+        await until(async () => await effect(page, 'contentaware').evaluate(canvas => Number(canvas.dataset.seams) > 20));
+        assert.equal(await page.evaluate(() => window.mediaSources.length), 1);
+        await until(async () => (await outputLevels(page))[2] > .1 && (await outputLevels(page))[0] < .001);
+    }
+    assert.equal(await effect(a, 'contentaware').getAttribute('data-reaction-id'), await effect(b, 'contentaware').getAttribute('data-reaction-id'));
+    await a.locator('.video-viewport').screenshot({path: 'test-artifacts/content-aware.png'});
+    await mute(b).click();
+    await until(async () => (await outputLevels(b))[0] > .99 && (await outputLevels(b))[2] < .001);
+    await until(async () => await effect(a, 'contentaware').count() === 0);
+    await until(async () => (await outputLevels(a))[0] > .99 && (await outputLevels(a))[2] < .001);
+
+    await a.getByRole('button', {name: 'Content aware', exact: true}).click();
+    await effect(a, 'contentaware').waitFor();
+    await a.evaluate(() => { Object.defineProperty(document, 'hidden', {configurable: true, value: true}); document.dispatchEvent(new Event('visibilitychange')); });
+    await until(async () => await effect(a, 'contentaware').count() === 0 && (await outputLevels(a))[0] > .99);
+    await a.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); });
+    assert.equal(await effect(a, 'contentaware').count(), 0);
 
     const emit = (kind, id, age = 0) => instance.reactions.broadcast('lobby', {type: 'reaction', roomId: 'lobby', id,
         kind, userId: instance.accounts.users[0].id, x: .5, y: .65, serverTime: Date.now() - age});
@@ -250,4 +278,40 @@ test('deep fried and bass boosted are shared, bounded, locally controlled, and l
     await b.setViewportSize({width: 320, height: 844});
     assert.equal(await b.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.deepEqual(errors, []);
+});
+
+test('wacko audio warbles real samples, limits gain, and restores the original waveform', {timeout: 30000}, async t => {
+    const {instance, url} = await start(t, {maxTranscoders: 0});
+    instance.app.get('/media-reactions.js', (_req, res) => res.sendFile(path.resolve('src/lib/media-reactions.js')));
+    const browser = await chromium.launch({channel: 'chrome', headless: true});
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(url);
+    const results = await page.evaluate(async () => {
+        const {createBassBoost} = await import('/media-reactions.js');
+        const render = async (mode, volume = 1) => {
+            const context = new OfflineAudioContext(1, 48000, 48000);
+            const source = context.createOscillator();
+            source.frequency.value = 440;
+            source.connect(context.destination);
+            const effect = createBassBoost(context, source);
+            effect.set('wacko', volume);
+            effect.set(mode, volume);
+            source.start();
+            const buffer = await context.startRendering();
+            const data = buffer.getChannelData(0).slice(24000);
+            const peak = Math.max(...data.map(Math.abs));
+            let crossings = 0;
+            for (let i = 1; i < data.length; i++) if (data[i - 1] < 0 && data[i] >= 0) crossings++;
+            let squared = 0;
+            for (const value of data) squared += value * value;
+            return {peak, rms: Math.sqrt(squared / data.length), crossings};
+        };
+        return {wet: await render('wacko'), quiet: await render('wacko', .25), muted: await render('wacko', 0), dry: await render(false)};
+    });
+    assert.ok(results.wet.peak > .2 && results.wet.peak <= .551);
+    assert.ok(Math.abs(results.wet.rms / 4 - results.quiet.rms) < .001);
+    assert.ok(results.muted.peak < .0001);
+    assert.ok(results.dry.peak > .99);
+    assert.notEqual(results.wet.crossings, results.dry.crossings, 'Modulated delay bends the source pitch.');
 });

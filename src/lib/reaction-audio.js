@@ -6,6 +6,7 @@ export function createReactionAudio() {
     const sounds = {
         hitmarker: {url: '/sounds/mw2-hitmarker.mp3', gain: 0.65},
         metalpipe: {url: '/sounds/metal-pipe.mp3', gain: 1},
+        mlg: {url: '/sounds/intervention.mp3', gain: .8},
         jpeg: {url: '/sounds/hank-jpeg.mp3', gain: 1.6},
         flashbangBounce: {url: '/sounds/csgo-flashbang-bounce.mp3', gain: .7},
         flashbangRing: {url: '/sounds/csgo-flashbang-ring.mp3', gain: .5},
@@ -17,6 +18,8 @@ export function createReactionAudio() {
     const sources = new Set();
     const slides = new Map();
     let slideBuffer;
+    let sprayBuffer;
+    let sprayLoop;
     let generation = 0;
     const controller = new AbortController();
 
@@ -48,12 +51,41 @@ export function createReactionAudio() {
         for (const source of sources) source.stop();
         sources.clear();
         slides.clear();
+        sprayLoop = null;
     }
 
     return {
         unlock,
         prepare,
         stop,
+        spray(volume) {
+            const level = Math.min(1, Math.max(0, volume)) * .22;
+            if (!level || destroyed || context?.state !== 'running') {
+                if (sprayLoop) { sprayLoop.source.stop(); sprayLoop = null; }
+                return;
+            }
+            if (!sprayLoop) {
+                if (sources.size >= 8) return;
+                if (!sprayBuffer) {
+                    sprayBuffer = context.createBuffer(1, context.sampleRate, context.sampleRate);
+                    const data = sprayBuffer.getChannelData(0);
+                    let previous = 0;
+                    for (let i = 0; i < data.length; i++) {
+                        const noise = Math.random() * 2 - 1;
+                        data[i] = (noise - previous) * .4;
+                        previous = noise;
+                    }
+                }
+                const source = context.createBufferSource(), gain = context.createGain();
+                source.buffer = sprayBuffer; source.loop = true; gain.gain.value = 0;
+                source.connect(gain).connect(context.destination);
+                sources.add(source);
+                source.onended = () => { sources.delete(source); source.disconnect(); gain.disconnect(); };
+                source.start();
+                sprayLoop = {source, gain};
+            }
+            sprayLoop.gain.gain.setTargetAtTime(level, context.currentTime, .02);
+        },
         slide(id, volume, speed) {
             let slide = slides.get(id);
             const level = Math.sqrt(Math.min(1, Math.max(0, speed))) * Math.min(1, Math.max(0, volume)) * .36;
@@ -105,7 +137,7 @@ export function createReactionAudio() {
                 source.connect(gain).connect(context.destination);
                 sources.add(source);
                 source.onended = () => { sources.delete(source); source.disconnect(); gain.disconnect(); };
-                source.start();
+                source.start(0, Math.max(0, Math.min(buffer.duration - .01, options.offset || 0)));
             };
             if (sound.url && !sound.buffer) void prepare(kind).then(start);
             else start();

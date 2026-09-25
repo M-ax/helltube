@@ -4,8 +4,8 @@ export function whiteboardPath(shape, width, height) {
     const points = shape.points.map(([x, y]) => [x * width, y * height]);
     const [x, y] = points[0];
     const [ex, ey] = points.at(-1);
-    if (points.length === 1 || (shape.tool !== 'pen' && x === ex && y === ey)) return `M${x} ${y}l0.01 0`;
-    if (shape.tool === 'pen') return points.map(([px, py], index) => `${index ? 'L' : 'M'}${px} ${py}`).join(' ');
+    if (points.length === 1 || (!['pen', 'spray'].includes(shape.tool) && x === ex && y === ey)) return `M${x} ${y}l0.01 0`;
+    if (['pen', 'spray'].includes(shape.tool)) return points.map(([px, py], index) => `${index ? 'L' : 'M'}${px} ${py}`).join(' ');
     if (shape.tool === 'rectangle') return `M${x} ${y}H${ex}V${ey}H${x}Z`;
     if (shape.tool === 'ellipse') {
         const rx = Math.abs(ex - x) / 2, ry = Math.abs(ey - y) / 2;

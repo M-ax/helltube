@@ -18,6 +18,9 @@
     import MetalPipeReaction from './MetalPipeReaction.svelte';
     import FlashbangReaction from './FlashbangReaction.svelte';
     import BidenReaction from './BidenReaction.svelte';
+    import ContentAwareReaction from './ContentAwareReaction.svelte';
+    import MlgReaction from './MlgReaction.svelte';
+    import {MLG_LIFETIME_MS} from '../lib/mlg.js';
     import JpegReaction from './JpegReaction.svelte';
     import {JPEG_LIFETIME_MS} from '../lib/jpeg.js';
     import {MEDIA_REACTION_LIFETIME_MS, processBassBoost} from '../lib/media-reactions.js';
@@ -62,6 +65,7 @@
     let desktopWidth = 960;
     let desktopHeight = 480;
     let focusedDesktopId = null;
+    let focusItemId = null;
     let renderer;
     let audioAnalysis;
     let analyser = null;
@@ -143,9 +147,14 @@
     $: spotifyCollection = spotify && /\/(album|playlist|show|artist)\//.test(item.embed || '');
     $: audioOnly = !live && (!!item?.audioOnly || (!!media && hasFrame && nativeAudioOnly));
     $: updateAnalysis(sharedSpotify ? !!spotifyStream : audioOnly && !spotify, video, audioAnalysis, false, spotifyStream);
-    $: desktops = live ? room.desktops ?? [item] : [];
+    $: desktops = room.desktops ?? (item?.kind === 'desktop' ? [item] : []);
+    $: mediaDesktops = !live && desktops.length > 0;
+    $: if (focusItemId !== item?.id) {
+        focusedDesktopId = null;
+        focusItemId = item?.id;
+    }
     $: desktopGrid = desktopLayout(desktops.length, desktopWidth, desktopHeight);
-    $: if (desktops.length < 2 || !desktops.some(desktop => desktop.id === focusedDesktopId)) focusedDesktopId = null;
+    $: if ((!mediaDesktops && desktops.length < 2) || !desktops.some(desktop => desktop.id === focusedDesktopId)) focusedDesktopId = null;
     $: qualities = availableQualities(item?.media);
     $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
     $: crtVisible = !live && !spotify && (!media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error'));
@@ -168,6 +177,7 @@
     $: if (renderer) renderer.setBeachBallState(beachBall ? reactions.ball : null, (Date.now() + clockOffset - reactions.serverTime) / 1000);
     $: receiveReactions(reactions, connected, room?.id, reactionsEnabled);
     $: deepFried = activeReactions.some(reaction => reaction.kind === 'deepfried');
+    $: wacko = activeReactions.some(reaction => reaction.kind === 'contentaware') && !soundMuted && !muted && !captureMuted && volume > 0;
     $: bassBoost = activeReactions.some(reaction => reaction.kind === 'bassboost') && !soundMuted && !muted && !captureMuted && volume > 0;
     $: if (soundMuted || muted || captureMuted || volume <= 0) reactionAudio?.stop();
     $: scheduleControlsHide(canAutoHide, holdControls);
@@ -658,8 +668,8 @@
             if (seenReactions.has(event.id)) continue;
             seenReactions.add(event.id);
             if (!enabled) continue;
-            const lifetime = ['deepfried', 'bassboost'].includes(event.kind) ? MEDIA_REACTION_LIFETIME_MS
-                : event.kind === 'jpeg' ? JPEG_LIFETIME_MS : event.kind === 'biden' ? BIDEN_LIFETIME_MS : event.kind === 'flashbang' ? FLASH_LIFETIME_MS
+            const lifetime = ['deepfried', 'bassboost', 'contentaware'].includes(event.kind) ? MEDIA_REACTION_LIFETIME_MS
+                : event.kind === 'mlg' ? MLG_LIFETIME_MS : event.kind === 'jpeg' ? JPEG_LIFETIME_MS : event.kind === 'biden' ? BIDEN_LIFETIME_MS : event.kind === 'flashbang' ? FLASH_LIFETIME_MS
                 : event.kind === 'metalpipe' ? PIPE_LIFETIME_MS : event.kind === 'hitmarker' ? 450 : 1800;
             const age = Math.max(0, Date.now() + clockOffset - event.serverTime);
             if (age >= lifetime || document.hidden) continue;
@@ -674,7 +684,7 @@
                 continue;
             }
             // Refresh media effects instead of stacking compressors or distortion.
-            if (['jpeg', 'deepfried', 'bassboost'].includes(event.kind)) activeReactions = activeReactions.filter(value => value.kind !== event.kind);
+            if (['jpeg', 'deepfried', 'bassboost', 'contentaware', 'mlg'].includes(event.kind)) activeReactions = activeReactions.filter(value => value.kind !== event.kind);
             activeReactions = [...activeReactions.slice(-39), event];
             if (event.kind === 'hitmarker' && !soundMuted && !muted && !captureMuted) reactionAudio?.play(volume);
             const timer = setTimeout(() => {
@@ -734,6 +744,11 @@
         reactionAudio?.slide(id, level, speed);
     }
 
+    function spraySound(count) {
+        const level = reactionsEnabled && connected && !soundMuted && !muted && !captureMuted && !document.hidden ? volume * Math.sqrt(count) : 0;
+        reactionAudio?.spray(level);
+    }
+
     function fingerTap() { reactionAudio?.unlock(); }
     function setLocalFinger(finger) { localFinger = finger; }
 
@@ -746,8 +761,7 @@
         };
         reactionAudio?.unlock();
         onCommand({type: 'reaction', kind: 'hitmarker', ...point});
-        hitmarkerArmed = false;
-        playerShell.focus({preventScroll: true});
+        hitmarkerTarget?.focus({preventScroll: true});
     }
 
     function aimHitmarker(event) {
@@ -782,7 +796,7 @@
         };
         const cancelReaction = event => { if (event.key === 'Escape') { hitmarkerArmed = false; fingerArmed = false; } };
         const hideMediaReactions = () => {
-            if (document.hidden) activeReactions = activeReactions.filter(reaction => !['deepfried', 'bassboost'].includes(reaction.kind));
+            if (document.hidden) activeReactions = activeReactions.filter(reaction => !['deepfried', 'bassboost', 'contentaware', 'mlg'].includes(reaction.kind));
         };
         document.addEventListener('pointerdown', unlockAudio);
         document.addEventListener('keydown', unlockAudio);
@@ -816,21 +830,21 @@
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
          data-controls-visible={controlsVisible} data-spotify-view={sharedSpotify ? spotifyVisualization ? 'visualizations' : 'desktop' : undefined}>
-    <div class="video-viewport" class:finger-armed={fingerArmed} class:deep-fried={deepFried} bind:this={videoViewport}
+    <div class="video-viewport" class:media-desktops={mediaDesktops} class:media-desktop-focused={mediaDesktops && focusedDesktopId !== null} class:finger-armed={fingerArmed} class:deep-fried={deepFried} bind:this={videoViewport}
          use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled && !whiteboardOpen, connected,
              roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
          data-renderer="native" data-effects-renderer={webglEffectsActive ? 'webgl' : '2d'}
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + (live ? 8 : 28)}px`}>
-        {#if live}
-            <div class="desktop-grid" class:desktop-focused={focusedDesktopId !== null} bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
+        {#if desktops.length}
+            <div class="desktop-grid" class:desktop-focused={mediaDesktops || focusedDesktopId !== null} bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
                  data-columns={desktopGrid.columns} data-rows={desktopGrid.rows}
-                 style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${Math.max(1, desktops.length - 1)}`}>
+                 style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${Math.max(1, desktops.length - (focusedDesktopId !== null ? 1 : 0))}`}>
                 {#each desktops as desktop (desktop.id)}
-                    <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {connected} {volume} {muted}
-                                   {captureMuted} {audioAnalysis} {bassBoost} inputDisabled={reactionInputActive}
-                                   focusAvailable={desktops.length > 1} focused={focusedDesktopId === desktop.id}
-                                   thumbnail={focusedDesktopId !== null && focusedDesktopId !== desktop.id}
+                    <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {userId} {connected} {volume} {muted}
+                                   {captureMuted} {audioAnalysis} {bassBoost} {wacko} inputDisabled={reactionInputActive}
+                                   focusAvailable={mediaDesktops || desktops.length > 1} unfocusLabel={mediaDesktops ? 'Back to video' : 'Show all desktops'} focused={focusedDesktopId === desktop.id}
+                                   thumbnail={(mediaDesktops || focusedDesktopId !== null) && focusedDesktopId !== desktop.id}
                                    onFocus={id => focusedDesktopId = id} nativeControls={!sharedSpotify}
                                    videoRequested={sharedSpotify && spotifyView === 'desktop'}
                                    onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}
@@ -838,9 +852,10 @@
                                    onRetryVideo={onRetryDesktopVideo}/>
                 {/each}
             </div>
-        {:else}
+        {/if}
+        {#if !live}
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video bind:this={video} use:mediaElement use:processBassBoost={{analysis: audioAnalysis, enabled: bassBoost && !!media && !spotify}}
+        <video bind:this={video} use:mediaElement use:processBassBoost={{analysis: audioAnalysis, enabled: bassBoost && !!media && !spotify, wacko: wacko && !!media && !spotify}}
                playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
                inert={reactionInputActive}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
@@ -862,6 +877,12 @@
                 </feComponentTransfer>
             </filter>
         </svg>
+        {#each activeReactions.filter(reaction => reaction.kind === 'contentaware') as reaction (reaction.id)}
+            <ContentAwareReaction {reaction} {clockOffset}/>
+        {/each}
+        {#each activeReactions.filter(reaction => reaction.kind === 'mlg') as reaction (reaction.id)}
+            <MlgReaction {reaction} {clockOffset} onSound={reactionSound}/>
+        {/each}
         {#each activeReactions.filter(reaction => reaction.kind === 'jpeg') as reaction (reaction.id)}
             <JpegReaction {reaction} {clockOffset} onSound={reactionSound}/>
         {/each}
@@ -899,7 +920,7 @@
                     </span>
                 {/each}
             </div>
-            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang', 'biden', 'jpeg', 'deepfried', 'bassboost'].includes(reaction.kind)) as reaction (reaction.id)}
+            {#each activeReactions.filter(reaction => !['metalpipe', 'flashbang', 'biden', 'jpeg', 'deepfried', 'bassboost', 'contentaware', 'mlg'].includes(reaction.kind)) as reaction (reaction.id)}
                 <span class="player-reaction" class:hitmarker={reaction.kind === 'hitmarker'}
                       data-reaction={reaction.kind} data-reaction-id={reaction.id}
                       style={`left: ${reaction.x * 100}%; top: ${reaction.y * 100}%`}>
@@ -1072,6 +1093,7 @@
         </div>
     {/if}
     <Whiteboard board={whiteboard} roomId={room?.id} {userId} {connected} enabled={reactionsEnabled}
+                onUnlock={() => reactionAudio?.unlock()} onSpray={spraySound}
                 bind:open={whiteboardOpen} bind:expanded={whiteboardExpanded} viewport={videoViewport}
                 controlsHeight={transportRowHeight + (live ? 8 : 28)} {onCommand}/>
     {#if audioOnly || sharedSpotify}
@@ -1182,7 +1204,26 @@
         display: grid;
         grid-template-columns: repeat(var(--desktop-thumbnails), minmax(0, 1fr));
         grid-template-rows: minmax(0, 1fr) min(25%, 120px);
+        pointer-events: none;
     }
+    .desktop-grid :global(.desktop-tile) { pointer-events: auto; }
+    .media-desktops { --desktop-thumbnail-height: min(120px, calc((100% - 38px - var(--controls-height)) / 4)); }
+    .media-desktops > video, .media-desktops > .video-canvas.crt-flames,
+    .media-desktops > .screen-message, .media-desktops :global(.crt-screen) {
+        position: absolute;
+        inset: 38px 8px calc(var(--controls-height) + var(--desktop-thumbnail-height) + 8px);
+        width: auto;
+        height: auto;
+        min-height: 0;
+    }
+    .media-desktops > video, .media-desktops > .video-canvas.crt-flames {
+        width: calc(100% - 16px);
+        height: calc(100% - 38px - var(--controls-height) - var(--desktop-thumbnail-height) - 8px);
+    }
+    .media-desktops > .screen-message, .media-desktops :global(.crt-screen) { padding: 12px; }
+    .media-desktop-focused > video, .media-desktop-focused > .video-canvas.crt-flames,
+    .media-desktop-focused > .screen-message, .media-desktop-focused > .spotify-player,
+    .media-desktop-focused :global(.crt-screen) { visibility: hidden; }
 </style>
 {#if fallbackNotice && media}
     <p class="delivery-notice" role="status">{fallbackNotice}</p>
