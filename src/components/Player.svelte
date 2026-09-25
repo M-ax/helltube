@@ -147,7 +147,7 @@
     $: spotifyCollection = spotify && /\/(album|playlist|show|artist)\//.test(item.embed || '');
     $: audioOnly = !live && (!!item?.audioOnly || (!!media && hasFrame && nativeAudioOnly));
     $: updateAnalysis(sharedSpotify ? !!spotifyStream : audioOnly && !spotify, video, audioAnalysis, false, spotifyStream);
-    $: desktops = room.desktops ?? (item?.kind === 'desktop' ? [item] : []);
+    $: desktops = room?.desktops ?? (item?.kind === 'desktop' ? [item] : []);
     $: mediaDesktops = !live && desktops.length > 0;
     $: if (focusItemId !== item?.id) {
         focusedDesktopId = null;

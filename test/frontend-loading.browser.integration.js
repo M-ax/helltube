@@ -68,3 +68,45 @@ test('cold login and idle rooms defer optional code, full fonts and reaction sou
     await until(() => requests.some(path => /HackNerdFontMono-Regular-/.test(path)));
     assert.deepEqual(errors, []);
 });
+
+test('player tolerates missing room snapshots on initial join and room switches', {timeout: 30000}, async t => {
+    const {url, instance} = await start(t, {maxTranscoders: 0});
+    instance.rooms.create('Second room', 'second-room');
+    const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--enable-unsafe-swiftshader']});
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    let holdState = true;
+    let releaseState = null;
+    await page.routeWebSocket('**/ws', socket => {
+        const server = socket.connectToServer();
+        server.onMessage(message => {
+            if (holdState && JSON.parse(String(message)).type === 'state') releaseState = () => socket.send(message);
+            else socket.send(message);
+        });
+    });
+    await page.goto(url);
+    await page.getByLabel('Username', {exact: true}).fill('admin');
+    await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+    await page.getByRole('button', {name: 'Enter Helltube'}).click();
+    const rooms = page.getByRole('navigation', {name: 'Screening rooms'});
+    for (const name of [/^The living room(?: |$)/, /^Second room(?: |$)/]) {
+        holdState = true;
+        releaseState = null;
+        await rooms.getByRole('button', {name}).click();
+        await until(() => releaseState);
+        await until(async () => errors.length || await page.locator('.player-shell').count());
+        assert.deepEqual(errors, [], 'Rendering before the room snapshot must not throw');
+        assert.equal(await page.locator('.screen-tag').textContent(), 'THE SCREEN IS YOURS');
+        assert.equal(await page.locator('.desktop-tile').count(), 0);
+        assert.equal(await page.getByRole('button', {name: 'Skip video for everyone', exact: true}).isEnabled(), false);
+        holdState = false;
+        releaseState();
+        await until(() => page.locator('.sync-badge').textContent().then(text => text.includes('Room synced')));
+        assert.deepEqual(errors, [], 'The existing player accepts the fresh room snapshot');
+    }
+    await page.getByRole('button', {name: 'Sign out', exact: true}).click();
+    await page.getByLabel('Username', {exact: true}).waitFor();
+    assert.deepEqual(errors, []);
+});
