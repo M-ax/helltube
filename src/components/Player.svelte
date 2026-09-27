@@ -174,6 +174,8 @@
     $: preparing = item && !media && !live && !spotify && item.status !== 'error';
     $: canAutoHide = (!!media || live) && connected && playing && !room?.playback.paused && !preparing
         && !localBuffering && !blocked && !playerError && item?.status !== 'error';
+    $: duckStreams = mediaDesktops && !!media && connected && playing && !room?.playback.paused
+        && !localBuffering && !blocked && !playerError && item?.status !== 'error';
     $: holdControls = keyboardFocus || activePointerCount > 0 || scrubbing || seekCenter !== null || hitmarkerArmed || whiteboardExpanded;
     $: beachBall = reactionsEnabled && connected && reactions.roomId === room?.id && !!reactions.ball;
     $: reactionInputActive = connected && reactionsEnabled && (fingerArmed || hitmarkerArmed || beachBall || whiteboardOpen);
@@ -302,13 +304,13 @@
             if (!target) return;
             pointers.delete(event.pointerId);
             activePointerCount = pointers.size;
-            if (target.matches('.volume-range')) commitVolume();
+            if (target.matches('.player-controls .volume-range')) commitVolume();
             if (event.type === 'pointercancel' || event.type === 'lostpointercapture') scrubbing = false;
             revealControls();
         }
 
         function resetActivity() {
-            if ([...pointers.values()].some(target => target.matches('.volume-range'))) commitVolume();
+            if ([...pointers.values()].some(target => target.matches('.player-controls .volume-range'))) commitVolume();
             for (const [id, target] of pointers) {
                 if (target.hasPointerCapture(id)) target.releasePointerCapture(id);
             }
@@ -350,7 +352,8 @@
             pointers.set(event.pointerId, event.target);
             activePointerCount = pointers.size;
             revealControls();
-            if (hidden && !hitmarkerArmed && !whiteboardOpen && event.target.closest('.video-viewport')) {
+            if (hidden && !hitmarkerArmed && !whiteboardOpen && event.target.closest('.video-viewport')
+                && !event.target.closest('.desktop-controls')) {
                 event.preventDefault();
                 event.stopPropagation();
                 return;
@@ -846,10 +849,11 @@
                  data-columns={desktopGrid.columns} data-rows={desktopGrid.rows}
                  style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${thumbnailIds.length}; --desktop-thumbnail-width: ${thumbnailWidth}px`}>
                 {#each desktops as desktop (desktop.id)}
-                    <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {userId} {connected} {volume} {muted}
+                    <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {userId} {connected} {volume} {muted} ducked={duckStreams}
                                    {captureMuted} {audioAnalysis} {bassBoost} {wacko} inputDisabled={reactionInputActive}
                                    {focusAvailable} unfocusLabel={mediaDesktops ? 'Back to video' : desktops.length === 1 ? 'Minimize my stream' : 'Show all desktops'} focused={focusedDesktopId === desktop.id}
                                    thumbnail={thumbnailIds.includes(desktop.id)} thumbnailIndex={thumbnailIds.indexOf(desktop.id)}
+                                   thumbnailHeight={thumbnailIds.length ? thumbnailWidth * 9 / 16 : 0}
                                    onFocus={id => focusedDesktopId = id} nativeControls={!sharedSpotify}
                                    videoRequested={sharedSpotify && spotifyView === 'desktop'}
                                    onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}

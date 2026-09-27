@@ -29,7 +29,7 @@ async function availablePort() {
     return port;
 }
 
-test('multiple users tile and focus independent desktops while preserving individual mute choices', {timeout: 120000}, async t => {
+test('multiple users tile and focus independent desktops while stacking volume and preserving individual mute choices', {timeout: 120000}, async t => {
     const {instance, url, api} = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', desktopIceServers: '[]'});
     const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--autoplay-policy=no-user-gesture-required',
         '--disable-background-timer-throttling', '--disable-renderer-backgrounding']});
@@ -64,7 +64,7 @@ test('multiple users tile and focus independent desktops while preserving indivi
         await start.click();
     };
     const playing = (page, count) => until(() => page.locator('.desktop-tile video').evaluateAll((videos, expected) =>
-        videos.length === expected && videos.every(video => video.controls === !video.closest('.thumbnail') && video.srcObject instanceof MediaStream &&
+        videos.length === expected && videos.every(video => !video.controls && video.srcObject instanceof MediaStream &&
             video.readyState >= 2 && video.videoWidth === 640 && !video.paused), count), 20000);
     const checkBounds = page => page.locator('.desktop-grid').evaluate(grid => {
         const outer = grid.getBoundingClientRect();
@@ -117,9 +117,18 @@ test('multiple users tile and focus independent desktops while preserving indivi
     assert.ok(pixels[0][0] > 180 && pixels[0][1] < 50);
     assert.ok(pixels[1][1] > 180 && pixels[1][0] < 50);
     const firstVideo = viewer.locator(`[data-item-id="${firstId}"] video`);
-    await firstVideo.evaluate(video => { video.pause(); video.muted = true; video.volume = 0.25; });
+    const firstSlider = viewer.locator(`[data-item-id="${firstId}"] .stream-volume-range`);
+    const setStreamVolume = async level => {
+        await firstSlider.fill(String(level));
+        await until(() => firstSlider.inputValue().then(value => Number(value) === level));
+    };
+    assert.equal(await firstSlider.inputValue(), '1', 'Streams start at 100% of master volume');
+    await setStreamVolume(0.5);
+    const firstControls = viewer.locator(`[data-item-id="${firstId}"] .desktop-controls`);
+    await firstControls.getByRole('button', {name: /^Pause /}).click();
+    await firstControls.getByRole('button', {name: /^Mute /}).click();
     instance.rooms.changed(room);
-    await until(() => firstVideo.evaluate(video => video.paused && video.muted && video.volume === 0.25));
+    await until(() => firstVideo.evaluate(video => video.paused && video.muted && video.volume === 0.4));
     assert.equal(await secondVideo.evaluate(video => !video.paused && !video.muted && video.volume === 0.8), true);
     const setVolume = async level => {
         await viewer.getByRole('slider', {name: 'Volume on this device'}).evaluate((slider, level) => {
@@ -129,7 +138,8 @@ test('multiple users tile and focus independent desktops while preserving indivi
         }, level);
         const volume = (100 ** level - 1) / 99;
         await until(() => viewer.locator('.desktop-tile video').evaluateAll((videos, volume) =>
-            videos.every(video => Math.abs(video.volume - volume) < 0.0001), volume));
+            videos.every(video => Math.abs(video.volume - volume *
+                Number(video.closest('.desktop-tile').querySelector('.stream-volume-range').value)) < 0.0001), volume));
     };
     await setVolume(0.6);
     assert.equal(await firstVideo.evaluate(video => video.muted && video.paused), true, 'Main volume preserves a desktop mute and pause');
@@ -147,7 +157,36 @@ test('multiple users tile and focus independent desktops while preserving indivi
     await firstVideo.evaluate(video => { video.muted = false; });
     await until(() => firstVideo.evaluate(video => !video.muted));
     await setVolume(0.65);
-    assert.equal(await firstVideo.evaluate(video => video.muted), false, 'Native unmute clears the individual preference');
+    assert.equal(await firstVideo.evaluate(video => video.muted), false, 'External unmute clears the individual preference');
+    await setVolume(0);
+    assert.equal(await firstSlider.inputValue(), '0.5', 'Master silence retains the stream level');
+    await setStreamVolume(0.3);
+    assert.equal(await firstVideo.evaluate(video => video.volume), 0);
+    await setVolume(0.65);
+    const masterBeforeWheel = await viewer.getByRole('slider', {name: 'Volume on this device'}).inputValue();
+    const scrollBeforeWheel = await viewer.evaluate(() => window.scrollY);
+    await firstSlider.hover();
+    await viewer.mouse.wheel(0, -100);
+    await until(() => firstSlider.inputValue().then(value => value === '0.35'));
+    await viewer.mouse.wheel(0, 100);
+    await until(() => firstSlider.inputValue().then(value => value === '0.3'));
+    await firstSlider.focus();
+    await firstSlider.press('ArrowRight');
+    await until(() => firstSlider.inputValue().then(value => value === '0.31'));
+    await setStreamVolume(1);
+    await viewer.mouse.wheel(0, -100);
+    await until(() => firstVideo.evaluate(video => video.volume === video.closest('.desktop-grid').querySelectorAll('video')[1].volume));
+    assert.equal(await firstSlider.inputValue(), '1', 'Wheel volume is capped at 100% of master');
+    await setStreamVolume(0);
+    await viewer.mouse.wheel(0, 100);
+    assert.equal(await firstSlider.inputValue(), '0', 'Wheel volume is capped at zero');
+    await until(() => firstVideo.evaluate(video => video.volume === 0));
+    assert.equal(await viewer.getByRole('slider', {name: 'Volume on this device'}).inputValue(), masterBeforeWheel,
+        'Stream wheel and keyboard controls leave master volume unchanged');
+    assert.equal(await viewer.evaluate(() => window.scrollY), scrollBeforeWheel, 'Volume scrolling does not scroll the page');
+    await setStreamVolume(0.5);
+    await until(() => firstVideo.evaluate(video => Math.abs(video.volume * 2 -
+        video.closest('.desktop-grid').querySelectorAll('video')[1].volume) < 0.0001));
     await firstVideo.evaluate(video => { video.muted = true; });
     await until(() => firstVideo.evaluate(video => video.muted));
     await firstVideo.evaluate(video => video.play());
@@ -166,9 +205,24 @@ test('multiple users tile and focus independent desktops while preserving indivi
     await videos.evaluateAll(videos => {
         window.focusDesktops = videos.map(video => ({video, stream: video.srcObject, muted: video.muted, volume: video.volume}));
     });
+    const checkControls = page => page.locator('.desktop-controls').evaluateAll(controls => controls.every(control => {
+        const bounds = control.getBoundingClientRect();
+        const tile = control.closest('.desktop-tile').getBoundingClientRect();
+        const slider = control.querySelector('input').getBoundingClientRect();
+        const thumbnails = document.fullscreenElement === control.closest('.desktop-tile') ? []
+            : [...control.closest('.desktop-grid').querySelectorAll('.thumbnail')];
+        return slider.width >= 30 && bounds.top >= tile.top && bounds.bottom <= tile.bottom &&
+            thumbnails.every(thumbnail => {
+                const thumb = thumbnail.getBoundingClientRect();
+                return bounds.right <= thumb.left || bounds.left >= thumb.right ||
+                    bounds.bottom <= thumb.top || bounds.top >= thumb.bottom;
+            });
+    }));
+    for (const page of [viewer, ...senders]) await until(() => checkControls(page));
     const checkFocus = async id => {
         await until(() => viewer.locator('.desktop-tile.focused').getAttribute('data-item-id').then(value => value === id));
         await until(() => checkBounds(viewer));
+        await until(() => checkControls(viewer));
         assert.equal(await viewer.locator('.desktop-grid').evaluate(grid => {
             const main = grid.querySelector('.focused').getBoundingClientRect();
             return [...grid.querySelectorAll('.thumbnail')].every(tile => {
@@ -243,6 +297,7 @@ test('multiple users tile and focus independent desktops while preserving indivi
             getComputedStyle(video).pointerEvents === 'none')));
         assert.equal(await viewer.locator('.desktop-fullscreen:enabled').count(), 0, 'Reaction input also blocks per-stream fullscreen');
         assert.equal(await viewer.locator('.desktop-focus:enabled').count(), 0, 'Reaction input also blocks focus controls');
+        assert.equal(await viewer.locator('.desktop-controls :enabled').count(), 0, 'Reaction input also blocks stream controls');
         assert.equal(await videos.evaluateAll(videos => videos.every(video => {
             video.focus();
             return document.activeElement !== video;
@@ -258,12 +313,12 @@ test('multiple users tile and focus independent desktops while preserving indivi
             await viewer.keyboard.press('Escape');
         } else if (name === 'Beach ball') await reaction.click();
         else await viewer.keyboard.press('Escape');
-        await until(() => videos.evaluateAll(videos => videos.every(video => !video.inert && video.controls &&
+        await until(() => videos.evaluateAll(videos => videos.every(video => !video.inert && !video.controls &&
             getComputedStyle(video).pointerEvents !== 'none')));
     }
     await viewer.getByRole('button', {name: 'Pointing finger', exact: true}).click();
     await viewer.getByRole('switch', {name: 'Enable reactions on this device'}).click();
-    await until(() => videos.evaluateAll(videos => videos.every(video => !video.inert && video.controls)));
+    await until(() => videos.evaluateAll(videos => videos.every(video => !video.inert && !video.controls)));
     await viewer.getByRole('switch', {name: 'Enable reactions on this device'}).click();
     assert.deepEqual(await videos.evaluateAll(videos => videos.map(video => ({muted: video.muted, volume: video.volume}))), playbackBeforeReactions);
     assert.equal(await secondVideo.evaluate(video => video === window.retainedDesktop.video && video.srcObject === window.retainedDesktop.stream), true);
@@ -292,6 +347,11 @@ test('multiple users tile and focus independent desktops while preserving indivi
             return bounds.width === window.innerWidth && bounds.height === window.innerHeight &&
                 video === window.fullscreenVideo && video.srcObject === window.fullscreenStream && !video.paused;
         }), true, 'Fullscreen expands the tile without replacing or restarting native playback');
+        await until(() => checkControls(page));
+        await until(() => tile.locator('.desktop-controls').evaluate(control => {
+            const bounds = control.getBoundingClientRect();
+            return window.innerHeight - bounds.bottom <= 9;
+        }));
         // Check ongoing decoding and JavaScript responsiveness in every other tab.
         for (let sample = 0; sample < 3; sample++) {
             const before = await Promise.all(otherTabs.map(frameCounts));
@@ -749,11 +809,12 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
 }
 }
 
-test('desktop WebRTC resumes HLS and survives added video without replacing streams', {timeout: 90000}, async t => {
+test('desktop WebRTC resumes HLS and survives added and replayed video without replacing streams', {timeout: 90000}, async t => {
     const {instance, url, dir} = await start(t);
     const sample = path.join(dir, 'desktop-resume.mp4');
     await promisify(execFile)(instance.media.config.ffmpeg, ['-v', 'error', '-y', '-f', 'lavfi', '-i',
-        'color=c=blue:s=640x360:r=10', '-t', '45', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '20',
+        'color=c=blue:s=640x360:r=10', '-f', 'lavfi', '-i', 'sine=frequency=220:sample_rate=48000',
+        '-t', '45', '-c:a', 'aac', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '20',
         '-pix_fmt', 'yuv420p', '-movflags', '+faststart', sample]);
     instance.app.get('/desktop-resume.mp4', (_req, res) => res.sendFile(sample, {dotfiles: 'allow'}));
     t.mock.method(instance.youtube, 'resolve', async () => ({duration: 45, inputs: [{url: `${url}/desktop-resume.mp4`, headers: {}}]}));
@@ -768,6 +829,15 @@ test('desktop WebRTC resumes HLS and survives added video without replacing stre
             const context = canvas.getContext('2d');
             context.fillStyle = 'red'; context.fillRect(0, 0, 640, 360);
             const stream = canvas.captureStream(10);
+            const audio = new AudioContext();
+            const oscillator = audio.createOscillator();
+            const destination = audio.createMediaStreamDestination();
+            oscillator.frequency.value = 440;
+            oscillator.connect(destination);
+            oscillator.start();
+            await audio.resume();
+            for (const track of destination.stream.getAudioTracks()) stream.addTrack(track);
+            stream.getVideoTracks()[0].addEventListener('ended', () => { oscillator.stop(); void audio.close(); }, {once: true});
             const timer = setInterval(() => context.fillRect(0, 0, 640, 360), 100);
             window.addEventListener('pagehide', () => clearInterval(timer), {once: true});
             return stream;
@@ -798,9 +868,16 @@ test('desktop WebRTC resumes HLS and survives added video without replacing stre
     await until(() => viewer.locator('.desktop-tile video').evaluate(video => video.srcObject && video.readyState >= 2 && !video.paused));
     await viewer.locator('.desktop-tile video').evaluate(video => {
         video.muted = true;
+        video.volume = 0.5;
         window.concurrentDesktop = {video, stream: video.srcObject};
     });
     const session = [...instance.desktop.sessions.values()][0];
+    const desktopVideo = viewer.locator('.desktop-tile video');
+    const mainVideo = viewer.locator('.video-viewport > video');
+    const expectDesktopVolume = expected => until(() => desktopVideo.evaluate((video, expected) =>
+        Math.abs(video.volume - expected) < 0.0001, expected));
+    await until(() => desktopVideo.evaluate(video => video.srcObject.getAudioTracks().length === 1));
+    await expectDesktopVolume(0.5);
     const added = makeItem({...item.source}, {title: 'Added during sharing', duration: 45});
     instance.rooms.add(room, [added], 0);
     assert.equal(room.current.id, added.id);
@@ -822,6 +899,44 @@ test('desktop WebRTC resumes HLS and survives added video without replacing stre
         }), true, 'The ongoing desktop overlays the full-size video above its controls');
     };
     await checkConcurrent();
+    await expectDesktopVolume(0.1);
+    assert.equal(await mainVideo.evaluate(video => video.volume), 0.8, 'Ducking leaves video volume unchanged');
+    const pauseVideo = async () => {
+        await viewer.locator('.video-viewport').hover();
+        await viewer.getByRole('button', {name: 'Pause for everyone', exact: true}).click();
+    };
+    const resumeVideo = async () => {
+        await viewer.getByRole('button', {name: 'Play for everyone', exact: true}).click();
+    };
+    await pauseVideo();
+    await expectDesktopVolume(0.5);
+    assert.equal(await desktopVideo.evaluate(video => video.muted), true, 'Restoring volume preserves individual mute');
+    await resumeVideo();
+    await expectDesktopVolume(0.1);
+    await desktopVideo.evaluate(video => { video.muted = false; });
+    await viewer.getByRole('button', {name: 'Mute on this device', exact: true}).click();
+    await until(() => desktopVideo.evaluate(video => video.muted));
+    await viewer.getByRole('button', {name: 'Unmute on this device', exact: true}).click();
+    await until(() => desktopVideo.evaluate(video => !video.muted));
+    await expectDesktopVolume(0.1);
+    await desktopVideo.evaluate(video => { video.volume = 0.06; });
+    await pauseVideo();
+    await expectDesktopVolume(0.3);
+    assert.equal(await desktopVideo.evaluate(video => video.muted), false, 'Native unmute survives ducking transitions');
+    await resumeVideo();
+    await expectDesktopVolume(0.06);
+    await viewer.getByRole('slider', {name: 'Volume on this device'}).evaluate(slider => {
+        slider.value = '0.7';
+        slider.dispatchEvent(new Event('input', {bubbles: true}));
+    });
+    const masterVolume = (100 ** 0.7 - 1) / 99;
+    await expectDesktopVolume(masterVolume * 0.375 * 0.2);
+    assert.ok(Math.abs(await mainVideo.evaluate(video => video.volume) - masterVolume) < 0.0001);
+    await pauseVideo();
+    await expectDesktopVolume(masterVolume * 0.375);
+    await resumeVideo();
+    await expectDesktopVolume(masterVolume * 0.375 * 0.2);
+    await desktopVideo.evaluate(video => { video.muted = true; });
     await viewer.setViewportSize({width: 390, height: 844});
     await checkConcurrent();
     await viewer.getByRole('button', {name: 'Toggle fullscreen'}).click();
@@ -831,6 +946,25 @@ test('desktop WebRTC resumes HLS and survives added video without replacing stre
     await viewer.getByRole('button', {name: /^Focus on /}).click();
     await viewer.getByRole('button', {name: 'Back to video'}).click();
     await checkConcurrent();
+    await viewer.setViewportSize({width: 1280, height: 720});
+    instance.rooms.advance(room);
+    instance.rooms.advance(room);
+    assert.equal(room.current.id, session.item.id);
+    assert.deepEqual(room.queue, []);
+    await until(() => viewer.locator('.video-viewport > video').count().then(count => count === 0));
+    await expectDesktopVolume(masterVolume * 0.375);
+    const history = viewer.getByRole('complementary', {name: 'Room queue and watch history'});
+    await history.getByRole('button', {name: /^History/}).click();
+    await history.getByRole('button', {name: 'Play Added during sharing from history for everyone', exact: true}).click();
+    await until(() => room.current?.id === added.id);
+    for (const page of [sender, viewer]) {
+        await until(() => page.locator('.video-viewport > video').evaluate(video => video.readyState >= 2 && !video.paused));
+        assert.equal(await page.locator('.desktop-tile.thumbnail').count(), 1);
+    }
+    await checkConcurrent();
+    await expectDesktopVolume(masterVolume * 0.375 * 0.2);
+    assert.deepEqual(room.queue, [], 'History replay never queues a live desktop');
+    assert.equal(instance.desktop.sessions.size, 1);
     assert.equal(session.router.closed, false);
     const revision = room.playback.revision;
     await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();

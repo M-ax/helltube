@@ -200,11 +200,10 @@ export class Rooms extends EventEmitter {
 
   replay(room, itemId) {
     this.requireManual(room);
-    if (room.current?.kind === 'desktop') throw httpError(409, 'Stop desktop sharing before playing a video from history.');
     const index = room.history.findIndex(i => i.id === itemId);
     if (index < 0) throw httpError(404, 'This video is no longer in the recent history.');
     const [item] = room.history.splice(index, 1);
-    if (room.current) room.queue.unshift(room.current);
+    if (room.current && room.current.kind !== 'desktop') room.queue.unshift(room.current);
     room.current = item;
     room.resumeWhenReady = true;
     this.stamp(room, sponsorPosition(item, item.startAt || 0), true);

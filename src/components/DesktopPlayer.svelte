@@ -8,6 +8,7 @@
     export let playback = null;
     export let connected = false;
     export let volume = 0.8;
+    export let ducked = false;
     export let muted = false;
     export let captureMuted = false;
     export let audioAnalysis;
@@ -21,6 +22,7 @@
     export let unfocusLabel = 'Show all desktops';
     export let thumbnail = false;
     export let thumbnailIndex = 0;
+    export let thumbnailHeight = 0;
     export let onFocus;
     export let videoRequested = false;
     export let onVideoReady;
@@ -33,6 +35,7 @@
     let fullscreenError = '';
     let blocked = false;
     let loading = true;
+    let paused = true;
     let error = '';
     let generation = 0;
     let videoReady = false;
@@ -43,28 +46,82 @@
     // Apply ownership only as the initial preference so native unmute stays available.
     let individuallyMuted = !!userId && item.sharedBy === userId;
     let appliedMuted = false;
+    const DUCK_GAIN = 0.2;
+    let streamVolume = 1;
+    let appliedVolume = volume;
 
     $: forcedMute = captureMuted || !!playback?.local;
-    $: if (video) video.volume = volume;
+    $: if (video) applyVolume(video, volume * streamVolume, ducked);
+    $: streamMuted = muted || forcedMute || individuallyMuted;
     $: if (video) applyMute(video, muted || forcedMute, individuallyMuted);
     $: updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !hidden, audioAnalysis, false, wacko && connected && !forcedMute && !hidden);
     $: renderedStream = boostedStream && boostedStream.original === playback?.stream ? boostedStream.stream : playback?.stream;
+
+    function applyVolume(node, level, duck) {
+        appliedVolume = Math.max(0, Math.min(1, level * (duck ? DUCK_GAIN : 1)));
+        node.volume = appliedVolume;
+    }
 
     function applyMute(node, masterMuted, streamMuted) {
         appliedMuted = masterMuted || streamMuted;
         node.muted = appliedMuted;
     }
 
-    function rememberMute() {
+    function rememberAudioPreferences() {
+        if (!video) return;
+        // Ignore our own events. External changes still retain a relative stream
+        // preference, including across ducking and master-volume changes.
+        if (video.volume !== appliedVolume) {
+            const gain = volume * (ducked ? DUCK_GAIN : 1);
+            if (gain > 0) streamVolume = Math.min(1, video.volume / gain);
+            applyVolume(video, volume * streamVolume, ducked);
+        }
         // Volume and mute writes queue the same event. Only a native mute change
         // that differs from our last applied value is an individual preference.
-        if (!video || video.muted === appliedMuted) return;
+        if (video.muted === appliedMuted) return;
         if (muted || forcedMute) {
             video.muted = true;
             return;
         }
         individuallyMuted = video.muted;
         appliedMuted = video.muted;
+    }
+
+    function setStreamVolume(level) {
+        streamVolume = Math.max(0, Math.min(1, level));
+        individuallyMuted = false;
+    }
+
+    function scrollStreamVolume(event) {
+        if (!event.deltaY || forcedMute) return;
+        setStreamVolume(Math.round((streamVolume - Math.sign(event.deltaY) * 0.05) * 100) / 100);
+    }
+
+    function positionControls(node, initial) {
+        const grid = node.closest('.desktop-grid');
+        const container = node.closest('.desktop-tile');
+        let options = initial;
+        let frame;
+        function position() {
+            const bounds = container.getBoundingClientRect();
+            const thumbnailTop = grid.getBoundingClientRect().bottom - options.thumbnailHeight;
+            const overlap = options.thumbnailHeight > 0 && !options.fullscreen
+                ? Math.max(0, bounds.bottom - thumbnailTop) : 0;
+            node.style.bottom = `${Math.min(8 + overlap, Math.max(8, container.clientHeight - node.offsetHeight - 8))}px`;
+        }
+        function schedule() {
+            cancelAnimationFrame(frame);
+            frame = requestAnimationFrame(position);
+        }
+        const observer = new ResizeObserver(schedule);
+        observer.observe(grid);
+        observer.observe(container);
+        observer.observe(node);
+        schedule();
+        return {
+            update(next) { options = next; schedule(); },
+            destroy() { observer.disconnect(); cancelAnimationFrame(frame); },
+        };
     }
 
     async function updateBassBoost(stream, enabled, analysis, gesture = false, warp = false) {
@@ -157,7 +214,7 @@
             node.pause();
             node.srcObject = stream || null;
             applyMute(node, muted || captureMuted || !!playback?.local, individuallyMuted);
-            node.volume = volume;
+            applyVolume(node, volume * streamVolume, ducked);
             if (stream && connected) void play(node);
         }
         update(initial);
@@ -172,9 +229,9 @@
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
     <video bind:this={video} use:attachStream={{stream: renderedStream, connected}}
            use:watchVideoFrame={{stream: renderedStream, original: playback?.stream, enabled: videoRequested && connected && !blocked && !error && !playback?.error && !playback?.videoError}}
-           controls={nativeControls && !inputDisabled && !visualized && !thumbnail} controlslist="nofullscreen" inert={inputDisabled || visualized || !nativeControls || thumbnail} playsinline aria-label={`Shared desktop: ${item.title}`}
+           controlslist="nofullscreen" inert={inputDisabled || visualized || !nativeControls || thumbnail} playsinline aria-label={`Shared desktop: ${item.title}`}
            on:dblclick|preventDefault={toggleFullscreen}
-           on:volumechange={rememberMute}
+           on:volumechange={rememberAudioPreferences} on:play={() => paused = false} on:pause={() => paused = true}
            on:loadeddata={() => loading = false} on:playing={() => { loading = false; error = ''; blocked = false; }}
            on:waiting={() => loading = true}
            on:error={() => error = 'This desktop could not be played. Retry playback.'}></video>
@@ -194,6 +251,29 @@
             <Icon name="fullscreen" size={17}/>
         </button>{/if}
     </div>
+    {#if nativeControls && !thumbnail && !visualized}
+        <div class="desktop-controls" use:positionControls={{thumbnailHeight, fullscreen}}>
+            <button class="icon-button" type="button" disabled={inputDisabled || !connected}
+                    aria-label={`${paused ? 'Play' : 'Pause'} ${item.title} on this device`}
+                    title={paused ? 'Play this stream' : 'Pause this stream'}
+                    on:click={() => paused ? play() : video.pause()}>
+                <Icon name={paused ? 'play' : 'pause'} size={16}/>
+            </button>
+            <button class="icon-button" type="button" disabled={inputDisabled || forcedMute || muted}
+                    aria-label={`${streamMuted ? 'Unmute' : 'Mute'} ${item.title} on this device`}
+                    title={muted ? 'Unmute the player to hear this stream' : 'Mute this stream'}
+                    on:click={() => individuallyMuted = !individuallyMuted}>
+                <Icon name={streamMuted || streamVolume === 0 ? 'mute' : 'volume'} size={16}/>
+            </button>
+            <input class="volume-range stream-volume-range" aria-label={`Volume for ${item.title}`}
+                   type="range" min="0" max="1" step="0.01" value={streamVolume}
+                   aria-valuetext={`${Math.round(streamVolume * 100)}% of player volume`}
+                   title={`${Math.round(streamVolume * 100)}% of player volume`}
+                   style={`--volume-progress: ${streamVolume * 100}%`} disabled={inputDisabled || forcedMute}
+                   on:input={event => setStreamVolume(Number(event.currentTarget.value))}
+                   on:wheel|nonpassive|preventDefault|stopPropagation={scrollStreamVolume}/>
+        </div>
+    {/if}
     {#if fullscreenError}<p class="desktop-fullscreen-error" role="status">{fullscreenError}</p>{/if}
     {#if playback?.error || error}
         <div class="desktop-message" role="alert">
@@ -304,6 +384,23 @@
         background: #000b;
         color: #eee;
     }
+    .desktop-controls {
+        position: absolute;
+        left: 8px;
+        bottom: 8px;
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 200px;
+        max-width: calc(100% - 16px);
+        padding: 4px;
+        border-radius: 5px;
+        background: #000c;
+        color: #eee;
+    }
+    .desktop-controls .icon-button { flex: 0 0 28px; width: 28px; height: 28px; }
+    .stream-volume-range { display: block; flex: 1; min-width: 0; width: 96px; margin: 0; }
     .desktop-fullscreen-error {
         position: absolute;
         top: 40px;

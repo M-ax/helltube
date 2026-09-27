@@ -39,7 +39,7 @@ async function publish(h) {
     return {session, connection, producer};
 }
 
-test('metal sharing interrupts and resumes video, never enters history, and disallows seek/pause/replay', async t => {
+test('metal sharing interrupts and resumes video, never enters history, and rejects live playback controls', async t => {
     const h = fixture(t);
     const video = makeItem({kind: 'http', url: 'https://example.com/video.mp4'}, {duration: 100});
     h.rooms.add(h.room, [video]);
@@ -50,7 +50,7 @@ test('metal sharing interrupts and resumes video, never enters history, and disa
     for (const action of ['pause', 'play', 'seek', 'previous']) {
         assert.throws(() => h.rooms.control(h.room, {action, revision: h.room.playback.revision, position: 0}), /live/);
     }
-    assert.throws(() => h.rooms.replay(h.room, video.id), /Stop desktop/);
+    assert.throws(() => h.rooms.replay(h.room, video.id), /no longer in the recent history/);
     h.advance(90000); h.desktop.tick(); h.rooms.tick();
     assert.equal(h.room.playback.paused, false);
     assert.equal(h.rooms.position(h.room), 90);
@@ -227,6 +227,52 @@ test('adding videos keeps desktop publishers and subscribers through playback an
     assert.equal(h.room.current, null);
     assert.equal(h.desktop.sessions.size, 0);
 });
+
+for (const count of [1, 2]) {
+for (const queued of [false, true]) {
+test('history replay preserves ' + count + ' desktop streams ' + (queued ? 'and queued videos' : 'with an empty queue'), async t => {
+    const h = fixture(t);
+    const replay = makeItem({kind: 'http', url: 'https://example.com/replay.mp4'}, {
+        duration: 60, startAt: 12, status: 'ready', media: {baseTime: 0, bufferedUntil: 60, complete: true},
+    });
+    const queue = queued ? [1, 2].map(() => makeItem({kind: 'http', url: 'https://example.com/queued.mp4'})) : [];
+    h.rooms.add(h.room, [replay, ...queue]);
+    h.rooms.advance(h.room);
+    await publish(h);
+    if (count > 1) await h.desktop.start(h.room, {id: 'second-sender'}, h.user, request);
+    const sessions = [...h.desktop.sessions.values()];
+    const viewer = {id: 'viewer'};
+    for (const session of sessions) {
+        await h.desktop.watch(h.room, viewer, {itemId: session.item.id, requestId: session.item.id});
+    }
+    const subscriptions = sessions.map(session => [...session.viewers.values()][0]);
+    let sought, saved;
+    h.rooms.on('seek', (_room, position) => sought = position);
+    h.rooms.store = {save: (_type, _id, state) => saved = state};
+    const revision = h.room.playback.revision;
+    h.rooms.replay(h.room, replay.id);
+    assert.equal(h.room.current, replay);
+    assert.equal(h.room.playback.position, 12);
+    assert.equal(h.room.playback.revision, revision + 1);
+    assert.equal(h.room.resumeWhenReady, true);
+    assert.equal(sought, 12);
+    assert.deepEqual(h.room.history, []);
+    assert.deepEqual(h.room.queue, queue, 'Only interrupted videos belong in the queue');
+    assert.deepEqual(h.room.desktops, sessions.map(session => session.item));
+    assert.equal(saved.current.id, replay.id);
+    assert.deepEqual(saved.queue.map(item => item.id), queue.map(item => item.id));
+    h.rooms.tick();
+    assert.equal(h.room.playback.paused, false);
+    h.rooms.advance(h.room);
+    assert.equal(h.room.current, queue[0] || sessions[0].item);
+    assert.deepEqual(h.room.history, [replay]);
+    assert.equal(h.desktop.sessions.size, count);
+    assert.ok(sessions.every(session => !session.router.closed && !session.publisher.transport.closed));
+    assert.ok(subscriptions.every(subscription => !subscription.transport.closed));
+    assert.equal(h.messages.some(message => message.type === 'desktop:stopped'), false);
+});
+}
+}
 
 test('starting and stopping additional desktops leaves concurrent video playback unchanged', async t => {
     const h = fixture(t);
