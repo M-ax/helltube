@@ -9,6 +9,18 @@ const jobId = '12345678-1234-4234-8234-123456789abc';
 const segment = `/media/${jobId}/segment-000001.ts`;
 const env = { BARE_METAL_ORIGIN: origin, EDGE_PROXY_SECRET: 'test-edge-secret' };
 
+test('desktop embedding policy also replaces stale frame headers on assets and API responses', async () => {
+  const response = () => new Response('fixture', { headers: { 'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "frame-ancestors 'none'" } });
+  const h = harness({ assets: { fetch: async () => response() }, upstream: response });
+  for (const path of ['/', '/api/me']) {
+    const result = await h.request(path);
+    assert.equal(result.headers.get('X-Frame-Options'), null);
+    assert.equal(result.headers.get('Content-Security-Policy').split('frame-ancestors ')[1], "'self' http://127.0.0.1:* http://localhost:*");
+    secured(result);
+  }
+});
+
 test('shared-file bytes bypass the Worker while metadata remains proxied', async () => {
   const h = harness();
   assert.equal((await h.request('/api/files/abc', {method: 'PUT', body: 'bytes'})).status, 405);

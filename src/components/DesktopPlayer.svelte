@@ -20,6 +20,7 @@
     export let focused = false;
     export let unfocusLabel = 'Show all desktops';
     export let thumbnail = false;
+    export let thumbnailIndex = 0;
     export let onFocus;
     export let videoRequested = false;
     export let onVideoReady;
@@ -166,7 +167,8 @@
 
 <svelte:document on:fullscreenchange={() => fullscreen = document.fullscreenElement === tile}/>
 
-<div class="desktop-tile" class:visualized class:focused class:thumbnail bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}>
+<div class="desktop-tile" class:visualized class:focused class:thumbnail bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}
+     inert={inputDisabled} style={`--desktop-thumbnail-index: ${thumbnailIndex}`}>
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
     <video bind:this={video} use:attachStream={{stream: renderedStream, connected}}
            use:watchVideoFrame={{stream: renderedStream, original: playback?.stream, enabled: videoRequested && connected && !blocked && !error && !playback?.error && !playback?.videoError}}
@@ -232,8 +234,21 @@
     video { width: 100%; height: 100%; display: block; object-fit: contain; }
     .visualized video { opacity: 0; }
     .visualized .desktop-heading { display: none; }
-    .focused { grid-column: 1 / -1; grid-row: 1; width: 100%; height: 100%; }
-    .thumbnail { grid-row: 2; justify-self: center; width: auto; max-width: 100%; height: 100%; aspect-ratio: 16 / 9; }
+    .focused { flex-basis: 100%; width: 100%; height: 100%; }
+    .thumbnail {
+        position: absolute;
+        bottom: 0;
+        left: calc(50% + (var(--desktop-thumbnail-index) - (var(--desktop-thumbnails) - 1) / 2) * (var(--desktop-thumbnail-width) + 8px));
+        transform: translateX(-50%);
+        z-index: 4;
+        width: var(--desktop-thumbnail-width);
+        height: auto;
+        aspect-ratio: 16 / 9;
+        opacity: .8;
+        transition: opacity .15s ease;
+    }
+    .thumbnail:hover, .thumbnail:focus-within { opacity: 1; }
+    @media (prefers-reduced-motion: reduce) { .thumbnail { transition: none; } }
     .desktop-heading {
         position: absolute;
         top: 7px;

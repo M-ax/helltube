@@ -153,8 +153,13 @@
         focusedDesktopId = null;
         focusItemId = item?.id;
     }
-    $: desktopGrid = desktopLayout(desktops.length, desktopWidth, desktopHeight);
-    $: if ((!mediaDesktops && desktops.length < 2) || !desktops.some(desktop => desktop.id === focusedDesktopId)) focusedDesktopId = null;
+    $: focusAvailable = mediaDesktops || desktops.length > 1 || desktops.some(desktop => !!userId && desktop.sharedBy === userId);
+    $: if (!focusAvailable || !desktops.some(desktop => desktop.id === focusedDesktopId)) focusedDesktopId = null;
+    $: thumbnailIds = desktops.filter(desktop => desktop.id !== focusedDesktopId &&
+        (mediaDesktops || focusedDesktopId !== null || (!!userId && desktop.sharedBy === userId))).map(desktop => desktop.id);
+    $: desktopGrid = desktopLayout(desktops.length - thumbnailIds.length, desktopWidth, desktopHeight);
+    $: thumbnailWidth = Math.max(0, Math.min(Math.min(120, desktopHeight / 4) * 16 / 9,
+        (desktopWidth - (thumbnailIds.length - 1) * 8) / Math.max(1, thumbnailIds.length)));
     $: qualities = availableQualities(item?.media);
     $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
     $: crtVisible = !live && !spotify && (!media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error'));
@@ -830,21 +835,21 @@
 <section class="player-shell" class:controls-hidden={!controlsVisible} bind:this={playerShell}
          use:trackPlayerActivity tabindex="0" aria-label="Synchronized room player"
          data-controls-visible={controlsVisible} data-spotify-view={sharedSpotify ? spotifyVisualization ? 'visualizations' : 'desktop' : undefined}>
-    <div class="video-viewport" class:media-desktops={mediaDesktops} class:media-desktop-focused={mediaDesktops && focusedDesktopId !== null} class:finger-armed={fingerArmed} class:deep-fried={deepFried} bind:this={videoViewport}
+    <div class="video-viewport" class:media-desktop-focused={mediaDesktops && focusedDesktopId !== null} class:finger-armed={fingerArmed} class:deep-fried={deepFried} bind:this={videoViewport}
          use:trackReactionPointer={{beachBall, fingerEnabled: fingerArmed, enabled: reactionsEnabled && !whiteboardOpen, connected,
              roomId: room?.id, onCommand, onFinger: setLocalFinger, onTap: fingerTap}}
          data-renderer="native" data-effects-renderer={webglEffectsActive ? 'webgl' : '2d'}
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + (live ? 8 : 28)}px`}>
         {#if desktops.length}
-            <div class="desktop-grid" class:desktop-focused={mediaDesktops || focusedDesktopId !== null} bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
+            <div class="desktop-grid" class:desktop-thumbnails={thumbnailIds.length > 0} class:desktop-focused={focusedDesktopId !== null} bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
                  data-columns={desktopGrid.columns} data-rows={desktopGrid.rows}
-                 style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${Math.max(1, desktops.length - (focusedDesktopId !== null ? 1 : 0))}`}>
+                 style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${thumbnailIds.length}; --desktop-thumbnail-width: ${thumbnailWidth}px`}>
                 {#each desktops as desktop (desktop.id)}
                     <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {userId} {connected} {volume} {muted}
                                    {captureMuted} {audioAnalysis} {bassBoost} {wacko} inputDisabled={reactionInputActive}
-                                   focusAvailable={mediaDesktops || desktops.length > 1} unfocusLabel={mediaDesktops ? 'Back to video' : 'Show all desktops'} focused={focusedDesktopId === desktop.id}
-                                   thumbnail={(mediaDesktops || focusedDesktopId !== null) && focusedDesktopId !== desktop.id}
+                                   {focusAvailable} unfocusLabel={mediaDesktops ? 'Back to video' : desktops.length === 1 ? 'Minimize my stream' : 'Show all desktops'} focused={focusedDesktopId === desktop.id}
+                                   thumbnail={thumbnailIds.includes(desktop.id)} thumbnailIndex={thumbnailIds.indexOf(desktop.id)}
                                    onFocus={id => focusedDesktopId = id} nativeControls={!sharedSpotify}
                                    videoRequested={sharedSpotify && spotifyView === 'desktop'}
                                    onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}
@@ -1198,29 +1203,11 @@
         gap: 8px;
         min-width: 0;
         min-height: 0;
-    }
-    .video-viewport:has(.desktop-focused) { min-height: min(320px, 100dvh); }
-    .desktop-grid.desktop-focused {
-        display: grid;
-        grid-template-columns: repeat(var(--desktop-thumbnails), minmax(0, 1fr));
-        grid-template-rows: minmax(0, 1fr) min(25%, 120px);
         pointer-events: none;
     }
+    .video-viewport:has(.desktop-thumbnails, .desktop-focused) { min-height: min(320px, 100dvh); }
     .desktop-grid :global(.desktop-tile) { pointer-events: auto; }
-    .media-desktops { --desktop-thumbnail-height: min(120px, calc((100% - 38px - var(--controls-height)) / 4)); }
-    .media-desktops > video, .media-desktops > .video-canvas.crt-flames,
-    .media-desktops > .screen-message, .media-desktops :global(.crt-screen) {
-        position: absolute;
-        inset: 38px 8px calc(var(--controls-height) + var(--desktop-thumbnail-height) + 8px);
-        width: auto;
-        height: auto;
-        min-height: 0;
-    }
-    .media-desktops > video, .media-desktops > .video-canvas.crt-flames {
-        width: calc(100% - 16px);
-        height: calc(100% - 38px - var(--controls-height) - var(--desktop-thumbnail-height) - 8px);
-    }
-    .media-desktops > .screen-message, .media-desktops :global(.crt-screen) { padding: 12px; }
+    .desktop-grid :global(.desktop-tile[inert]), .desktop-grid :global(.desktop-tile[inert] button) { pointer-events: none; }
     .media-desktop-focused > video, .media-desktop-focused > .video-canvas.crt-flames,
     .media-desktop-focused > .screen-message, .media-desktop-focused > .spotify-player,
     .media-desktop-focused :global(.crt-screen) { visibility: hidden; }

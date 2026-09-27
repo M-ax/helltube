@@ -30,6 +30,8 @@ function route(pathname, method) {
 
 function responseHeaders(response, security, noStore = true) {
   const headers = new Headers(response.headers);
+  // CSP owns framing policy, including when an older upstream still sends DENY.
+  headers.delete('X-Frame-Options');
   for (const [name, value] of Object.entries(security)) headers.set(name, value);
   if (noStore) {
     headers.set('Cache-Control', 'private, no-store');

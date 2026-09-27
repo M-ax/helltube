@@ -64,21 +64,42 @@ test('multiple users tile and focus independent desktops while preserving indivi
         await start.click();
     };
     const playing = (page, count) => until(() => page.locator('.desktop-tile video').evaluateAll((videos, expected) =>
-        videos.length === expected && videos.every(video => video.controls && video.srcObject instanceof MediaStream &&
+        videos.length === expected && videos.every(video => video.controls === !video.closest('.thumbnail') && video.srcObject instanceof MediaStream &&
             video.readyState >= 2 && video.videoWidth === 640 && !video.paused), count), 20000);
     const checkBounds = page => page.locator('.desktop-grid').evaluate(grid => {
         const outer = grid.getBoundingClientRect();
-        const bounds = [...grid.children].map(tile => tile.getBoundingClientRect());
+        const tiles = [...grid.children];
+        const bounds = tiles.map(tile => tile.getBoundingClientRect());
         return bounds.every((tile, index) => tile.width > 0 && tile.height > 0 &&
             tile.left >= outer.left - 1 && tile.right <= outer.right + 1 && tile.top >= outer.top - 1 && tile.bottom <= outer.bottom + 1 &&
-            bounds.slice(index + 1).every(other => tile.right <= other.left + 1 || other.right <= tile.left + 1 ||
+            bounds.every((other, otherIndex) => otherIndex <= index ||
+                tiles[index].classList.contains('thumbnail') !== tiles[otherIndex].classList.contains('thumbnail') ||
+                tile.right <= other.left + 1 || other.right <= tile.left + 1 ||
                 tile.bottom <= other.top + 1 || other.bottom <= tile.top + 1));
     });
     await startSharing(senders[0]);
     await playing(senders[0], 1);
-    assert.equal(await senders[0].locator('.desktop-focus').count(), 0, 'A single desktop has no focus control');
+    const ownPreview = senders[0].locator('.desktop-tile');
+    assert.equal(await ownPreview.evaluate(tile => tile.classList.contains('thumbnail') && tile.querySelector('video').muted), true,
+        'The local stream starts as a muted thumbnail even when it is the only stream');
+    await ownPreview.locator('video').evaluate(video => { window.ownPreview = {video, stream: video.srcObject}; });
+    await senders[0].setViewportSize({width: 390, height: 844});
+    await senders[0].getByRole('button', {name: 'Focus on Sharer 1', exact: true}).click();
+    await until(() => ownPreview.evaluate(tile => tile.classList.contains('focused') && !tile.classList.contains('thumbnail')));
+    assert.ok(await senders[0].locator('.video-viewport').evaluate(viewport => viewport.clientHeight >= 320),
+        'Focusing the only self-stream retains room for the picture and controls on mobile');
+    await senders[0].getByRole('button', {name: 'Minimize my stream', exact: true}).click();
+    assert.equal(await ownPreview.locator('video').evaluate(video => video === window.ownPreview.video &&
+        video.srcObject === window.ownPreview.stream && video.muted && !video.paused), true);
+    assert.equal(await ownPreview.evaluate(tile => tile.classList.contains('thumbnail')), true);
+    await senders[0].setViewportSize({width: 1280, height: 720});
     await startSharing(senders[1]);
-    for (const page of senders.slice(0, 2)) await playing(page, 2);
+    for (const page of senders.slice(0, 2)) {
+        await playing(page, 2);
+        assert.equal(await page.locator('.desktop-tile.thumbnail[data-local="true"]').count(), 1);
+        assert.equal(await page.locator('.desktop-grid').getAttribute('data-columns'), '1');
+        assert.equal(await page.locator('.desktop-grid').getAttribute('data-rows'), '1');
+    }
     assert.equal(room.desktops.length, 2);
     const viewer = await browser.newPage();
     viewer.on('pageerror', error => errors.push(error.message));
@@ -147,14 +168,15 @@ test('multiple users tile and focus independent desktops while preserving indivi
     });
     const checkFocus = async id => {
         await until(() => viewer.locator('.desktop-tile.focused').getAttribute('data-item-id').then(value => value === id));
-        assert.equal(await checkBounds(viewer), true);
+        await until(() => checkBounds(viewer));
         assert.equal(await viewer.locator('.desktop-grid').evaluate(grid => {
             const main = grid.querySelector('.focused').getBoundingClientRect();
             return [...grid.querySelectorAll('.thumbnail')].every(tile => {
                 const thumb = tile.getBoundingClientRect();
-                return thumb.top >= main.bottom && thumb.width <= main.width && thumb.height < main.height;
-            });
-        }), true, 'Other live desktops form a smaller row below the focused desktop');
+                return thumb.top > main.top && thumb.top < main.bottom && thumb.bottom <= main.bottom + 1 &&
+                    thumb.width < main.width && thumb.height < main.height;
+            }) && Math.abs(main.height - grid.clientHeight) < 1;
+        }), true, 'Thumbnails overlay the bottom of the full-height focused desktop');
         assert.equal(await videos.evaluateAll(videos => videos.every((video, index) => {
             const saved = window.focusDesktops[index];
             return video === saved.video && video.srcObject === saved.stream && !video.paused &&
@@ -164,6 +186,16 @@ test('multiple users tile and focus independent desktops while preserving indivi
     await viewer.getByRole('button', {name: 'Focus on Sharer 2', exact: true}).click();
     await checkFocus(secondId);
     assert.equal(await viewer.locator('.desktop-tile.thumbnail').count(), 2);
+    const thumbnail = viewer.locator('.desktop-tile.thumbnail').first();
+    await viewer.mouse.move(0, 0);
+    await until(() => thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity) === 0.8));
+    await thumbnail.hover();
+    await until(() => thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity) === 1));
+    await viewer.mouse.move(0, 0);
+    await until(() => thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity) === 0.8));
+    await thumbnail.locator('.desktop-focus').focus();
+    await until(() => thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity) === 1));
+    await viewer.getByRole('button', {name: 'Show all desktops', exact: true}).focus();
     assert.equal(await senders[0].locator('.desktop-tile.focused').count(), 0, 'Focus is local to the viewer');
     await viewer.screenshot({path: 'test-artifacts/desktop-focused.png', fullPage: true});
     await viewer.getByRole('button', {name: 'Toggle fullscreen'}).click();
@@ -250,7 +282,10 @@ test('multiple users tile and focus independent desktops while preserving indivi
             return video.controlsList.contains('nofullscreen');
         }), true, 'The native video-only fullscreen action is replaced');
         if (page === viewer) await tile.getByRole('button', {name: /^Fullscreen /}).click();
-        else await tileVideo.dblclick();
+        else {
+            await tile.getByRole('button', {name: 'Focus on Sharer 1', exact: true}).click();
+            await tileVideo.dblclick();
+        }
         await until(() => tile.evaluate(node => document.fullscreenElement === node));
         assert.equal(await tileVideo.evaluate(video => {
             const bounds = video.getBoundingClientRect();
@@ -481,6 +516,10 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     assert.equal(await viewer.locator('video').evaluate(video => video.srcObject instanceof MediaStream && !video.getAttribute('src')), true);
     assert.equal(await viewer.locator('video').evaluate(video => video.muted), true,
         'A desktop shared by this account starts muted in another browser session');
+    assert.equal(await viewer.locator('.desktop-tile.thumbnail').count(), 1,
+        'Ownership defaults to a thumbnail in another browser session too');
+    await viewer.getByRole('button', {name: /^Focus on /}).click();
+    await until(() => viewer.locator('.desktop-tile.focused').count());
     await viewer.locator('video').evaluate(video => { video.muted = false; });
     await until(() => viewer.locator('video').evaluate(video => !video.muted));
     assert.deepEqual(await sender.evaluate(() => {
@@ -778,8 +817,9 @@ test('desktop WebRTC resumes HLS and survives added video without replacing stre
             const thumb = viewport.querySelector('.desktop-tile').getBoundingClientRect();
             const controls = viewport.querySelector('.player-controls').getBoundingClientRect();
             return main.width > 0 && main.height > 0 && thumb.width > 0 && thumb.height > 0 &&
-                thumb.top >= main.bottom && thumb.bottom <= controls.top + 1;
-        }), true, 'The ongoing desktop occupies a separate row below video and above controls');
+                Math.abs(main.width - viewport.clientWidth) < 1 && Math.abs(main.height - viewport.clientHeight) < 1 &&
+                thumb.top > main.top && thumb.top < main.bottom && thumb.bottom <= controls.top + 1;
+        }), true, 'The ongoing desktop overlays the full-size video above its controls');
     };
     await checkConcurrent();
     await viewer.setViewportSize({width: 390, height: 844});
