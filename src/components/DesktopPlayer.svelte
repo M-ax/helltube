@@ -1,6 +1,8 @@
 <script>
     import {onMount, onDestroy} from 'svelte';
     import Icon from './Icon.svelte';
+    import ThumbnailControls from './ThumbnailControls.svelte';
+    import {floatingThumbnail} from '../lib/thumbnail.js';
     import {waitForDesktopFrame} from '../lib/desktop-video-ready.js';
 
     export let item;
@@ -22,6 +24,7 @@
     export let unfocusLabel = 'Show all desktops';
     export let thumbnail = false;
     export let thumbnailIndex = 0;
+    export let thumbnailCount = 1;
     export let thumbnailHeight = 0;
     export let onFocus;
     export let videoRequested = false;
@@ -49,6 +52,7 @@
     const DUCK_GAIN = 0.2;
     let streamVolume = 1;
     let appliedVolume = volume;
+    let thumbnailOpacity = 0.8;
 
     $: forcedMute = captureMuted || !!playback?.local;
     $: if (video) applyVolume(video, volume * streamVolume, ducked);
@@ -105,7 +109,7 @@
         function position() {
             const bounds = container.getBoundingClientRect();
             const thumbnailTop = grid.getBoundingClientRect().bottom - options.thumbnailHeight;
-            const overlap = options.thumbnailHeight > 0 && !options.fullscreen
+            const overlap = options.thumbnailHeight > 0 && !options.fullscreen && !options.thumbnail
                 ? Math.max(0, bounds.bottom - thumbnailTop) : 0;
             node.style.bottom = `${Math.min(8 + overlap, Math.max(8, container.clientHeight - node.offsetHeight - 8))}px`;
         }
@@ -225,7 +229,9 @@
 <svelte:document on:fullscreenchange={() => fullscreen = document.fullscreenElement === tile}/>
 
 <div class="desktop-tile" class:visualized class:focused class:thumbnail bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}
-     inert={inputDisabled} style={`--desktop-thumbnail-index: ${thumbnailIndex}`}>
+     class:floating-thumbnail={thumbnail && !fullscreen}
+     use:floatingThumbnail={{enabled: thumbnail && !fullscreen, index: thumbnailIndex, count: thumbnailCount, key: item.id}}
+     inert={inputDisabled} style:--thumbnail-opacity={thumbnailOpacity}>
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
     <video bind:this={video} use:attachStream={{stream: renderedStream, connected}}
            use:watchVideoFrame={{stream: renderedStream, original: playback?.stream, enabled: videoRequested && connected && !blocked && !error && !playback?.error && !playback?.videoError}}
@@ -239,6 +245,7 @@
         <span class="desktop-name" title={item.title}>{item.addedBy || item.title}{playback?.local ? ' (you)' : ''}</span>
         {#if focusAvailable}
             <button class="desktop-focus" type="button" disabled={inputDisabled}
+                    data-thumbnail-drag={thumbnail ? '' : undefined}
                     aria-label={focused ? unfocusLabel : `Focus on ${item.addedBy || item.title}`}
                     title={focused ? unfocusLabel : `Focus on ${item.addedBy || item.title}`}
                     on:click={() => onFocus?.(focused ? null : item.id)}>
@@ -251,8 +258,9 @@
             <Icon name="fullscreen" size={17}/>
         </button>{/if}
     </div>
-    {#if nativeControls && !thumbnail && !visualized}
-        <div class="desktop-controls" use:positionControls={{thumbnailHeight, fullscreen}}>
+    {#if thumbnail}<ThumbnailControls title={item.title} bind:opacity={thumbnailOpacity}/>{/if}
+    {#if nativeControls && !visualized}
+        <div class="desktop-controls" use:positionControls={{thumbnailHeight, fullscreen, thumbnail}}>
             <button class="icon-button" type="button" disabled={inputDisabled || !connected}
                     aria-label={`${paused ? 'Play' : 'Pause'} ${item.title} on this device`}
                     title={paused ? 'Play this stream' : 'Pause this stream'}
@@ -315,20 +323,6 @@
     .visualized video { opacity: 0; }
     .visualized .desktop-heading { display: none; }
     .focused { flex-basis: 100%; width: 100%; height: 100%; }
-    .thumbnail {
-        position: absolute;
-        bottom: 0;
-        left: calc(50% + (var(--desktop-thumbnail-index) - (var(--desktop-thumbnails) - 1) / 2) * (var(--desktop-thumbnail-width) + 8px));
-        transform: translateX(-50%);
-        z-index: 4;
-        width: var(--desktop-thumbnail-width);
-        height: auto;
-        aspect-ratio: 16 / 9;
-        opacity: .8;
-        transition: opacity .15s ease;
-    }
-    .thumbnail:hover, .thumbnail:focus-within { opacity: 1; }
-    @media (prefers-reduced-motion: reduce) { .thumbnail { transition: none; } }
     .desktop-heading {
         position: absolute;
         top: 7px;
@@ -357,11 +351,11 @@
     .desktop-focus span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .desktop-focus:hover { background: #29232eee; border-color: var(--accent); }
     .desktop-focus:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-    .thumbnail .desktop-heading { inset: 0; }
+    .thumbnail .desktop-heading { inset: 0 0 37px; }
     .thumbnail .desktop-name { display: none; }
     .thumbnail .desktop-focus {
         display: flex;
-        align-items: flex-end;
+        align-items: flex-start;
         justify-content: center;
         width: 100%;
         max-width: none;
@@ -371,7 +365,7 @@
         background: transparent;
         border-color: #ffffff28;
     }
-    .thumbnail .desktop-focus span { max-width: 100%; padding: 4px 6px; background: #000c; border-radius: 3px; }
+    .thumbnail .desktop-focus span { max-width: calc(100% - 64px); padding: 4px 6px; background: #000c; border-radius: 3px; }
     .thumbnail .desktop-focus:hover { border-color: var(--accent); }
     .desktop-tile:fullscreen .desktop-focus { display: none; }
     video::-webkit-media-controls-fullscreen-button { display: none; }
@@ -385,6 +379,8 @@
         color: #eee;
     }
     .desktop-controls {
+        opacity: 0;
+        pointer-events: none;
         position: absolute;
         left: 8px;
         bottom: 8px;
@@ -399,6 +395,13 @@
         background: #000c;
         color: #eee;
     }
+    .desktop-tile:hover .desktop-controls, .desktop-tile:has(:focus-visible) .desktop-controls {
+        opacity: 1; pointer-events: auto;
+    }
+    .thumbnail .desktop-controls { left: 3px; bottom: 3px !important; max-width: calc(100% - 26px); gap: 1px; padding: 2px; }
+    .thumbnail .desktop-controls .icon-button { flex-basis: 22px; width: 22px; height: 22px; }
+    .thumbnail .desktop-controls .icon-button:first-child { display: none; }
+    @media (hover: none) { .desktop-controls { opacity: 1; pointer-events: auto; } }
     .desktop-controls .icon-button { flex: 0 0 28px; width: 28px; height: 28px; }
     .stream-volume-range { display: block; flex: 1; min-width: 0; width: 96px; margin: 0; }
     .desktop-fullscreen-error {

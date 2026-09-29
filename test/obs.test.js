@@ -43,12 +43,13 @@ test('OBS tokens require room membership, are scoped, hashed, persisted and repl
     assert.equal(h.instance.store.load('obs-keys').length, 0);
 });
 
-test('WHIP negotiates H264/Opus through the native relay and DELETE resumes the queue', async t => {
+test('WHIP negotiates H264/Opus alongside video and DELETE preserves playback', async t => {
     const h = await setup(t);
     const room = h.instance.rooms.get('lobby');
     const video = makeItem({kind: 'http', url: 'https://example.com/movie.mp4'});
     h.instance.rooms.add(room, [video]);
     h.instance.rooms.stamp(room, 27, true);
+    const playback = {...room.playback};
     const response = await h.request();
     assert.equal(response.status, 201, await response.clone().text());
     const answer = sdp.parse(await response.text());
@@ -60,9 +61,10 @@ test('WHIP negotiates H264/Opus through the native relay and DELETE resumes the 
     assert.equal((await session.publisher.transport.getStats())[0].maxIncomingBitrate, 12_200_000);
     assert.equal(session.producers.size, 2);
     assert.equal(session.ready, undefined, 'Wait for the DTLS connection before declaring the stream ready');
-    assert.equal(room.current.id, session.item.id);
-    assert.equal(room.queue[0].id, video.id);
-    assert.match(room.current.title, /OBS stream/);
+    assert.equal(room.current, video);
+    assert.deepEqual(room.queue, []);
+    assert.deepEqual(room.playback, playback);
+    assert.match(session.item.title, /OBS stream/);
     assert.equal((await h.request()).status, 409);
     const location = response.headers.get('location');
     assert.match(location, /^\/api\/whip\/lobby\//);
@@ -77,6 +79,7 @@ test('WHIP negotiates H264/Opus through the native relay and DELETE resumes the 
     assert.equal(session.publisher.transport.closed, true);
     assert.equal(room.current.id, video.id);
     assert.equal(room.playback.position, 27);
+    assert.deepEqual(room.playback, playback);
     assert.equal((await h.request(location, {method: 'DELETE'})).status, 404);
 });
 

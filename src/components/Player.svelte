@@ -6,6 +6,8 @@
     import QualitySelect from './QualitySelect.svelte';
     import DesktopStats from './DesktopStats.svelte';
     import DesktopPlayer from './DesktopPlayer.svelte';
+    import ThumbnailControls from './ThumbnailControls.svelte';
+    import {floatingThumbnail, thumbnailRect} from '../lib/thumbnail.js';
     import AudioVisualizations from './AudioVisualizations.svelte';
     import {createAudioAnalysis} from '../lib/audio-visualizations.js';
     import {desktopLayout} from '../lib/desktop-layout.js';
@@ -66,6 +68,10 @@
     let desktopHeight = 480;
     let focusedDesktopId = null;
     let focusItemId = null;
+    let focusRoomId = null;
+    let desktopContainer;
+    let videoThumbnailStyle = '';
+    let videoThumbnailOpacity = 0.8;
     let renderer;
     let audioAnalysis;
     let analyser = null;
@@ -149,17 +155,20 @@
     $: updateAnalysis(sharedSpotify ? !!spotifyStream : audioOnly && !spotify, video, audioAnalysis, false, spotifyStream);
     $: desktops = room?.desktops ?? (item?.kind === 'desktop' ? [item] : []);
     $: mediaDesktops = !live && desktops.length > 0;
-    $: if (focusItemId !== item?.id) {
+    $: if (focusItemId !== item?.id || focusRoomId !== room?.id) {
         focusedDesktopId = null;
         focusItemId = item?.id;
+        focusRoomId = room?.id;
+        videoThumbnailOpacity = 0.8;
     }
     $: focusAvailable = mediaDesktops || desktops.length > 1 || desktops.some(desktop => !!userId && desktop.sharedBy === userId);
     $: if (!focusAvailable || !desktops.some(desktop => desktop.id === focusedDesktopId)) focusedDesktopId = null;
     $: thumbnailIds = desktops.filter(desktop => desktop.id !== focusedDesktopId &&
         (mediaDesktops || focusedDesktopId !== null || (!!userId && desktop.sharedBy === userId))).map(desktop => desktop.id);
+    $: videoThumbnail = mediaDesktops && focusedDesktopId !== null && !!item && !spotify;
+    $: thumbnailCount = thumbnailIds.length + (videoThumbnail ? 1 : 0);
     $: desktopGrid = desktopLayout(desktops.length - thumbnailIds.length, desktopWidth, desktopHeight);
-    $: thumbnailWidth = Math.max(0, Math.min(Math.min(120, desktopHeight / 4) * 16 / 9,
-        (desktopWidth - (thumbnailIds.length - 1) * 8) / Math.max(1, thumbnailIds.length)));
+    $: thumbnailWidth = thumbnailRect(desktopWidth, desktopHeight, 0, thumbnailCount).width;
     $: qualities = availableQualities(item?.media);
     $: media = selectQuality(item?.media, qualityPreference, position, {standardOnly: qualityFallbackItemId === item?.id});
     $: crtVisible = !live && !spotify && (!media || (!hasFrame && connected && !blocked && !playerError && item?.status !== 'error'));
@@ -287,7 +296,7 @@
         function canToggleFullscreen(event) {
             return !hitmarkerArmed && !fingerArmed && !beachBall && !whiteboardOpen
                 && event.target.closest('.video-viewport')
-                && !event.target.closest('.desktop-tile, .player-controls, .whiteboard-tools, button, input, a, select, textarea, [role="button"]');
+                && !event.target.closest('.desktop-tile, .video-thumbnail-controls, .player-controls, .whiteboard-tools, button, input, a, select, textarea, [role="button"]');
         }
 
         function updateFocus() {
@@ -353,7 +362,7 @@
             activePointerCount = pointers.size;
             revealControls();
             if (hidden && !hitmarkerArmed && !whiteboardOpen && event.target.closest('.video-viewport')
-                && !event.target.closest('.desktop-controls')) {
+                && !event.target.closest('.desktop-tile, .video-thumbnail-controls')) {
                 event.preventDefault();
                 event.stopPropagation();
                 return;
@@ -845,7 +854,7 @@
          data-preview-time={previewPosition} data-beach-ball={beachBall}
          style={`--controls-height: ${transportRowHeight + (live ? 8 : 28)}px`}>
         {#if desktops.length}
-            <div class="desktop-grid" class:desktop-thumbnails={thumbnailIds.length > 0} class:desktop-focused={focusedDesktopId !== null} bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
+            <div class="desktop-grid" class:desktop-thumbnails={thumbnailCount > 0} class:desktop-focused={focusedDesktopId !== null} bind:this={desktopContainer} bind:clientWidth={desktopWidth} bind:clientHeight={desktopHeight}
                  data-columns={desktopGrid.columns} data-rows={desktopGrid.rows}
                  style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${thumbnailIds.length}; --desktop-thumbnail-width: ${thumbnailWidth}px`}>
                 {#each desktops as desktop (desktop.id)}
@@ -853,7 +862,7 @@
                                    {captureMuted} {audioAnalysis} {bassBoost} {wacko} inputDisabled={reactionInputActive}
                                    {focusAvailable} unfocusLabel={mediaDesktops ? 'Back to video' : desktops.length === 1 ? 'Minimize my stream' : 'Show all desktops'} focused={focusedDesktopId === desktop.id}
                                    thumbnail={thumbnailIds.includes(desktop.id)} thumbnailIndex={thumbnailIds.indexOf(desktop.id)}
-                                   thumbnailHeight={thumbnailIds.length ? thumbnailWidth * 9 / 16 : 0}
+                                   {thumbnailCount} thumbnailHeight={thumbnailCount ? thumbnailWidth * 9 / 16 : 0}
                                    onFocus={id => focusedDesktopId = id} nativeControls={!sharedSpotify}
                                    videoRequested={sharedSpotify && spotifyView === 'desktop'}
                                    onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}
@@ -866,12 +875,21 @@
         <!-- svelte-ignore a11y_media_has_caption -->
         <video bind:this={video} use:mediaElement use:processBassBoost={{analysis: audioAnalysis, enabled: bassBoost && !!media && !spotify, wacko: wacko && !!media && !spotify}}
                playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
-               inert={reactionInputActive}
+               class:floating-thumbnail={videoThumbnail} style={`${videoThumbnailStyle}; --thumbnail-opacity: ${videoThumbnailOpacity}`}
+               inert={reactionInputActive || videoThumbnail}
                aria-label={item ? `Now playing: ${item.title}` : 'Room video player'} on:loadedmetadata={sync}
                on:canplay={sync} on:loadeddata={() => { hasFrame = true; nativeAudioOnly = video.videoWidth === 0; }} on:waiting={() => localBuffering = true}
                on:playing={() => { playing = true; localBuffering = false; }}
                on:pause={() => playing = false} on:ended={() => playing = false}
                on:error={nativePlaybackError}></video>
+        <div class="video-thumbnail-controls" class:floating-thumbnail={videoThumbnail} hidden={!videoThumbnail}
+             inert={reactionInputActive || !videoThumbnail}
+             use:floatingThumbnail={{enabled: videoThumbnail, bounds: desktopContainer, index: thumbnailIds.length, count: thumbnailCount,
+                 key: `${room?.id}:${item?.id}`, onStyle: style => videoThumbnailStyle = style}}>
+            <button class="video-thumbnail-focus" type="button" data-thumbnail-drag aria-label="Focus on video"
+                    on:click={() => focusedDesktopId = null}><span>{item?.title}</span></button>
+            <ThumbnailControls title={item?.title || 'Video'} bind:opacity={videoThumbnailOpacity}/>
+        </div>
         {/if}
         <canvas bind:this={canvas} class="video-canvas" class:crt-flames={crtVisible}
                 class:video-visible={webglEffectsActive && (crtVisible || !!media || live || spotify)} aria-hidden="true"></canvas>
@@ -1212,9 +1230,17 @@
     .video-viewport:has(.desktop-thumbnails, .desktop-focused) { min-height: min(320px, 100dvh); }
     .desktop-grid :global(.desktop-tile) { pointer-events: auto; }
     .desktop-grid :global(.desktop-tile[inert]), .desktop-grid :global(.desktop-tile[inert] button) { pointer-events: none; }
-    .media-desktop-focused > video, .media-desktop-focused > .video-canvas.crt-flames,
+    .media-desktop-focused > video:not(.floating-thumbnail), .media-desktop-focused > .video-canvas.crt-flames,
     .media-desktop-focused > .screen-message, .media-desktop-focused > .spotify-player,
     .media-desktop-focused :global(.crt-screen) { visibility: hidden; }
+    .video-thumbnail-controls { z-index: 5; background: transparent; }
+    .video-thumbnail-controls[hidden] { display: none; }
+    .video-thumbnail-focus { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0;
+        display: flex; justify-content: center; align-items: flex-start;
+        border: 1px solid #ffffff38; border-radius: 5px; background: transparent; color: #eee; font: inherit; font-size: 11px; }
+    .video-thumbnail-focus span { max-width: calc(100% - 64px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        background: #000c; padding: 4px 6px; border-radius: 3px; }
+    .video-thumbnail-focus:hover, .video-thumbnail-focus:focus-visible { border-color: var(--accent); }
 </style>
 {#if fallbackNotice && media}
     <p class="delivery-notice" role="status">{fallbackNotice}</p>

@@ -8,6 +8,7 @@ import path from 'node:path';
 import {chromium, firefox} from 'playwright';
 import {start, until} from './helpers.js';
 import {makeItem} from '../server/rooms.js';
+import {checkThumbnailInteractions} from './thumbnail-browser-helpers.js';
 
 const firefoxReceiver = process.env.DESKTOP_TEST_FIREFOX === 'true';
 const tcpOnly = process.env.DESKTOP_TEST_TCP === 'true';
@@ -125,6 +126,7 @@ test('multiple users tile and focus independent desktops while stacking volume a
     assert.equal(await firstSlider.inputValue(), '1', 'Streams start at 100% of master volume');
     await setStreamVolume(0.5);
     const firstControls = viewer.locator(`[data-item-id="${firstId}"] .desktop-controls`);
+    await firstVideo.hover();
     await firstControls.getByRole('button', {name: /^Pause /}).click();
     await firstControls.getByRole('button', {name: /^Mute /}).click();
     instance.rooms.changed(room);
@@ -165,6 +167,7 @@ test('multiple users tile and focus independent desktops while stacking volume a
     await setVolume(0.65);
     const masterBeforeWheel = await viewer.getByRole('slider', {name: 'Volume on this device'}).inputValue();
     const scrollBeforeWheel = await viewer.evaluate(() => window.scrollY);
+    await firstVideo.hover();
     await firstSlider.hover();
     await viewer.mouse.wheel(0, -100);
     await until(() => firstSlider.inputValue().then(value => value === '0.35'));
@@ -209,7 +212,7 @@ test('multiple users tile and focus independent desktops while stacking volume a
         const bounds = control.getBoundingClientRect();
         const tile = control.closest('.desktop-tile').getBoundingClientRect();
         const slider = control.querySelector('input').getBoundingClientRect();
-        const thumbnails = document.fullscreenElement === control.closest('.desktop-tile') ? []
+        const thumbnails = document.fullscreenElement === control.closest('.desktop-tile') || control.closest('.thumbnail') ? []
             : [...control.closest('.desktop-grid').querySelectorAll('.thumbnail')];
         return slider.width >= 30 && bounds.top >= tile.top && bounds.bottom <= tile.bottom &&
             thumbnails.every(thumbnail => {
@@ -244,11 +247,11 @@ test('multiple users tile and focus independent desktops while stacking volume a
     await viewer.mouse.move(0, 0);
     await until(() => thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity) === 0.8));
     await thumbnail.hover();
-    await until(() => thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity) === 1));
+    assert.equal(await thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity)), 0.8, 'Hover preserves the chosen opacity');
     await viewer.mouse.move(0, 0);
     await until(() => thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity) === 0.8));
     await thumbnail.locator('.desktop-focus').focus();
-    await until(() => thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity) === 1));
+    assert.equal(await thumbnail.evaluate(tile => Number(getComputedStyle(tile).opacity)), 0.8, 'Keyboard focus preserves opacity');
     await viewer.getByRole('button', {name: 'Show all desktops', exact: true}).focus();
     assert.equal(await senders[0].locator('.desktop-tile.focused').count(), 0, 'Focus is local to the viewer');
     await viewer.screenshot({path: 'test-artifacts/desktop-focused.png', fullPage: true});
@@ -809,15 +812,15 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
 }
 }
 
-test('desktop WebRTC resumes HLS and survives added and replayed video without replacing streams', {timeout: 90000}, async t => {
+test('desktop WebRTC accompanies HLS and swaps video thumbnails without replacing playback', {timeout: 150000}, async t => {
     const {instance, url, dir} = await start(t);
     const sample = path.join(dir, 'desktop-resume.mp4');
     await promisify(execFile)(instance.media.config.ffmpeg, ['-v', 'error', '-y', '-f', 'lavfi', '-i',
         'color=c=blue:s=640x360:r=10', '-f', 'lavfi', '-i', 'sine=frequency=220:sample_rate=48000',
-        '-t', '45', '-c:a', 'aac', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '20',
+        '-t', '120', '-c:a', 'aac', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '20',
         '-pix_fmt', 'yuv420p', '-movflags', '+faststart', sample]);
     instance.app.get('/desktop-resume.mp4', (_req, res) => res.sendFile(sample, {dotfiles: 'allow'}));
-    t.mock.method(instance.youtube, 'resolve', async () => ({duration: 45, inputs: [{url: `${url}/desktop-resume.mp4`, headers: {}}]}));
+    t.mock.method(instance.youtube, 'resolve', async () => ({duration: 120, inputs: [{url: `${url}/desktop-resume.mp4`, headers: {}}]}));
     const browser = await chromium.launch({channel: 'chrome', headless: true, args: ['--autoplay-policy=no-user-gesture-required']});
     t.after(() => browser.close());
     const sender = await browser.newPage(), viewer = await browser.newPage();
@@ -845,27 +848,43 @@ test('desktop WebRTC resumes HLS and survives added and replayed video without r
     });
     await join(sender, url); await join(viewer, url);
     const room = instance.rooms.get('lobby');
-    const item = makeItem({kind: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk'}, {title: 'Resume fixture', duration: 45});
+    const item = makeItem({kind: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk'}, {title: 'Resume fixture', duration: 120});
     instance.rooms.add(room, [item]);
     await until(() => item.media?.bufferedUntil >= 20);
     instance.rooms.stamp(room, 12, false); instance.rooms.changed(room);
     for (const page of [sender, viewer]) await until(() => page.locator('video').evaluate(video => video.currentTime >= 12 && !video.paused));
+    for (const page of [sender, viewer]) await page.locator('video').evaluate(video => {
+        window.retainedVideo = {video, src: video.currentSrc, time: video.currentTime};
+    });
+    const startingPlayback = {...room.playback};
     await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
     await sender.getByRole('button', {name: 'Choose screen to share'}).click();
-    await until(() => room.current?.kind === 'desktop');
-    const resumeAt = room.queue[0].resumeAt;
-    assert.ok(resumeAt >= 12);
-    await until(() => viewer.locator('video').evaluate(video => video.srcObject && video.readyState >= 2 && !video.paused));
-    await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
-    await until(() => room.current?.id === item.id);
+    await until(() => viewer.locator('.desktop-tile video').evaluate(video => video.srcObject && video.readyState >= 2 && !video.paused));
+    assert.equal(room.current, item);
+    assert.deepEqual(room.queue, []);
+    assert.deepEqual(room.playback, startingPlayback);
     for (const page of [sender, viewer]) {
-        await until(() => page.locator('video').evaluate((video, resume) => video.srcObject === null &&
-            video.readyState >= 2 && !video.paused && video.currentTime >= resume - 0.75, resumeAt));
+        assert.equal(await page.locator('.desktop-tile.thumbnail').count(), 1);
+        assert.equal(await page.locator('.video-viewport > video').evaluate(video =>
+            video === window.retainedVideo.video && video.currentSrc === window.retainedVideo.src &&
+            !video.paused && video.currentTime >= window.retainedVideo.time), true, 'Incoming stream retains ongoing HLS playback');
+    }
+    await t.test('video and stream thumbnail gestures, opacity, hover volume and swaps', async () => {
+        await checkThumbnailInteractions(viewer, sender, room, instance);
+    });
+    await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
+    await until(() => room.current?.id === item.id && room.desktops.length === 0);
+    for (const page of [sender, viewer]) {
+        await until(() => page.locator('video').evaluate(video => video.srcObject === null &&
+            video === window.retainedVideo.video && video.readyState >= 2 && !video.paused && video.currentTime >= 12));
+        await page.locator('.video-viewport').hover();
         assert.equal(await page.getByRole('button', {name: 'Pause for everyone'}).isDisabled(), false);
     }
     await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
     await sender.getByRole('button', {name: 'Choose screen to share'}).click();
     await until(() => viewer.locator('.desktop-tile video').evaluate(video => video.srcObject && video.readyState >= 2 && !video.paused));
+    instance.rooms.control(room, {action: 'pause', revision: room.playback.revision});
+    await until(() => viewer.locator('.video-viewport > video').evaluate(video => video.paused));
     await viewer.locator('.desktop-tile video').evaluate(video => {
         video.muted = true;
         video.volume = 0.5;
@@ -878,8 +897,11 @@ test('desktop WebRTC resumes HLS and survives added and replayed video without r
         Math.abs(video.volume - expected) < 0.0001, expected));
     await until(() => desktopVideo.evaluate(video => video.srcObject.getAudioTracks().length === 1));
     await expectDesktopVolume(0.5);
+    await viewer.locator('.desktop-tile .desktop-focus').click();
+    assert.equal(await mainVideo.evaluate(video => video.classList.contains('floating-thumbnail')), true);
     const added = makeItem({...item.source}, {title: 'Added during sharing', duration: 45});
     instance.rooms.add(room, [added], 0);
+    instance.rooms.advance(room);
     assert.equal(room.current.id, added.id);
     for (const page of [sender, viewer]) {
         await until(() => page.locator('.video-viewport > video').evaluate(video => video.readyState >= 2 && !video.paused));
@@ -947,7 +969,6 @@ test('desktop WebRTC resumes HLS and survives added and replayed video without r
     await viewer.getByRole('button', {name: 'Back to video'}).click();
     await checkConcurrent();
     await viewer.setViewportSize({width: 1280, height: 720});
-    instance.rooms.advance(room);
     instance.rooms.advance(room);
     assert.equal(room.current.id, session.item.id);
     assert.deepEqual(room.queue, []);

@@ -1095,6 +1095,21 @@ ul, ol {
     opacity: 1;
 }
 
+.video-viewport .floating-thumbnail:not(:fullscreen) {
+    position: absolute;
+    inset: auto;
+    left: var(--thumbnail-left, 0px);
+    top: var(--thumbnail-top, 0px);
+    width: var(--thumbnail-width, 160px);
+    height: var(--thumbnail-height, 90px);
+    z-index: 4;
+    opacity: var(--thumbnail-opacity, 1);
+    border-radius: 5px;
+}
+
+[data-thumbnail-drag] { touch-action: none; cursor: grab; }
+.thumbnail-dragging [data-thumbnail-drag] { cursor: grabbing; }
+
 .video-canvas {
     background: transparent;
     pointer-events: none;

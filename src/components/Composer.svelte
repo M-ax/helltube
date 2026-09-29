@@ -326,7 +326,7 @@
             <div><strong>Your screen, live with the room.</strong>
                 <p id="desktop-help">Choose a window, an entire display, or a browser tab in the picker. Enable Share audio if you want to include sound; audio is optional.
                     Audio choices depend on your browser and operating system; a Chrome or Edge tab supports tab audio.
-                    Window sharing may include all system sound. Desktops play together; the queue resumes when the last share stops.</p></div>
+                    Window sharing may include all system sound. Your stream appears as a thumbnail alongside any playing video. Click a thumbnail to switch your main view.</p></div>
             {#if $desktopState.status === 'idle'}
                 <button class="button primary desktop-start" aria-describedby="desktop-help"
                         disabled={!connected || !room || !!busy || !!desktopUnavailable}

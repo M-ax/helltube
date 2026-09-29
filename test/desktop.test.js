@@ -39,29 +39,68 @@ async function publish(h) {
     return {session, connection, producer};
 }
 
-test('metal sharing interrupts and resumes video, never enters history, and rejects live playback controls', async t => {
+test('metal sharing leaves paused video, queue, history and playback revision intact', async t => {
     const h = fixture(t);
     const video = makeItem({kind: 'http', url: 'https://example.com/video.mp4'}, {duration: 100});
     h.rooms.add(h.room, [video]);
     h.rooms.stamp(h.room, 25, true);
+    const playback = {...h.room.playback};
     const {session} = await publish(h);
-    assert.equal(h.room.current.transport, 'mediasoup');
-    assert.equal(h.room.queue[0].id, video.id);
-    for (const action of ['pause', 'play', 'seek', 'previous']) {
-        assert.throws(() => h.rooms.control(h.room, {action, revision: h.room.playback.revision, position: 0}), /live/);
-    }
+    assert.equal(h.room.current, video);
+    assert.deepEqual(h.room.queue, []);
+    assert.deepEqual(h.room.playback, playback);
     assert.throws(() => h.rooms.replay(h.room, video.id), /no longer in the recent history/);
     h.advance(90000); h.desktop.tick(); h.rooms.tick();
-    assert.equal(h.room.playback.paused, false);
-    assert.equal(h.rooms.position(h.room), 90);
-    assert.equal(h.room.current.media, null);
+    assert.equal(h.room.playback.paused, true);
+    assert.equal(h.rooms.position(h.room), 25);
     h.desktop.stop(h.ws);
     assert.equal(h.room.current.id, video.id);
     assert.equal(h.room.playback.position, 25);
     assert.equal(h.room.history.length, 0);
+    assert.deepEqual(h.room.playback, playback);
     assert.equal(session.router.closed, true);
     assert.equal(session.publisher.transport.closed, true);
 });
+
+test('an empty room still starts live playback and rejects synchronized video controls', async t => {
+    const h = fixture(t);
+    const {session} = await publish(h);
+    assert.equal(h.room.current, session.item);
+    assert.equal(h.room.playback.paused, false);
+    for (const action of ['pause', 'play', 'seek', 'previous']) {
+        assert.throws(() => h.rooms.control(h.room, {action, revision: h.room.playback.revision, position: 0}), /live/);
+    }
+    h.desktop.stop(h.ws);
+    assert.equal(h.room.current, null);
+    assert.deepEqual(h.room.history, []);
+});
+
+for (const status of ['ready', 'preparing', 'error']) {
+for (const paused of [true, false]) {
+test(`first stream preserves ${status} video (${paused ? 'paused' : 'playing'}) even with a full queue`, async t => {
+    const h = fixture(t);
+    const video = makeItem({kind: 'http', url: 'https://example.com/video.mp4'}, {duration: 100, status});
+    const queued = makeItem({kind: 'http', url: 'https://example.com/next.mp4'});
+    h.rooms.add(h.room, [video, queued]);
+    h.rooms.stamp(h.room, 12, paused);
+    h.rooms.maxQueue = 1;
+    const playback = {...h.room.playback}, resumeWhenReady = h.room.resumeWhenReady;
+    await publish(h);
+    assert.equal(h.room.current, video);
+    assert.equal(video.resumeAt, undefined);
+    assert.deepEqual(h.room.queue, [queued]);
+    assert.deepEqual(h.room.playback, playback);
+    assert.equal(h.room.resumeWhenReady, resumeWhenReady);
+    h.advance(5000);
+    assert.equal(h.rooms.position(h.room), paused ? 12 : 17);
+    h.desktop.stop(h.ws);
+    assert.equal(h.room.current, video);
+    assert.deepEqual(h.room.playback, playback);
+    assert.deepEqual(h.room.queue, [queued]);
+    assert.deepEqual(h.room.history, []);
+});
+}
+}
 
 test('video codec fallback allows each advertised profile while bounding unready transport replacements', async t => {
     const h = fixture(t);
@@ -147,7 +186,7 @@ test('a viewer watches several desktops and reconnects or stops one without affe
     h.rooms.stamp(h.room, 25, true);
     const first = (await publish(h)).session;
     const secondSender = {id: 'second-sender'};
-    // The interrupted video fills this queue; additional captures need no queue slots.
+    // Captures need no video queue slots.
     h.rooms.maxQueue = 1;
     await h.desktop.start(h.room, secondSender, {id: 'second-user', displayName: 'Second'}, request);
     const second = h.desktop.sessions.get(secondSender.id);
@@ -168,9 +207,8 @@ test('a viewer watches several desktops and reconnects or stops one without affe
     h.desktop.stop(h.ws);
     assert.equal(firstView.transport.closed, true);
     assert.equal(replacement.transport.closed, false);
-    assert.equal(h.room.current.id, second.item.id);
-    assert.deepEqual(h.room.queue.map(item => item.id), [video.id]);
-    assert.equal(h.room.queue[0].resumeAt, 25);
+    assert.equal(h.room.current, video);
+    assert.deepEqual(h.room.queue, []);
     h.desktop.stop(secondSender);
     assert.equal(replacement.transport.closed, true);
     assert.equal(h.room.current.id, video.id);
@@ -182,9 +220,9 @@ test('a viewer watches several desktops and reconnects or stops one without affe
 test('skipping to queued video preserves every desktop and resumes the queue exactly once', async t => {
     const h = fixture(t);
     const videos = [1, 2].map(() => makeItem({kind: 'http', url: 'https://example.com/video.mp4'}));
-    h.rooms.add(h.room, videos);
     await publish(h);
     await h.desktop.start(h.room, {id: 'second-sender'}, h.user, request);
+    h.room.queue.push(...videos);
     const sessions = [...h.desktop.sessions.values()];
     h.rooms.control(h.room, {action: 'skip', revision: h.room.playback.revision});
     assert.equal(h.desktop.sessions.size, 2);
@@ -296,7 +334,7 @@ test('starting and stopping additional desktops leaves concurrent video playback
     assert.deepEqual(h.room.history, []);
 });
 
-test('capture persists only the interrupted video and unready publishers time out', async t => {
+test('capture persists the current video and unready publishers time out without disturbing it', async t => {
     const h = fixture(t);
     const item = makeItem({kind: 'upload', complete: true}, {duration: 100});
     h.rooms.add(h.room, [item]);

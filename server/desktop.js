@@ -42,7 +42,6 @@ export class DesktopShares {
     if (this.closed || this.sessions.has(ws.id)) {
       throw httpError(409, 'You are already sharing a desktop. Stop it before starting another.');
     }
-    if (room.current && room.current.kind !== 'desktop' && !room.desktops.some(item => item.provider !== 'spotify') && room.queue.length >= this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
     const item = makeItem({kind: 'desktop'}, {
       title: user.displayName + '’s desktop', addedBy: user.displayName, sharedBy: user.id,
       sharedByUsername: user.username,
@@ -59,12 +58,8 @@ export class DesktopShares {
       if (prepare) await prepare(session);
       this.active(session);
       if (this.rooms.rooms.get(room.id) !== room) throw httpError(404, 'Room not found.');
-      if (room.current?.kind !== 'desktop' && !room.desktops.some(item => item.provider !== 'spotify')) {
-        if (room.current && room.queue.length >= this.rooms.maxQueue) throw httpError(409, 'The room queue is full.');
-        if (room.current) {
-          room.current.resumeAt = this.rooms.position(room);
-          room.queue.unshift(room.current);
-        }
+      // Captures accompany the current video. Only an empty screen starts live playback.
+      if (!room.current) {
         room.current = item;
         room.resumeWhenReady = false;
         this.rooms.stamp(room, 0, false);
