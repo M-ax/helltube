@@ -2,7 +2,7 @@
     import {onMount, onDestroy} from 'svelte';
     import Icon from './Icon.svelte';
     import ThumbnailControls from './ThumbnailControls.svelte';
-    import {floatingThumbnail} from '../lib/thumbnail.js';
+    import {floatingThumbnail, controlsPosition} from '../lib/thumbnail.js';
     import {waitForDesktopFrame} from '../lib/desktop-video-ready.js';
 
     export let item;
@@ -25,7 +25,6 @@
     export let thumbnail = false;
     export let thumbnailIndex = 0;
     export let thumbnailCount = 1;
-    export let thumbnailHeight = 0;
     export let onFocus;
     export let videoRequested = false;
     export let onVideoReady;
@@ -104,14 +103,24 @@
     function positionControls(node, initial) {
         const grid = node.closest('.desktop-grid');
         const container = node.closest('.desktop-tile');
+        const viewport = node.closest('.video-viewport');
         let options = initial;
         let frame;
         function position() {
             const bounds = container.getBoundingClientRect();
-            const thumbnailTop = grid.getBoundingClientRect().bottom - options.thumbnailHeight;
-            const overlap = options.thumbnailHeight > 0 && !options.fullscreen && !options.thumbnail
-                ? Math.max(0, bounds.bottom - thumbnailTop) : 0;
-            node.style.bottom = `${Math.min(8 + overlap, Math.max(8, container.clientHeight - node.offsetHeight - 8))}px`;
+            if (options.thumbnail) {
+                node.style.removeProperty('left');
+                node.style.removeProperty('bottom');
+                return;
+            }
+            const obstacles = options.fullscreen ? [] : [...viewport.querySelectorAll('.floating-thumbnail')]
+                .filter(element => element !== container && element.getClientRects().length)
+                .map(element => element.getBoundingClientRect())
+                .filter(rect => rect.right > bounds.left && rect.left < bounds.right && rect.bottom > bounds.top && rect.top < bounds.bottom)
+                .map(rect => ({x: rect.left - bounds.left, y: rect.top - bounds.top, width: rect.width, height: rect.height}));
+            const position = controlsPosition(container.clientWidth, container.clientHeight, node.offsetWidth, node.offsetHeight, obstacles);
+            node.style.left = `${position.left}px`;
+            node.style.bottom = `${position.bottom}px`;
         }
         function schedule() {
             cancelAnimationFrame(frame);
@@ -121,10 +130,15 @@
         observer.observe(grid);
         observer.observe(container);
         observer.observe(node);
+        const mutations = new MutationObserver(records => {
+            if (records.some(record => record.type === 'childList' ||
+                record.target.matches('.floating-thumbnail, .desktop-tile, .video-thumbnail-controls'))) schedule();
+        });
+        mutations.observe(viewport, {subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'hidden']});
         schedule();
         return {
             update(next) { options = next; schedule(); },
-            destroy() { observer.disconnect(); cancelAnimationFrame(frame); },
+            destroy() { observer.disconnect(); mutations.disconnect(); cancelAnimationFrame(frame); },
         };
     }
 
@@ -260,7 +274,7 @@
     </div>
     {#if thumbnail}<ThumbnailControls title={item.title} bind:opacity={thumbnailOpacity}/>{/if}
     {#if nativeControls && !visualized}
-        <div class="desktop-controls" use:positionControls={{thumbnailHeight, fullscreen, thumbnail}}>
+        <div class="desktop-controls" use:positionControls={{fullscreen, thumbnail}}>
             <button class="icon-button" type="button" disabled={inputDisabled || !connected}
                     aria-label={`${paused ? 'Play' : 'Pause'} ${item.title} on this device`}
                     title={paused ? 'Play this stream' : 'Pause this stream'}
@@ -352,6 +366,9 @@
     .desktop-focus:hover { background: #29232eee; border-color: var(--accent); }
     .desktop-focus:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     .thumbnail .desktop-heading { inset: 0 0 37px; }
+    .thumbnail::after { content: ''; position: absolute; inset: 0; z-index: 6; pointer-events: none;
+        border: 1px solid #ffffff28; border-radius: inherit; }
+    .thumbnail:hover::after, .thumbnail:has(:focus-visible)::after { border-color: var(--accent); }
     .thumbnail .desktop-name { display: none; }
     .thumbnail .desktop-focus {
         display: flex;
@@ -363,10 +380,9 @@
         min-height: 0;
         padding: 0;
         background: transparent;
-        border-color: #ffffff28;
+        border: 0;
     }
     .thumbnail .desktop-focus span { max-width: calc(100% - 64px); padding: 4px 6px; background: #000c; border-radius: 3px; }
-    .thumbnail .desktop-focus:hover { border-color: var(--accent); }
     .desktop-tile:fullscreen .desktop-focus { display: none; }
     video::-webkit-media-controls-fullscreen-button { display: none; }
     .desktop-tile:fullscreen { width: 100%; height: 100%; border-radius: 0; }

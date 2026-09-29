@@ -862,7 +862,7 @@
                                    {captureMuted} {audioAnalysis} {bassBoost} {wacko} inputDisabled={reactionInputActive}
                                    {focusAvailable} unfocusLabel={mediaDesktops ? 'Back to video' : desktops.length === 1 ? 'Minimize my stream' : 'Show all desktops'} focused={focusedDesktopId === desktop.id}
                                    thumbnail={thumbnailIds.includes(desktop.id)} thumbnailIndex={thumbnailIds.indexOf(desktop.id)}
-                                   {thumbnailCount} thumbnailHeight={thumbnailCount ? thumbnailWidth * 9 / 16 : 0}
+                                   {thumbnailCount}
                                    onFocus={id => focusedDesktopId = id} nativeControls={!sharedSpotify}
                                    videoRequested={sharedSpotify && spotifyView === 'desktop'}
                                    onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}

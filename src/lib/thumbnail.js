@@ -1,6 +1,31 @@
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const ASPECT = 16 / 9;
 
+// Find the closest clear position to the usual bottom-left controls. If thumbnails
+// cover the entire tile, keep the controls in bounds with the least overlap.
+export function controlsPosition(width, height, controlWidth, controlHeight, obstacles, gap = 8) {
+    const minX = Math.min(gap, Math.max(0, width - controlWidth));
+    const minY = Math.min(gap, Math.max(0, height - controlHeight));
+    const maxX = Math.max(minX, width - controlWidth - gap);
+    const maxY = Math.max(minY, height - controlHeight - gap);
+    const xs = [minX, maxX], ys = [maxY, minY];
+    for (const rect of obstacles) {
+        xs.push(clamp(rect.x - controlWidth - gap, minX, maxX), clamp(rect.x + rect.width + gap, minX, maxX));
+        ys.push(clamp(rect.y - controlHeight - gap, minY, maxY), clamp(rect.y + rect.height + gap, minY, maxY));
+    }
+    let best;
+    for (const x of xs) for (const y of ys) {
+        const overlap = obstacles.reduce((area, rect) => area +
+            Math.max(0, Math.min(x + controlWidth, rect.x + rect.width + gap) - Math.max(x, rect.x - gap)) *
+            Math.max(0, Math.min(y + controlHeight, rect.y + rect.height + gap) - Math.max(y, rect.y - gap)), 0);
+        const distance = (x - minX) ** 2 + (y - maxY) ** 2;
+        if (!best || overlap < best.overlap || (overlap === best.overlap && distance < best.distance)) {
+            best = {x, y, overlap, distance};
+        }
+    }
+    return {left: best.x, bottom: Math.max(0, height - best.y - controlHeight)};
+}
+
 // Store user placement as fractions so it survives theater/fullscreen and viewport changes.
 export function thumbnailRect(width, height, index = 0, count = 1, placement = null) {
     width = Math.max(0, width);

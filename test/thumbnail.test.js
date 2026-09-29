@@ -1,6 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {thumbnailRect, moveThumbnail} from '../src/lib/thumbnail.js';
+import {thumbnailRect, moveThumbnail, controlsPosition} from '../src/lib/thumbnail.js';
+
+test('stream controls avoid thumbnails at every position and return when clear', () => {
+    const width = 960, height = 430, controlWidth = 200, controlHeight = 36;
+    assert.deepEqual(controlsPosition(width, height, controlWidth, controlHeight, []), {left: 8, bottom: 8});
+    for (let x = 0; x <= 720; x += 120) for (let y = 0; y <= 300; y += 50) {
+        const obstacles = [{x, y, width: 240, height: 130}, {x: 220, y: 180, width: 200, height: 120}];
+        const position = controlsPosition(width, height, controlWidth, controlHeight, obstacles);
+        const top = height - position.bottom - controlHeight;
+        assert.ok(position.left >= 8 && position.left + controlWidth <= width - 8);
+        assert.ok(top >= 8 && top + controlHeight <= height - 8);
+        for (const rect of obstacles) assert.ok(position.left + controlWidth <= rect.x - 8 ||
+            position.left >= rect.x + rect.width + 8 || top + controlHeight <= rect.y - 8 || top >= rect.y + rect.height + 8);
+    }
+});
+
+test('controls remain bounded when a thumbnail covers the whole stream', () => {
+    assert.deepEqual(controlsPosition(200, 100, 184, 36, [{x: 0, y: 0, width: 200, height: 100}]), {left: 8, bottom: 8});
+});
 
 function inside(rect, width, height) {
     assert.ok(rect.x >= 0 && rect.y >= 0);

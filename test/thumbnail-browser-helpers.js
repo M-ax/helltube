@@ -44,6 +44,12 @@ export async function checkThumbnailInteractions(page, otherViewer, room, instan
     assert.equal(await controlOpacity(), '0', 'Thumbnail volume is hidden off hover');
     await stream.hover();
     assert.equal(await controlOpacity(), '1', 'Thumbnail volume appears on hover');
+    assert.equal(await stream.evaluate(node => {
+        const border = getComputedStyle(node, '::after');
+        const focus = getComputedStyle(node.querySelector('.desktop-focus'));
+        return border.top === '0px' && border.bottom === '0px' && border.left === '0px' && border.right === '0px' &&
+            border.borderTopWidth === '1px' && focus.borderTopWidth === '0px';
+    }), true, 'The thumbnail border encloses the full tile, including volume controls');
     const volume = stream.getByRole('slider', {name: /^Volume for /});
     await volume.hover();
     const scroll = await page.evaluate(() => scrollY);
@@ -81,6 +87,22 @@ export async function checkThumbnailInteractions(page, otherViewer, room, instan
         await opacity.focus();
         assert.deepEqual(await toolStyles(), Array(2).fill({opacity: '1', pointerEvents: 'auto'}), 'Keyboard users can reveal thumbnail controls');
         await inBounds(tile);
+        if (kind === 'video') {
+            const grid = await page.locator('.desktop-grid').boundingBox();
+            const checkClear = () => stream.locator('.desktop-controls').evaluate(control => {
+                const rect = control.getBoundingClientRect();
+                const thumb = document.querySelector('.video-thumbnail-controls').getBoundingClientRect();
+                const tile = control.closest('.desktop-tile').getBoundingClientRect();
+                return rect.left >= tile.left && rect.right <= tile.right && rect.top >= tile.top && rect.bottom <= tile.bottom &&
+                    (rect.right <= thumb.left || rect.left >= thumb.right || rect.bottom <= thumb.top || rect.top >= thumb.bottom);
+            });
+            for (const [x, y] of [[0, 1], [0, 0.5], [1, 1], [1, 0], [0.5, 1]]) {
+                const current = await tile.boundingBox();
+                await drag(surface, grid.x + x * (grid.width - current.width) - current.x,
+                    grid.y + y * (grid.height - current.height) - current.y);
+                await until(checkClear);
+            }
+        }
         const before = await tile.boundingBox();
         await drag(surface, -85, -65);
         const moved = await tile.boundingBox();
