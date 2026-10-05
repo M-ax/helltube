@@ -5,7 +5,7 @@ import {randomBytes} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
-import {chromium, firefox} from 'playwright';
+import {chromium, firefox, devices} from 'playwright';
 import {start, until} from './helpers.js';
 import {makeItem} from '../server/rooms.js';
 import {checkThumbnailInteractions} from './thumbnail-browser-helpers.js';
@@ -28,6 +28,90 @@ async function availablePort() {
     const port = server.address().port;
     await new Promise(resolve => server.close(resolve));
     return port;
+}
+
+for (const blockMuted of [false, true]) {
+test(`mobile viewers without screen capture can enable ${blockMuted ? 'playback' : 'sound'} by touch`, {timeout: 60000}, async t => {
+    const {instance, url, api} = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', desktopIceServers: '[]'});
+    const browser = await chromium.launch({channel: 'chrome', headless: true});
+    t.after(() => browser.close());
+    const sender = await browser.newPage();
+    await sender.addInitScript(() => {
+        navigator.mediaDevices.getDisplayMedia = async () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 640; canvas.height = 360;
+            const context = canvas.getContext('2d');
+            const draw = () => { context.fillStyle = 'red'; context.fillRect(0, 0, 640, 360); };
+            draw();
+            const timer = setInterval(draw, 50);
+            window.addEventListener('pagehide', () => clearInterval(timer), {once: true});
+            const stream = canvas.captureStream(20);
+            const audio = new AudioContext();
+            await audio.resume();
+            const tone = audio.createOscillator();
+            const destination = audio.createMediaStreamDestination();
+            tone.connect(destination); tone.start();
+            stream.addTrack(destination.stream.getAudioTracks()[0]);
+            return stream;
+        };
+    });
+    await join(sender, url);
+    await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
+    await sender.getByRole('button', {name: 'Choose screen to share'}).click();
+    await until(() => [...instance.desktop.sessions.values()][0]?.ready);
+    assert.equal((await api('/api/users', {method: 'POST', body: {
+        username: 'mobileviewer', displayName: 'Mobile viewer', password: 'garbageTime_',
+    }})).status, 201);
+    const viewer = await browser.newPage({...devices['Pixel 7']});
+    const errors = [];
+    viewer.on('pageerror', error => errors.push(error.message));
+    await viewer.addInitScript(blockMuted => {
+        Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', {value: undefined});
+        // Enforce a mobile media policy even after the login/room gestures.
+        const play = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function () {
+            if (this.srcObject && blockMuted && window.blockDesktopAutoplay) {
+                window.blockedDesktopPlays = (window.blockedDesktopPlays || 0) + 1;
+                return Promise.reject(new DOMException('Tap to enable playback', 'NotAllowedError'));
+            }
+            if (this.srcObject && !this.muted && !window.desktopAudioUnlocked) {
+                if (!navigator.userActivation.isActive || window.blockDesktopAutoplay) {
+                    window.blockedDesktopPlays = (window.blockedDesktopPlays || 0) + 1;
+                    return Promise.reject(new DOMException('Tap to enable sound', 'NotAllowedError'));
+                }
+                window.desktopAudioUnlocked = true;
+            }
+            return play.call(this);
+        };
+        window.blockDesktopAutoplay = true;
+    }, blockMuted);
+    await viewer.goto(url);
+    await viewer.getByLabel('Username', {exact: true}).fill('mobileviewer');
+    await viewer.getByLabel('Password', {exact: true}).fill('garbageTime_');
+    await viewer.getByRole('button', {name: 'Enter Helltube'}).tap();
+    await viewer.locator('.room-card').filter({hasText: 'The living room'}).tap();
+    const video = viewer.locator('.desktop-tile video');
+    if (blockMuted) await viewer.getByRole('button', {name: 'Enable playback', exact: true}).waitFor();
+    else await until(() => video.evaluate(video => video.srcObject?.getAudioTracks().length === 1 &&
+        video.readyState >= 2 && video.videoWidth === 640 && !video.paused && video.muted), 15000);
+    assert.ok(await viewer.evaluate(() => window.blockedDesktopPlays > 0));
+    assert.equal(await video.evaluate(video => video.playsInline), true);
+    await video.evaluate(video => { window.mobileStream = video.srcObject; });
+    await viewer.evaluate(() => { window.blockDesktopAutoplay = false; });
+    await viewer.getByRole('button', {name: blockMuted ? 'Enable playback' : 'Enable sound', exact: true}).tap();
+    await until(() => video.evaluate(video => !video.muted && !video.paused && video.currentTime > 0 &&
+        video.videoWidth === 640 && video.srcObject?.getAudioTracks().length === 1));
+    assert.equal(await viewer.evaluate(() => window.desktopAudioUnlocked), true, 'Audio starts within the touch gesture');
+    const mute = viewer.locator('.desktop-controls').getByRole('button', {name: /^Mute /});
+    await mute.tap();
+    await until(() => video.evaluate(video => video.muted));
+    await viewer.setViewportSize({width: 844, height: 390});
+    assert.equal(await video.evaluate(video => video.srcObject === window.mobileStream && !video.paused && video.muted), true);
+    assert.equal(await viewer.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
+    await until(async () => await viewer.locator('.desktop-tile').count() === 0);
+    assert.deepEqual(errors, []);
+});
 }
 
 test('multiple users tile and focus independent desktops while stacking volume and preserving individual mute choices', {timeout: 120000}, async t => {

@@ -77,7 +77,11 @@ Late joiners and reconnecting viewers receive the current board. Drawings are ke
 
 ## Desktop sharing
 
+Phones and tablets can watch shared desktops without screen-capture support. If the browser blocks playback with sound, the picture starts muted; tap **Enable sound** to listen. If it also blocks muted playback, tap **Enable playback**. These temporary autoplay mutes do not change saved volume preferences. Sharing your own screen still requires a browser that provides screen capture.
+
 For native capture, scenes, and audio mixing, use **[OBS Studio with the Helltube destination](apps/obs-support/README.md)**. Open a room → **Share desktop → Stream with OBS Studio** to create its server URL and bearer token. In the customized OBS build, choose **Settings → Stream → Helltube**, paste both fields, and start streaming. Standard OBS also works by selecting its **WHIP** service with H.264 Baseline video and Opus audio. Streams appear alongside browser shares through the same low-latency relay. Run `npm run obs:setup` to reproduce the patched OBS checkout in `apps/obs-studio`; build instructions are in the guide.
+
+Strife development builds can use a [dedicated desktop embed](docs/strife-embed.md) with external room/playback controls and a **Share desktop** handoff to Strife's native picker. Strife publishing tokens are separate from standalone OBS tokens. The normal website continues to use its browser-sharing flow; native Strife sharing currently requires its optional Windows development helper.
 
 Open a room, choose **Share desktop**, then **Choose screen to share**. The browser picker lets you select an entire display, a window, or a tab. Audio is optional: enable **Share audio** to include sound, or share video only. The sharing status shows whether audio is included. Chrome/Edge tab audio is an alternative when your browser or operating system cannot capture window/display audio; window sharing can include system-wide sound. No extension is required. Sharing requires HTTPS (or localhost), browser screen-capture permission, and WebRTC. Desktop sharing works without FFmpeg or MediaRecorder.
 

@@ -16,6 +16,12 @@
     import {watchDeployment} from './lib/deployment-updates.js';
     import {createSessionStartup} from './lib/session-startup.js';
     import {createDesktopShare} from './lib/desktop-share.js';
+    import {createStrifeEmbed} from './lib/strife-embed.js';
+
+    export let embedded = false;
+    const host = createStrifeEmbed({enabled: embedded, request: api, join: id => joinRoom(id),
+        playback: changes => changePreferences(changes, {key: preferenceKey, commit: true})});
+    const hostState = host.state;
 
     const deployedCommit = __DEPLOYED_COMMIT__;
     let backendCommit = null;
@@ -61,6 +67,9 @@
     $: room = $realtimeState.room;
     $: if (!$realtimeState.selectedRoomId) theaterMode = false;
     $: connected = $realtimeState.status === 'connected' && $realtimeState.joined && browserOnline;
+    $: host.setContext({userId: user?.id || null, connected,
+        room: room && $realtimeState.selectedRoomId === room.id ? {id: room.id, name: room.name, automated: !!room.automation} : null,
+        rooms: $realtimeState.rooms.map(({id, name}) => ({id, name})), playback: playerPreferences});
     $: if (connected) manager?.reconnect();
     $: if (user && user.role !== 'admin' && modal === 'admin') modal = null;
 
@@ -295,7 +304,7 @@
             },
         });
         const stopWatching = watchDeployment({
-            buildId: import.meta.env.PROD ? __BUILD_ID__ : null, canReload: () => !manager?.hasPendingFiles() && !sharingFiles && !desktop.active(),
+            buildId: import.meta.env.PROD ? __BUILD_ID__ : null, canReload: () => !manager?.hasPendingFiles() && !sharingFiles && !desktop.active() && $hostState.status === 'idle',
             onBackendCommit: commit => backendCommit = commit,
         });
         void checkSession();
@@ -307,6 +316,7 @@
         };
     });
     onDestroy(() => {
+        host.dispose();
         desktop.dispose();
         resetPreferences();
         client.disconnect();
@@ -344,13 +354,13 @@
     <Login onLogin={authenticated} {sessionMessage}/>
 {:else}
     <a href="#main-content" class="skip-link">Skip to the screening room</a>
-    <div class="app-shell" class:theater-mode={theaterMode}>
+    <div class="app-shell" class:theater-mode={theaterMode} class:strife-embed={embedded}>
         {#if sidebarOpen}
             <button class="sidebar-scrim" aria-label="Close room navigation"
                     on:click={() => sidebarOpen = false}></button>
         {/if}
         <aside class="sidebar" class:open={sidebarOpen} aria-label="Room navigation">
-            <div class="sidebar-brand"><a class="brand" href="/" aria-label="Helltube home"><span class="brand-mark"><Icon
+            <div class="sidebar-brand"><a class="brand" href={embedded ? location.href : '/'} aria-label="Helltube home"><span class="brand-mark"><Icon
                     name="flame" size={23}/></span>helltube<span class="brand-period">.</span></a>
                 <button class="icon-button sidebar-close" aria-label="Close room navigation"
                         on:click={() => sidebarOpen = false}>
@@ -524,14 +534,14 @@
                                     username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
                                     overlay={$realtimeState.overlay} reactions={$reactions} whiteboard={$whiteboard} userId={user.id}
                                     onCommand={client.command} onAdd={focusComposer}
-                                    captureMuted={$desktopState.hasAudio}
+                                    captureMuted={$desktopState.hasAudio || ['starting', 'streaming'].includes($hostState.status)}
                                     desktopPlayback={$desktopPlayback} onRetryDesktop={desktop.retryView}
                                     onDesktopVideoChange={desktop.setVideoEnabled} onRetryDesktopVideo={desktop.retryVideo}
                                     {theaterMode} onTheaterToggle={toggleTheater}
                                     preferences={playerPreferences} {preferenceKey} onPreferencesChange={changePreferences}/>
                         {/key}
                         {#if !room?.automation}
-                            <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify} {desktop}
+                            <Composer bind:this={composer} {room} {connected} {capabilities} {manager} {notify} {desktop} {host}
                                       onPreparation={value => preparation = value}/>
                         {/if}
                         <Uploads {manager}/>

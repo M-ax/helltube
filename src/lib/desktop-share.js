@@ -14,7 +14,8 @@ export const desktopCaptureOptions = {
 export function desktopSupport({secure = globalThis.isSecureContext, devices = globalThis.navigator?.mediaDevices,
     Peer = globalThis.RTCPeerConnection} = {}) {
     if (!secure) return 'Desktop sharing requires HTTPS or localhost. Open the secure site to share.';
-    if (!devices?.getDisplayMedia || !Peer) return 'Desktop sharing is not supported in this browser. Try desktop Chrome or Edge.';
+    if (!Peer) return 'This browser does not support WebRTC desktop sharing or playback.';
+    if (typeof devices?.getDisplayMedia !== 'function') return 'This browser cannot share its screen. You can still watch shared desktops here. To share, try desktop Chrome or Edge.';
     return '';
 }
 

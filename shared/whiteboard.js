@@ -5,7 +5,7 @@ export const SPRAY_TIPS = [
     {id: 'soft', label: 'Soft cap', radius: 35, density: 14, aspect: 1, flow: .6},
     {id: 'chisel', label: 'Chisel cap', radius: 24, density: 20, aspect: .23, flow: 1},
 ];
-export const WHITEBOARD_COLORS = ['#ffffff', '#ff975e', '#ff657a', '#ffd866', '#80d9a4', '#73c7ff', '#c4a1ff'];
+export const WHITEBOARD_COLORS = ['#ffffff', '#ff975e', '#ff657a', '#ffd866', '#80d9a4', '#73c7ff', '#c4a1ff', '#000000'];
 export const WHITEBOARD_WIDTHS = [2, 4, 8];
 export const WHITEBOARD_BATCH = 32;
 export const WHITEBOARD_MAX_POINTS = 1024;

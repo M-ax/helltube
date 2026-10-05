@@ -4448,3 +4448,5 @@ progress::-moz-progress-bar {
         transition-delay: 0s !important;
     }
 }
+
+.strife-embed .sidebar-intro,.strife-embed .sidebar-note{display:none}.strife-embed .sidebar-brand{padding-bottom:12px}

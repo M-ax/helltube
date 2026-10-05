@@ -643,6 +643,7 @@ test('closing during device loading or an RPC rejects pending work and releases 
 
 test('insecure and unsupported browsers receive a useful explanation', () => {
     assert.match(desktopSupport({secure: false}), /HTTPS/);
-    assert.match(desktopSupport({secure: true, devices: {}}), /Chrome or Edge/);
+    assert.match(desktopSupport({secure: true, devices: {}, Peer: class {}}), /still watch shared desktops/);
+    assert.match(desktopSupport({secure: true, devices: {getDisplayMedia() {}}, Peer: null}), /WebRTC/);
     assert.equal(desktopSupport({secure: true, devices: {getDisplayMedia() {}}, Peer: class {}}), '');
 });

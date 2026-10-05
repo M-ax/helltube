@@ -17,6 +17,8 @@
     export let notify;
     export let onPreparation;
     export let desktop;
+    export let host;
+    const hostState = host.state;
     const desktopState = desktop.state;
     const desktopUnavailable = desktopSupport();
     let mode = 'youtube';
@@ -246,7 +248,7 @@
                     on:dragover={dragOver} on:dragleave={event => dragLeave(event, 'files')} on:drop={dropFiles}>
                 <Icon name="upload" size={16}/>
                 <span>Your files</span></button>
-            <button class:active={mode === 'desktop'} aria-pressed={mode === 'desktop'} on:click={() => mode = 'desktop'}>
+            <button class:active={mode === 'desktop'} aria-pressed={mode === 'desktop'} on:click={() => { mode = 'desktop'; if ($hostState.nativeShare) host.start(); }}>
                 <Icon name="desktop" size={17}/><span>Share desktop</span></button>
         </div>
     </div>
@@ -320,6 +322,17 @@
         <input class="sr-only" tabindex="-1" aria-label="Select a local video to upload" type="file"
                multiple accept={videoFileAccept} bind:this={fileInput} on:change={chooseFile}
                disabled={uploadUnavailable}/>
+    {:else if $hostState.nativeShare}
+        <div class="desktop-share-panel">
+            <span class="upload-symbol"><Icon name="desktop" size={23}/></span>
+            <div><strong>Share to {room?.name || 'your room'} with Strife.</strong>
+                <p role="status">{$hostState.status === 'streaming' ? 'Your screen is live. Stop sharing here or in Strife.' :
+                    $hostState.status === 'idle' ? 'Choose a window or display in Strife. Your microphone stays in voice chat.' : 'Continue in Strife’s sharing window.'}</p></div>
+            {#if $hostState.status === 'idle'}
+                <button class="button primary" disabled={!connected || !room} on:click={host.start}>Choose screen in Strife</button>
+            {:else}<button class="button secondary" on:click={host.stop}>Stop sharing</button>{/if}
+        </div>
+        {#if $hostState.error}<p class="form-error" role="alert">{$hostState.error}</p>{/if}
     {:else}
         <div class="desktop-share-panel">
             <span class="upload-symbol"><Icon name="desktop" size={23}/></span>

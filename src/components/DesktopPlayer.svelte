@@ -36,6 +36,7 @@
     let fullscreenPending = false;
     let fullscreenError = '';
     let blocked = false;
+    let autoplayMuted = false;
     let loading = true;
     let paused = true;
     let error = '';
@@ -55,8 +56,8 @@
 
     $: forcedMute = captureMuted || !!playback?.local;
     $: if (video) applyVolume(video, volume * streamVolume, ducked);
-    $: streamMuted = muted || forcedMute || individuallyMuted;
-    $: if (video) applyMute(video, muted || forcedMute, individuallyMuted);
+    $: streamMuted = muted || forcedMute || individuallyMuted || autoplayMuted;
+    $: if (video) applyMute(video, muted || forcedMute || autoplayMuted, individuallyMuted);
     $: updateBassBoost(playback?.stream, bassBoost && connected && !forcedMute && !hidden, audioAnalysis, false, wacko && connected && !forcedMute && !hidden);
     $: renderedStream = boostedStream && boostedStream.original === playback?.stream ? boostedStream.stream : playback?.stream;
 
@@ -87,12 +88,28 @@
             return;
         }
         individuallyMuted = video.muted;
+        if (!video.muted) autoplayMuted = false;
         appliedMuted = video.muted;
     }
 
     function setStreamVolume(level) {
         streamVolume = Math.max(0, Math.min(1, level));
         individuallyMuted = false;
+        if (autoplayMuted) enablePlayback();
+    }
+
+    function enablePlayback() {
+        autoplayMuted = false;
+        // Apply this synchronously so play() still belongs to the tap gesture.
+        applyMute(video, muted || forcedMute, individuallyMuted);
+        void play();
+    }
+
+    function toggleMute() {
+        if (streamMuted) {
+            individuallyMuted = false;
+            if (autoplayMuted || blocked) enablePlayback();
+        } else individuallyMuted = true;
     }
 
     function scrollStreamVolume(event) {
@@ -213,7 +230,15 @@
             if (current === generation) blocked = false;
         } catch (failure) {
             if (current !== generation) return;
-            if (failure.name === 'NotAllowedError') blocked = true;
+            if (failure.name === 'NotAllowedError') {
+                // Phones can reject audible autoplay while allowing the live
+                // picture. Keep this temporary mute separate from preferences.
+                if (!node.muted) {
+                    autoplayMuted = true;
+                    applyMute(node, true, individuallyMuted);
+                    await play(node);
+                } else blocked = true;
+            }
             else if (failure.name !== 'AbortError') error = 'This desktop could not be played. Retry playback.';
         }
     }
@@ -227,6 +252,7 @@
             previousConnected = connected;
             generation++;
             blocked = false;
+            autoplayMuted = false;
             error = '';
             loading = true;
             node.pause();
@@ -284,7 +310,7 @@
             <button class="icon-button" type="button" disabled={inputDisabled || forcedMute || muted}
                     aria-label={`${streamMuted ? 'Unmute' : 'Mute'} ${item.title} on this device`}
                     title={muted ? 'Unmute the player to hear this stream' : 'Mute this stream'}
-                    on:click={() => individuallyMuted = !individuallyMuted}>
+                    on:click={toggleMute}>
                 <Icon name={streamMuted || streamVolume === 0 ? 'mute' : 'volume'} size={16}/>
             </button>
             <input class="volume-range stream-volume-range" aria-label={`Volume for ${item.title}`}
@@ -308,7 +334,7 @@
         </div>
     {:else if blocked}
         <div class="desktop-message">
-            <button class="button primary small" on:click={() => play()}><Icon name="play" size={16}/>Enable playback</button>
+            <button class="button primary small" on:click={enablePlayback}><Icon name="play" size={16}/>Enable playback</button>
         </div>
     {:else if playback?.videoError}
         <div class="desktop-message" role="alert">
@@ -319,6 +345,11 @@
         <div class="desktop-message desktop-video-loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading desktop video…</div>
     {:else if loading}
         <div class="desktop-message" role="status"><span class="spinner"></span>Connecting desktop…</div>
+    {/if}
+    {#if autoplayMuted && !blocked && !error && !playback?.error && !muted && !forcedMute && !individuallyMuted}
+        <button class="button primary small desktop-enable-sound" on:click={enablePlayback} disabled={inputDisabled || !connected}>
+            <Icon name="volume" size={16}/>Enable sound
+        </button>
     {/if}
 </div>
 
@@ -466,5 +497,14 @@
         border-radius: 7px;
         white-space: nowrap;
         pointer-events: none;
+    }
+    .desktop-enable-sound {
+        position: absolute;
+        z-index: 2;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        min-height: 44px;
+        max-width: calc(100% - 16px);
     }
 </style>

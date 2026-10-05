@@ -22,7 +22,7 @@
 
     const tools = [['spray', 'Spray paint'], ['pen', 'Pen'], ['line', 'Line'], ['arrow', 'Arrow'],
         ['rectangle', 'Rectangle'], ['ellipse', 'Circle'], ['eraser', 'Eraser']];
-    const colorNames = ['White', 'Orange', 'Pink', 'Yellow', 'Green', 'Blue', 'Purple'];
+    const colorNames = ['White', 'Orange', 'Pink', 'Yellow', 'Green', 'Blue', 'Purple', 'Black'];
     let tool = 'pen';
     let sprayTip = 'fat';
     let cursor = null;

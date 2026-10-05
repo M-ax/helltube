@@ -244,6 +244,15 @@ export async function createApp(overrides = {}) {
     obs.revoke(req.auth.user.id, req.params.id);
     res.json({ok: true});
   });
+  app.post('/api/rooms/:id/strife-token', (req, res) => {
+    limit(`obs-token:${req.auth.user.id}`, 12);
+    res.status(201).json(obs.issue(req.auth, membership(req), 'strife'));
+  });
+  app.delete('/api/rooms/:id/strife-token', (req, res) => {
+    if (typeof req.body.token !== 'string' || !/^[a-f0-9]{64}$/i.test(req.body.token)) throw httpError(400, 'Invalid publishing token.');
+    obs.revoke(req.auth.user.id, req.params.id, 'strife', req.body.token);
+    res.json({ok: true});
+  });
   app.get('/api/config', (_req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin }));
   app.get('/api/media/:jobId/access', (req, res) => {
     const job = mediaJob(req.params.jobId, req.auth);

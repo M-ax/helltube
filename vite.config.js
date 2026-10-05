@@ -18,6 +18,7 @@ const deployedCommit = normalizeCommit(commit);
 const buildId = randomUUID();
 
 export default defineConfig({
+  build: {rollupOptions: {input: {main: 'index.html', strife: 'embed/strife.html'}}},
   define: { __DEPLOYED_COMMIT__: JSON.stringify(deployedCommit), __BUILD_ID__: JSON.stringify(buildId) },
   plugins: [svelte(), milkdropPresets(), {
     name: 'frontend-version',

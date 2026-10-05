@@ -18,13 +18,13 @@ export class ObsStreams {
     return key && this.accounts.authenticate(`session=${key.sessionToken}`)?.user.id === key.userId && this.rooms.rooms.has(key.roomId);
   }
 
-  issue(auth, room) {
+  issue(auth, room, purpose = 'obs') {
     this.rooms.requireManual(room);
     this.tick();
     if (this.keys.size >= 10000) throw httpError(503, 'Too many OBS stream tokens. Revoke an unused token first.');
-    this.revoke(auth.user.id, room.id);
+    this.revoke(auth.user.id, room.id, purpose);
     const token = randomBytes(32).toString('hex');
-    const key = {id: digest(token), userId: auth.user.id, roomId: room.id, sessionToken: auth.token};
+    const key = {id: digest(token), userId: auth.user.id, roomId: room.id, sessionToken: auth.token, purpose};
     this.store.save('obs-keys', key.id, key);
     this.keys.set(key.id, key);
     return {token, path: `/api/whip/${encodeURIComponent(room.id)}`, expires: this.accounts.sessions.get(auth.token).expires};
@@ -40,8 +40,9 @@ export class ObsStreams {
     }
   }
 
-  revoke(userId, roomId) {
-    for (const key of this.keys.values()) if (key.userId === userId && key.roomId === roomId) this.remove(key);
+  revoke(userId, roomId, purpose = 'obs', token = null) {
+    for (const key of this.keys.values()) if (key.userId === userId && key.roomId === roomId &&
+      (key.purpose || 'obs') === purpose && (token === null || key.id === digest(token))) this.remove(key);
   }
 
   authenticate(header, roomId) {
@@ -78,7 +79,7 @@ export class ObsStreams {
     try {
       await this.desktop.start(room, ws, user, {requestId: id, transport: 'mediasoup'}, {h264Level: '2a', prepare: async session => {
         const transport = session.publisher.transport;
-        session.item.title = `${user.displayName}’s OBS stream`;
+        session.item.title = `${user.displayName}’s ${key.purpose === 'strife' ? 'Strife' : 'OBS'} stream`;
         const tracks = offer.media.map(m => obsRtpParameters(m, session.router.rtpCapabilities));
         const first = offer.media[0];
         const fingerprint = first.fingerprint || offer.fingerprint;
