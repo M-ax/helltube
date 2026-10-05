@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {httpError} from './config.js';
 import {WHITEBOARD_TOOLS, SPRAY_TIPS, WHITEBOARD_COLORS, WHITEBOARD_WIDTHS, WHITEBOARD_BATCH,
     WHITEBOARD_MAX_POINTS, WHITEBOARD_MAX_SHAPES, WHITEBOARD_ROOM_POINTS,
+    WHITEBOARD_FONTS, WHITEBOARD_FONT_SIZES, WHITEBOARD_MAX_TEXT,
     validWhiteboardPoint, whiteboardPoint} from '../shared/whiteboard.js';
 
 export class Whiteboards {
@@ -10,19 +11,45 @@ export class Whiteboards {
         this.rooms = new Map();
     }
 
-    ensure(roomId) {
-        if (!this.rooms.has(roomId)) this.rooms.set(roomId, {epoch: randomUUID(), revision: 0, shapes: new Map()});
-        return this.rooms.get(roomId);
+    ensure(roomId, videoId = '') {
+        if (!this.rooms.has(roomId)) this.rooms.set(roomId, new Map());
+        const boards = this.rooms.get(roomId);
+        if (!boards.has(videoId)) boards.set(videoId, {videoId, epoch: randomUUID(), revision: 0, shapes: new Map()});
+        return boards.get(videoId);
     }
 
-    snapshot(roomId) {
-        const state = this.ensure(roomId);
-        return {type: 'whiteboard:state', roomId, epoch: state.epoch, revision: state.revision,
+    sync(room) {
+        const visible = [room.current, ...room.desktops].filter(Boolean).map(item => item.id);
+        if (!visible.length) visible.push('');
+        const retained = new Set([...visible, ...room.history.map(item => item.id), ...room.queue.map(item => item.id)]);
+        for (const id of this.rooms.get(room.id)?.keys() || []) {
+            if (!retained.has(id)) this.rooms.get(room.id).delete(id);
+        }
+        for (const [id, state] of this.rooms.get(room.id) || []) {
+            if (visible.includes(id)) continue;
+            for (const shape of state.shapes.values()) {
+                if (shape.complete) continue;
+                shape.complete = true;
+                this.publish(room.id, state, {action: 'end', id: shape.id});
+            }
+        }
+        for (const id of visible) {
+            if (!this.rooms.get(room.id)?.has(id)) this.broadcast(room.id, this.snapshot(room.id, id));
+        }
+    }
+
+    snapshots(roomId) {
+        return [...(this.rooms.get(roomId)?.keys() || [])].map(id => this.snapshot(roomId, id));
+    }
+
+    snapshot(roomId, videoId = '') {
+        const state = this.ensure(roomId, videoId);
+        return {type: 'whiteboard:state', roomId, videoId, epoch: state.epoch, revision: state.revision,
             shapes: [...state.shapes.values()]};
     }
 
     publish(roomId, state, event) {
-        this.broadcast(roomId, {type: 'whiteboard:event', roomId, epoch: state.epoch,
+        this.broadcast(roomId, {type: 'whiteboard:event', roomId, videoId: state.videoId, epoch: state.epoch,
             revision: ++state.revision, ...event});
     }
 
@@ -48,13 +75,18 @@ export class Whiteboards {
     command(roomId, clientId, user, message) {
         // Queued input from a previous room must never modify the newly joined room.
         if (message.roomId !== roomId) throw httpError(409, 'The whiteboard room changed.');
-        const state = this.ensure(roomId);
+        const videoId = message.videoId || '';
+        if (typeof videoId !== 'string' || videoId.length > 128) throw httpError(400, 'Invalid whiteboard video.');
+        const state = this.ensure(roomId, videoId);
         if (message.epoch !== state.epoch) return false;
         const {action, id} = message;
         if (action === 'begin') {
             if (typeof id !== 'string' || !/^[\w-]{1,64}$/.test(id)
                 || !WHITEBOARD_TOOLS.includes(message.tool) || !WHITEBOARD_COLORS.includes(message.color)
                 || (message.tool === 'spray' && !SPRAY_TIPS.some(tip => tip.id === message.tip))
+                || (message.tool === 'text' && (typeof message.text !== 'string' || !message.text.trim()
+                    || message.text.length > WHITEBOARD_MAX_TEXT || /[\r\n]/.test(message.text)
+                    || !WHITEBOARD_FONTS.includes(message.fontFamily) || !WHITEBOARD_FONT_SIZES.includes(message.fontSize)))
                 || !WHITEBOARD_WIDTHS.includes(message.width) || !validWhiteboardPoint(message.point)) {
                 throw httpError(400, 'Invalid whiteboard drawing.');
             }
@@ -65,7 +97,8 @@ export class Whiteboards {
             const shape = {id, clientId, userId: user.id, author: user.displayName || user.username,
                 tool: message.tool, color: message.color, width: message.width,
                 ...(message.tool === 'spray' ? {tip: message.tip} : {}),
-                points: [whiteboardPoint(message.point)], complete: false};
+                ...(message.tool === 'text' ? {text: message.text, fontFamily: message.fontFamily, fontSize: message.fontSize} : {}),
+                points: [whiteboardPoint(message.point)], complete: message.tool === 'text'};
             state.shapes.set(id, shape);
             this.publish(roomId, state, {action, shape, removed});
         } else if (action === 'draw' || action === 'end') {
@@ -103,16 +136,16 @@ export class Whiteboards {
             state.shapes.clear();
             state.epoch = randomUUID();
             state.revision = 0;
-            this.broadcast(roomId, this.snapshot(roomId));
+            this.broadcast(roomId, this.snapshot(roomId, videoId));
         } else throw httpError(400, 'Unknown whiteboard action.');
         return true;
     }
 
     leave(roomId, clientId, empty = false) {
         if (empty) { this.rooms.delete(roomId); return; }
-        const state = this.rooms.get(roomId);
-        if (!state) return;
-        for (const shape of state.shapes.values()) {
+        const boards = this.rooms.get(roomId);
+        if (!boards) return;
+        for (const state of boards.values()) for (const shape of state.shapes.values()) {
             if (shape.clientId !== clientId || shape.complete) continue;
             shape.complete = true;
             this.publish(roomId, state, {action: 'end', id: shape.id});

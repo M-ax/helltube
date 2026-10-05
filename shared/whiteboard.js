@@ -1,4 +1,4 @@
-export const WHITEBOARD_TOOLS = ['spray', 'pen', 'line', 'arrow', 'rectangle', 'ellipse'];
+export const WHITEBOARD_TOOLS = ['spray', 'pen', 'line', 'arrow', 'rectangle', 'ellipse', 'text'];
 export const SPRAY_TIPS = [
     {id: 'skinny', label: 'Skinny cap', radius: 8, density: 12, aspect: 1, flow: .7},
     {id: 'fat', label: 'Fat cap', radius: 25, density: 26, aspect: 1, flow: 1.4},
@@ -6,6 +6,9 @@ export const SPRAY_TIPS = [
     {id: 'chisel', label: 'Chisel cap', radius: 24, density: 20, aspect: .23, flow: 1},
 ];
 export const WHITEBOARD_COLORS = ['#ffffff', '#ff975e', '#ff657a', '#ffd866', '#80d9a4', '#73c7ff', '#c4a1ff', '#000000'];
+export const WHITEBOARD_FONTS = ['Arial', 'Georgia', 'Courier New', 'Verdana', 'Times New Roman'];
+export const WHITEBOARD_FONT_SIZES = [12, 18, 24, 32, 48, 64, 96];
+export const WHITEBOARD_MAX_TEXT = 500;
 export const WHITEBOARD_WIDTHS = [2, 4, 8];
 export const WHITEBOARD_BATCH = 32;
 export const WHITEBOARD_MAX_POINTS = 1024;
@@ -28,6 +31,7 @@ export function emptyWhiteboard() {
 
 // Only structured coordinates reach the SVG renderer; SVG markup is never accepted.
 export function reduceWhiteboard(state, message) {
+    if ((message.videoId || '') !== (state.videoId || '')) return state;
     if (message.type === 'whiteboard:state') return {...message, error: null};
     if (message.type === 'whiteboard:error') return {...state, error: message};
     if (message.epoch !== state.epoch || message.revision <= state.revision) return state;
@@ -41,4 +45,15 @@ export function reduceWhiteboard(state, message) {
                 : [shape.points[0], message.points.at(-1)]});
     }
     return {...state, shapes, revision: message.revision};
+}
+
+// Keep independent epochs and revisions for every video in the room.
+export function reduceWhiteboards(state, message) {
+    if (!message.videoId) return {...reduceWhiteboard(state, message), boards: state.boards || {}};
+    const board = state.boards?.[message.videoId] || {...emptyWhiteboard(), videoId: message.videoId};
+    return {...state, boards: {...state.boards, [message.videoId]: reduceWhiteboard(board, message)}};
+}
+
+export function videoWhiteboard(state, videoId = '') {
+    return videoId ? state.boards?.[videoId] || {...emptyWhiteboard(), videoId} : state;
 }

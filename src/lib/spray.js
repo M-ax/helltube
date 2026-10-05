@@ -2,9 +2,9 @@ import {SPRAY_TIPS, WHITEBOARD_INTERVAL} from '../../shared/whiteboard.js';
 
 const cache = new WeakMap();
 
-export function sprayGeometry(shape) {
+export function sprayGeometry(shape, width = 960, height = 540) {
     const cached = cache.get(shape.points);
-    if (cached?.id === shape.id && cached.tip === shape.tip && cached.width === shape.width) return cached.geometry;
+    if (cached?.id === shape.id && cached.tip === shape.tip && cached.width === shape.width && cached.canvasWidth === width && cached.canvasHeight === height) return cached.geometry;
     const tip = SPRAY_TIPS.find(value => value.id === shape.tip) || SPRAY_TIPS[0];
     const radius = tip.radius * shape.width / 4;
     let seed = 2166136261;
@@ -13,7 +13,7 @@ export function sprayGeometry(shape) {
     const dots = [], haze = [], drips = [];
     let anchor = null, dwell = 0, drop = null, previous = null;
     for (const [nx, ny] of shape.points) {
-        const x = nx * 960, y = ny * 540;
+        const x = nx * width, y = ny * height;
         // Tiny hand tremors still deposit paint into the same wet patch.
         if (!anchor || Math.hypot(x - anchor[0], y - anchor[1]) > radius * .45) { anchor = [x, y]; dwell = 0; drop = null; }
         dwell += WHITEBOARD_INTERVAL;
@@ -30,11 +30,11 @@ export function sprayGeometry(shape) {
         previous = [x, y];
         if (dwell > 480) {
             if (!drop) { drop = {x: anchor[0] + (random() - .5) * radius * .4, y: anchor[1], length: 0, width: 0}; drips.push(drop); }
-            drop.length = Math.min(540 - drop.y, (dwell - 480) / 1000 * 48 * tip.flow);
+            drop.length = Math.min(height - drop.y, (dwell - 480) / 1000 * 48 * tip.flow);
             drop.width = Math.min(7, 1.5 + dwell / 1300) * shape.width / 4;
         }
     }
     const geometry = {dots: dots.join(''), haze: haze.join(''), radius, aspect: tip.aspect, drips};
-    cache.set(shape.points, {id: shape.id, tip: shape.tip, width: shape.width, geometry});
+    cache.set(shape.points, {id: shape.id, tip: shape.tip, width: shape.width, canvasWidth: width, canvasHeight: height, geometry});
     return geometry;
 }

@@ -24,6 +24,7 @@
         trash: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7',
         edit: 'm15 4 5 5M4 20l5-1L21 7l-5-5L4 14Z',
         spray: 'M8 8h10v13H8ZM9 8V5h8v3M11 5V2h4v3M5 3H3M5 6H2M5 9H3',
+        text: 'M4 5h16M12 5v15M8 20h8M4 5v3M20 5v3',
         pen: 'm15 4 5 5M4 20l5-1L21 7l-5-5L4 14Z',
         line: 'M4 20 20 4',
         arrow: 'M4 20 20 4M8 4h12v12',

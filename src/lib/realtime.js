@@ -1,6 +1,6 @@
 import {get, writable} from 'svelte/store';
 import {api} from './api.js';
-import {emptyWhiteboard, reduceWhiteboard} from '../../shared/whiteboard.js';
+import {emptyWhiteboard, reduceWhiteboards} from '../../shared/whiteboard.js';
 import {closeDetails, diagnosticText, MAX_DISCONNECT_REPORTS} from '../../shared/connection-diagnostics.js';
 
 const HEARTBEAT_INTERVAL = 1500;
@@ -264,6 +264,13 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
                         clockOffset: current.clockReady ? current.clockOffset : message.serverTime - Date.now(),
                     };
                 });
+                const current = get(state);
+                if (current.room === message.room) {
+                    const retained = new Set([message.room.current, ...(message.room.desktops || []),
+                        ...(message.room.history || []), ...(message.room.queue || [])].filter(Boolean).map(item => item.id));
+                    whiteboard.update(value => ({...value, boards: Object.fromEntries(
+                        Object.entries(value.boards || {}).filter(([id]) => retained.has(id)))}));
+                }
             } else if (message.type === 'files:state') {
                 const current = get(state);
                 if (current.joined && message.roomId === current.selectedRoomId) sharedFiles.set(message);
@@ -278,7 +285,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
             } else if (['whiteboard:state', 'whiteboard:event', 'whiteboard:error'].includes(message.type)) {
                 const current = get(state);
                 if (!current.joined || message.roomId !== current.selectedRoomId) return;
-                whiteboard.update(value => reduceWhiteboard(value, message));
+                whiteboard.update(value => reduceWhiteboards(value, message));
                 if (message.type === 'whiteboard:error') onMessage(message.message, 'error');
             } else if (message.type === 'overlay') {
                 state.update((current) => ({

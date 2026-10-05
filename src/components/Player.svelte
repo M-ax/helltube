@@ -14,7 +14,7 @@
     import {roomNowPlayingTitle} from '../../shared/room-title.js';
     import Reactions from './Reactions.svelte';
     import Whiteboard from './Whiteboard.svelte';
-    import {emptyWhiteboard} from '../../shared/whiteboard.js';
+    import {emptyWhiteboard, videoWhiteboard} from '../../shared/whiteboard.js';
     import PointingFingers from './PointingFingers.svelte';
     import {trackReactionPointer} from '../lib/reaction-pointer.js';
     import MetalPipeReaction from './MetalPipeReaction.svelte';
@@ -61,6 +61,8 @@
     export let onRetryDesktopVideo;
     export let theaterMode = false;
     export let onTheaterToggle;
+    let selectedBoardId = '';
+    let boardFocus = null;
     let video;
     let canvas;
     let effectsCanvas;
@@ -166,6 +168,13 @@
     $: thumbnailIds = desktops.filter(desktop => desktop.id !== focusedDesktopId &&
         (mediaDesktops || focusedDesktopId !== null || (!!userId && desktop.sharedBy === userId))).map(desktop => desktop.id);
     $: videoThumbnail = mediaDesktops && focusedDesktopId !== null && !!item && !spotify;
+    $: boardTargets = [...(!live && item ? [item] : []), ...desktops];
+    $: if (!boardTargets.length) boardTargets = [{id: '', title: 'Room screen'}];
+    $: preferredBoard = focusedDesktopId || boardTargets[0]?.id || '';
+    $: if (boardFocus !== preferredBoard || !boardTargets.some(target => target.id === selectedBoardId)) {
+        selectedBoardId = preferredBoard;
+        boardFocus = preferredBoard;
+    }
     $: thumbnailCount = thumbnailIds.length + (videoThumbnail ? 1 : 0);
     $: desktopGrid = desktopLayout(desktops.length - thumbnailIds.length, desktopWidth, desktopHeight);
     $: thumbnailWidth = thumbnailRect(desktopWidth, desktopHeight, 0, thumbnailCount).width;
@@ -859,7 +868,7 @@
                  style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${thumbnailIds.length}; --desktop-thumbnail-width: ${thumbnailWidth}px`}>
                 {#each desktops as desktop (desktop.id)}
                     <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {userId} {connected} {volume} {muted} ducked={duckStreams}
-                                   {captureMuted} {audioAnalysis} {bassBoost} {wacko} inputDisabled={reactionInputActive}
+                                   {captureMuted} {audioAnalysis} {bassBoost} {wacko} inputDisabled={reactionInputActive} {whiteboardOpen}
                                    {focusAvailable} unfocusLabel={mediaDesktops ? 'Back to video' : desktops.length === 1 ? 'Minimize my stream' : 'Show all desktops'} focused={focusedDesktopId === desktop.id}
                                    thumbnail={thumbnailIds.includes(desktop.id)} thumbnailIndex={thumbnailIds.indexOf(desktop.id)}
                                    {thumbnailCount}
@@ -873,7 +882,7 @@
         {/if}
         {#if !live}
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video bind:this={video} use:mediaElement use:processBassBoost={{analysis: audioAnalysis, enabled: bassBoost && !!media && !spotify, wacko: wacko && !!media && !spotify}}
+        <video data-whiteboard-video={item?.id || ''} bind:this={video} use:mediaElement use:processBassBoost={{analysis: audioAnalysis, enabled: bassBoost && !!media && !spotify, wacko: wacko && !!media && !spotify}}
                playsinline preload="auto" crossorigin="anonymous" class:video-visible={!!media}
                class:floating-thumbnail={videoThumbnail} style={`${videoThumbnailStyle}; --thumbnail-opacity: ${videoThumbnailOpacity}`}
                inert={reactionInputActive || videoThumbnail}
@@ -1119,10 +1128,18 @@
             </div>
         </div>
     {/if}
-    <Whiteboard board={whiteboard} roomId={room?.id} {userId} {connected} enabled={reactionsEnabled}
-                onUnlock={() => reactionAudio?.unlock()} onSpray={spraySound}
-                bind:open={whiteboardOpen} bind:expanded={whiteboardExpanded} viewport={videoViewport}
-                controlsHeight={transportRowHeight + (live ? 8 : 28)} {onCommand}/>
+    {#each boardTargets as target (target.id)}
+        {#if target.id === selectedBoardId}
+            <Whiteboard board={videoWhiteboard(whiteboard, target.id)} videoId={target.id} roomId={room?.id} {userId} {connected} enabled={reactionsEnabled}
+                        targets={boardTargets} onTarget={id => selectedBoardId = id}
+                        onUnlock={() => reactionAudio?.unlock()} onSpray={spraySound}
+                        bind:open={whiteboardOpen} bind:expanded={whiteboardExpanded} viewport={videoViewport}
+                        controlsHeight={transportRowHeight + (live ? 8 : 28)} {onCommand}/>
+        {:else}
+            <Whiteboard board={videoWhiteboard(whiteboard, target.id)} videoId={target.id} roomId={room?.id} {userId} {connected} enabled={reactionsEnabled}
+                        readOnly viewport={videoViewport} {onCommand}/>
+        {/if}
+    {/each}
     {#if audioOnly || sharedSpotify}
         <AudioVisualizations {renderer} {analyser}
                              playing={sharedSpotify ? connected && !!spotifyStream && !room.playback.paused : spotify ? connected && !captureMuted : playing}

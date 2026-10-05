@@ -17,6 +17,7 @@
     export let bassBoost = false;
     export let wacko = false;
     export let inputDisabled = false;
+    export let whiteboardOpen = false;
     export let visualized = false;
     export let nativeControls = true;
     export let focusAvailable = false;
@@ -271,9 +272,9 @@
 <div class="desktop-tile" class:visualized class:focused class:thumbnail bind:this={tile} data-item-id={item.id} data-local={!!playback?.local}
      class:floating-thumbnail={thumbnail && !fullscreen}
      use:floatingThumbnail={{enabled: thumbnail && !fullscreen, index: thumbnailIndex, count: thumbnailCount, key: item.id}}
-     inert={inputDisabled} style:--thumbnail-opacity={thumbnailOpacity}>
+     inert={inputDisabled && !whiteboardOpen} style:--thumbnail-opacity={thumbnailOpacity}>
     <!-- svelte-ignore a11y_media_has_caption (Live desktop capture has no caption track.) -->
-    <video bind:this={video} use:attachStream={{stream: renderedStream, connected}}
+    <video data-whiteboard-video={item.id} bind:this={video} use:attachStream={{stream: renderedStream, connected}}
            use:watchVideoFrame={{stream: renderedStream, original: playback?.stream, enabled: videoRequested && connected && !blocked && !error && !playback?.error && !playback?.videoError}}
            controlslist="nofullscreen" inert={inputDisabled || visualized || !nativeControls || thumbnail} playsinline aria-label={`Shared desktop: ${item.title}`}
            on:dblclick|preventDefault={toggleFullscreen}

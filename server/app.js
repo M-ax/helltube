@@ -468,6 +468,7 @@ export async function createApp(overrides = {}) {
   function broadcastState(room) {
     const value = { type: 'state', room: rooms.snapshot(room), serverTime: Date.now() };
     for (const ws of wss.clients) if (ws.roomId === room.id) send(ws, value);
+    if (room.members.size) whiteboards.sync(room);
   }
   function leave(ws) {
     desktop.leave(ws);
@@ -565,7 +566,7 @@ export async function createApp(overrides = {}) {
           broadcastState(room);
           broadcastRooms();
           send(ws, {...reactions.snapshot(room.id), clientId: ws.id});
-          send(ws, whiteboards.snapshot(room.id));
+          for (const snapshot of whiteboards.snapshots(room.id)) send(ws, snapshot);
           send(ws, roomFiles.snapshot(room.id));
           return;
         }
@@ -589,7 +590,12 @@ export async function createApp(overrides = {}) {
         } else if (message.type === 'reaction:pointer') {
           reactions.pointer(room.id, ws.id, message, current.user.id);
         } else if (message.type === 'whiteboard') {
-          if (!whiteboards.command(room.id, ws.id, current.user, message)) send(ws, whiteboards.snapshot(room.id));
+          const videoId = message.videoId || '';
+          const visible = [room.current, ...room.desktops].filter(Boolean);
+          if (visible.length ? !visible.some(item => item.id === videoId) : videoId !== '') {
+            throw httpError(409, 'This video is no longer on screen.');
+          }
+          if (!whiteboards.command(room.id, ws.id, current.user, message)) send(ws, whiteboards.snapshot(room.id, videoId));
         } else if (message.type === 'control') {
           if (room.automation) limit(`automatic-control:${room.id}`, 4, 10000);
           if (!await spotifyDesktop.control(room, message)) rooms.control(room, message);
@@ -599,7 +605,7 @@ export async function createApp(overrides = {}) {
         else throw httpError(400, 'Unknown message type.');
       } catch (error) {
         if (message?.type === 'whiteboard') {
-          return send(ws, {type: 'whiteboard:error', roomId: ws.roomId, id: message.id,
+          return send(ws, {type: 'whiteboard:error', roomId: ws.roomId, videoId: message.videoId || '', id: message.id,
             message: error.status ? error.message : 'Invalid whiteboard command.'});
         }
         if (message?.type === 'client:disconnect') {

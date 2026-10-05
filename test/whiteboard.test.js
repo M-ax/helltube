@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Whiteboards} from '../server/whiteboard.js';
-import {emptyWhiteboard, reduceWhiteboard, WHITEBOARD_MAX_SHAPES, WHITEBOARD_ROOM_POINTS} from '../shared/whiteboard.js';
-import {whiteboardPath} from '../src/lib/whiteboard.js';
+import {emptyWhiteboard, reduceWhiteboard, WHITEBOARD_MAX_SHAPES, WHITEBOARD_ROOM_POINTS, reduceWhiteboards, videoWhiteboard} from '../shared/whiteboard.js';
+import {whiteboardPath, videoBoardBounds} from '../src/lib/whiteboard.js';
 import {start, until} from './helpers.js';
 
 function fixture() {
@@ -132,4 +132,97 @@ test('WebSockets stream before release, isolate rooms, recover snapshots, and pr
     assert.equal(instance.rooms.get('lobby').playback.revision, revision);
     instance.rooms.remove('lobby', instance.accounts.users[0]);
     assert.equal(instance.whiteboards.rooms.has('lobby'), false);
+});
+
+
+test('video boards isolate epochs, edits, undo, snapshots and retained history', () => {
+    const events = [];
+    const service = new Whiteboards({broadcast: (_room, message) => events.push(structuredClone(message))});
+    const room = {id: 'room', current: {id: 'movie'}, desktops: [{id: 'stream'}], history: [], queue: []};
+    service.sync(room);
+    const send = (videoId, action, extra = {}) => service.command('room', 'a', {id: 'alice'}, {
+        roomId: 'room', videoId, epoch: service.snapshot('room', videoId).epoch, action, ...extra,
+    });
+    const mark = {id: 'same-id', tool: 'pen', color: '#ffffff', width: 4, point: [.25, .5]};
+    send('movie', 'begin', mark);
+    send('stream', 'begin', mark);
+    send('stream', 'end', {id: mark.id});
+    send('movie', 'draw', {id: mark.id, points: [[.75, .5]]});
+    assert.equal(service.snapshot('room', 'stream').shapes[0].points.length, 1);
+    const movieEpoch = service.snapshot('room', 'movie').epoch;
+    send('stream', 'clear');
+    assert.equal(service.snapshot('room', 'movie').epoch, movieEpoch);
+    assert.equal(service.snapshot('room', 'movie').shapes.length, 1);
+    room.history = [room.current]; room.current = {id: 'next'};
+    service.sync(room);
+    assert.equal(service.snapshot('room', 'movie').shapes[0].complete, true, 'Switching videos finishes in-flight marks.');
+    assert.equal(service.snapshot('room', 'next').shapes.length, 0);
+    const state = events.reduce(reduceWhiteboards, emptyWhiteboard());
+    for (const id of ['movie', 'stream', 'next']) {
+        assert.deepEqual(videoWhiteboard(state, id).shapes, service.snapshot('room', id).shapes);
+    }
+    send('movie', 'undo');
+    assert.equal(service.snapshot('room', 'movie').shapes.length, 0);
+    room.desktops = []; room.history = [];
+    service.sync(room);
+    assert.deepEqual(service.snapshots('room').map(board => board.videoId), ['next']);
+});
+
+test('text marks validate font, size and content and participate in undo and erase', () => {
+    const h = fixture();
+    const text = {tool: 'text', text: '<svg onload="bad"> hello', fontFamily: 'Georgia', fontSize: 48};
+    for (const extra of [{text: ''}, {text: ' '.repeat(5)}, {text: 'x'.repeat(501)}, {text: 'a\nb'},
+        {fontFamily: 'url(evil)'}, {fontSize: 0}, {fontSize: '48'}, {fontSize: Infinity}]) {
+        assert.throws(() => h.begin('invalid', {...text, ...extra}), {status: 400});
+    }
+    h.begin('label', text);
+    const shape = h.service.snapshot('room').shapes[0];
+    assert.equal(shape.text, text.text);
+    assert.equal(shape.fontFamily, 'Georgia');
+    assert.equal(shape.fontSize, 48);
+    assert.equal(shape.complete, true);
+    h.send('undo');
+    assert.equal(h.service.snapshot('room').shapes.length, 0);
+    h.begin('label2', text);
+    h.send('erase', {ids: ['label2']});
+    assert.equal(h.service.snapshot('room').shapes.length, 0);
+});
+
+test('video bounds preserve source aspect and drawing scale across letterboxed and portrait windows', () => {
+    for (const [sourceWidth, sourceHeight] of [[1920, 1080], [1080, 1920], [800, 600]]) {
+        for (const box of [{width: 400, height: 800}, {width: 1200, height: 400}, {width: 960, height: 540}]) {
+            const bounds = videoBoardBounds(box, sourceWidth, sourceHeight);
+            assert.ok(Math.abs(bounds.width / bounds.height - sourceWidth / sourceHeight) < 1e-10);
+            assert.ok(bounds.width <= box.width && bounds.height <= box.height + 1e-10);
+            assert.ok(Math.abs(bounds.width / bounds.drawingWidth - bounds.height / bounds.drawingHeight) < 1e-10);
+            assert.ok(Math.abs(bounds.left * 2 + bounds.width - box.width) < 1e-10);
+            assert.ok(Math.abs(bounds.top * 2 + bounds.height - box.height) < 1e-10);
+        }
+    }
+});
+
+test('WebSocket commands cannot target another or removed video; late viewers receive every board', async t => {
+    const {instance, connect} = await start(t, {maxTranscoders: 0});
+    const room = instance.rooms.get('lobby');
+    room.current = {id: 'movie', kind: 'http', title: 'Movie', status: 'error'};
+    room.desktops = [{id: 'stream', kind: 'desktop', title: 'Stream'}];
+    const a = await connect();
+    a.send(JSON.stringify({type: 'join', roomId: room.id}));
+    await until(() => a.messages.some(message => message.type === 'whiteboard:state' && message.videoId === 'stream'));
+    for (const videoId of ['movie', 'stream']) {
+        const board = instance.whiteboards.snapshot(room.id, videoId);
+        a.send(JSON.stringify({type: 'whiteboard', roomId: room.id, videoId, epoch: board.epoch,
+            action: 'begin', id: videoId, tool: 'text', text: videoId, fontFamily: 'Arial', fontSize: 32, color: '#ffffff', width: 4, point: [.5, .5]}));
+    }
+    await until(() => instance.whiteboards.snapshot(room.id, 'stream').shapes.length === 1);
+    const b = await connect();
+    b.send(JSON.stringify({type: 'join', roomId: room.id}));
+    await until(() => b.messages.filter(message => message.type === 'whiteboard:state' && message.shapes.length === 1).length === 2);
+    a.send(JSON.stringify({type: 'whiteboard', roomId: room.id, videoId: 'unknown', action: 'clear'}));
+    await until(() => a.messages.some(message => message.type === 'whiteboard:error' && message.videoId === 'unknown'));
+    assert.equal(instance.whiteboards.rooms.get(room.id).has('unknown'), false);
+    room.desktops = []; room.version++; instance.rooms.emit('state', room);
+    a.send(JSON.stringify({type: 'whiteboard', roomId: room.id, videoId: 'stream', action: 'clear'}));
+    await until(() => a.messages.some(message => message.type === 'whiteboard:error' && message.videoId === 'stream'));
+    assert.equal(instance.whiteboards.snapshot(room.id, 'movie').shapes.length, 1);
 });

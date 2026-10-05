@@ -2,8 +2,8 @@
     import {onMount, onDestroy} from 'svelte';
     import Icon from './Icon.svelte';
     import {SPRAY_TIPS, WHITEBOARD_COLORS, WHITEBOARD_WIDTHS, WHITEBOARD_BATCH, WHITEBOARD_MAX_POINTS,
-        WHITEBOARD_INTERVAL, emptyWhiteboard, whiteboardPoint} from '../../shared/whiteboard.js';
-    import {whiteboardPath} from '../lib/whiteboard.js';
+        WHITEBOARD_INTERVAL, WHITEBOARD_FONTS, WHITEBOARD_FONT_SIZES, WHITEBOARD_MAX_TEXT, emptyWhiteboard, whiteboardPoint} from '../../shared/whiteboard.js';
+    import {whiteboardPath, videoDrawingLayer} from '../lib/whiteboard.js';
 
     import {sprayGeometry} from '../lib/spray.js';
 
@@ -11,6 +11,10 @@
     export let onUnlock = () => {};
     export let board = emptyWhiteboard();
     export let roomId = null;
+    export let videoId = '';
+    export let readOnly = false;
+    export let targets = [];
+    export let onTarget = () => {};
     export let userId = null;
     export let connected = false;
     export let enabled = true;
@@ -21,7 +25,7 @@
     export let onCommand;
 
     const tools = [['spray', 'Spray paint'], ['pen', 'Pen'], ['line', 'Line'], ['arrow', 'Arrow'],
-        ['rectangle', 'Rectangle'], ['ellipse', 'Circle'], ['eraser', 'Eraser']];
+        ['rectangle', 'Rectangle'], ['ellipse', 'Circle'], ['text', 'Text'], ['eraser', 'Eraser']];
     const colorNames = ['White', 'Orange', 'Pink', 'Yellow', 'Green', 'Blue', 'Purple', 'Black'];
     let tool = 'pen';
     let sprayTip = 'fat';
@@ -31,6 +35,12 @@
     const sprayActivity = new Map();
     let color = WHITEBOARD_COLORS[1];
     let strokeWidth = 4;
+    let text = '';
+    let fontFamily = WHITEBOARD_FONTS[0];
+    let fontSize = 32;
+    let textInput;
+    let viewportWidth = 960;
+    let viewportHeight = 540;
     let svg;
     let toggle;
     let panel;
@@ -51,8 +61,8 @@
     let panelKeyboardFocus = false;
     const PANEL_HIDE_DELAY = 3000;
 
-    $: compact = width <= 560;
-    $: ready = connected && board.roomId === roomId && !!board.epoch;
+    $: compact = viewportWidth <= 560;
+    $: ready = connected && board.roomId === roomId && (board.videoId || '') === videoId && !!board.epoch;
     $: reconcile(board, ready);
     $: if ((!ready || !enabled) && open) open = false;
     $: syncMode(open);
@@ -60,10 +70,9 @@
         .filter(shape => !erased.includes(shape.id));
     $: canUndo = shapes.some(shape => shape.userId === userId && shape.complete);
 
-    // Keep the SVG inside the viewport while the mobile controls live below it.
-    function drawingLayer(node, target) {
-        target?.appendChild(node);
-        return {update(next) { next?.appendChild(node); }, destroy() { node.remove(); }};
+    function layout(drawingWidth, drawingHeight, clientWidth, clientHeight) {
+        width = drawingWidth; height = drawingHeight;
+        viewportWidth = clientWidth; viewportHeight = clientHeight;
     }
 
     function schedulePanelHide() {
@@ -125,7 +134,7 @@
 
     function send(action, extra = {}) {
         if (!ready) return false;
-        return onCommand({type: 'whiteboard', roomId, epoch: board.epoch, action, ...extra});
+        return onCommand({type: 'whiteboard', roomId, videoId, epoch: board.epoch, action, ...extra});
     }
 
     function release() {
@@ -137,7 +146,7 @@
     }
 
     function reconcile(state, online) {
-        const nextContext = online ? `${state.roomId}:${state.epoch}` : null;
+        const nextContext = online ? `${state.roomId}:${videoId}:${state.epoch}` : null;
         if (context !== nextContext) {
             context = nextContext;
             clearTimeout(timer); timer = null;
@@ -201,6 +210,15 @@
     function begin(event) {
         if (!open || !ready || event.button !== 0 || event.isPrimary === false || pointerId !== null) return;
         event.preventDefault(); event.stopPropagation();
+        if (tool === 'text') {
+            if (!text.trim()) { showPanel(); textInput?.focus(); return; }
+            const id = globalThis.crypto.randomUUID();
+            const point = pointAt(event);
+            const shape = {id, userId, tool, color, width: strokeWidth, points: [point], text, fontFamily, fontSize, complete: true};
+            if (send('begin', {id, tool, color, width: strokeWidth, point, text, fontFamily, fontSize})) localShapes = [...localShapes, shape];
+            if (!compact) collapsePanel();
+            return;
+        }
         pointerId = event.pointerId;
         svg.setPointerCapture(pointerId);
         svg.focus({preventScroll: true});
@@ -257,16 +275,22 @@
 
     function eraseAt(point) {
         const paths = [...svg.querySelectorAll('[data-hit-id]')].reverse();
+        const texts = [...svg.querySelectorAll('[data-text-id]')].reverse();
         const from = previousErase || point;
         const steps = Math.max(1, Math.ceil(Math.hypot((point[0] - from[0]) * width, (point[1] - from[1]) * height) / 8));
         for (let index = 1; index <= steps; index++) {
             const probe = svg.createSVGPoint();
             probe.x = (from[0] + (point[0] - from[0]) * index / steps) * width;
             probe.y = (from[1] + (point[1] - from[1]) * index / steps) * height;
-            const hit = paths.find(path => !erased.includes(path.dataset.hitId) && path.isPointInStroke(probe));
-            if (!hit) continue;
-            erased = [...erased, hit.dataset.hitId];
-            pendingErase.add(hit.dataset.hitId);
+            const textHit = texts.find(node => {
+                if (erased.includes(node.dataset.textId)) return false;
+                const box = node.getBBox();
+                return probe.x >= box.x - 6 && probe.x <= box.x + box.width + 6 && probe.y >= box.y - 6 && probe.y <= box.y + box.height + 6;
+            });
+            const hitId = textHit?.dataset.textId || paths.find(path => !erased.includes(path.dataset.hitId) && path.isPointInStroke(probe))?.dataset.hitId;
+            if (!hitId) continue;
+            erased = [...erased, hitId];
+            pendingErase.add(hitId);
             if (pendingErase.size >= WHITEBOARD_BATCH) flush();
         }
         previousErase = point;
@@ -287,6 +311,7 @@
     }
 
     onMount(() => {
+        if (readOnly) return;
         const soundTimer = setInterval(() => {
             const now = performance.now();
             let active = 0;
@@ -316,8 +341,8 @@
     <div class="whiteboard-layer-mount">
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Drawing uses a pointer; tools and undo are keyboard accessible.) -->
     <svg class="whiteboard-canvas" class:drawing={open && ready} class:spraying={tool === 'spray'} class:erasing={tool === 'eraser'}
-         bind:this={svg} bind:clientWidth={width} bind:clientHeight={height}
-         use:drawingLayer={viewport}
+         bind:this={svg} data-video-id={videoId}
+         use:videoDrawingLayer={{viewport, videoId, onLayout: layout}}
          viewBox={`0 0 ${width || 960} ${height || 540}`} role="img" aria-label="Shared whiteboard" tabindex="-1"
          on:pointerleave={() => { if (pointerId === null) cursor = null; }}
          on:pointerdown={begin} on:pointermove={move} on:pointerup={end} on:pointercancel={end} on:lostpointercapture={end}>
@@ -325,9 +350,12 @@
             {#each shapes as shape (shape.id)}
                 <g data-whiteboard-id={shape.id} data-tool={shape.tool} data-complete={shape.complete}>
                     <title>{shape.author || 'You'} · {shape.tool}</title>
-                    {#if shape.tool === 'spray'}
-                        {@const paint = sprayGeometry(shape)}
-                        <g transform={`scale(${width / 960} ${height / 540})`}>
+                    {#if shape.tool === 'text'}
+                        <text data-text-id={shape.id} x={shape.points[0][0] * width} y={shape.points[0][1] * height}
+                              fill={shape.color} font-family={shape.fontFamily} font-size={shape.fontSize} dominant-baseline="hanging" xml:space="preserve">{shape.text}</text>
+                    {:else if shape.tool === 'spray'}
+                        {@const paint = sprayGeometry(shape, width, height)}
+                        <g>
                             <path d={paint.haze} stroke={shape.color} stroke-width={paint.radius * 1.1 * paint.aspect} opacity=".035" fill="none" stroke-linecap="round"/>
                             <path d={paint.dots} stroke={shape.color} stroke-width="1" opacity=".45" fill="none" stroke-linecap="round"/>
                             {#each paint.drips as drop}
@@ -343,15 +371,15 @@
                     <path d={whiteboardPath(shape, width, height)} stroke={shape.color} stroke-width={shape.width}
                           fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                     {/if}
-                    {#if open && tool === 'eraser'}
+                    {#if open && tool === 'eraser' && shape.tool !== 'text'}
                         {#if shape.tool === 'spray'}
-                            {#each sprayGeometry(shape).drips as drop}
-                                <path data-hit-id={shape.id} d={`M${drop.x * width / 960} ${drop.y * height / 540}v${drop.length * height / 540}`}
-                                      stroke="transparent" stroke-width={Math.max(20, drop.width * width / 960 + 12)} fill="none" stroke-linecap="round"/>
+                            {#each sprayGeometry(shape, width, height).drips as drop}
+                                <path data-hit-id={shape.id} d={`M${drop.x} ${drop.y}v${drop.length}`}
+                                      stroke="transparent" stroke-width={Math.max(20, drop.width + 12)} fill="none" stroke-linecap="round"/>
                             {/each}
                         {/if}
                         <path data-hit-id={shape.id} d={whiteboardPath(shape, width, height)} stroke="transparent"
-                              stroke-width={shape.tool === 'spray' ? sprayGeometry(shape).radius * 2 * width / 960 : Math.max(20, shape.width + 12)} fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                              stroke-width={shape.tool === 'spray' ? sprayGeometry(shape, width, height).radius * 2 * width / 960 : Math.max(20, shape.width + 12)} fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                     {/if}
                 </g>
             {/each}
@@ -370,6 +398,7 @@
         {/if}
     </svg>
     </div>
+    {#if !readOnly}
     <div class="whiteboard-launcher" class:expanded class:compact>
         <button class="whiteboard-toggle" class:active={open} bind:this={toggle} type="button"
                 aria-label="Whiteboard tools" aria-expanded={expanded} aria-controls="whiteboard-tools"
@@ -382,13 +411,18 @@
         </button>{/if}
     </div>
     <div class="whiteboard-dock" class:compact class:collapsed={!expanded} inert={!expanded} aria-hidden={!expanded}
-         style={`--panel-max-height: ${Math.max(100, height - controlsHeight - 64)}px`}>
+         style={`--panel-max-height: ${Math.max(100, viewportHeight - controlsHeight - 64)}px`}>
         <div class="whiteboard-dock-clip">
         <section id="whiteboard-tools" class="whiteboard-tools" aria-label="Whiteboard controls" bind:this={panel} use:trackPanelActivity>
             <header><div><strong>Whiteboard</strong><span class="live"><i></i>LIVE WITH ROOM</span></div>
                 <button type="button" class="collapse" aria-label="Collapse whiteboard tools" title="Keep drawing with the tools tucked away"
                         on:click={() => collapsePanel(true)}><Icon name={compact ? 'up' : 'chevron'} size={16}/></button>
             </header>
+            {#if targets.length > 1}
+                <label class="text-field">Video<select aria-label="Whiteboard video" value={videoId} on:change={event => { finish(); onTarget(event.currentTarget.value); }}>
+                    {#each targets as target}<option value={target.id}>{target.title}</option>{/each}
+                </select></label>
+            {/if}
             <div class="tools" role="group" aria-label="Drawing tools">
                 {#each tools as [value, label]}
                     <button type="button" aria-label={label} aria-pressed={tool === value} on:click={() => choose(value)}>
@@ -396,6 +430,13 @@
                     </button>
                 {/each}
             </div>
+            {#if tool === 'text'}
+                <div class="text-options">
+                    <label class="text-field">Text<input bind:this={textInput} bind:value={text} maxlength={WHITEBOARD_MAX_TEXT} placeholder="Type, then click the video"/></label>
+                    <label class="text-field">Font face<select bind:value={fontFamily}>{#each WHITEBOARD_FONTS as font}<option value={font}>{font}</option>{/each}</select></label>
+                    <label class="text-field">Font size<select bind:value={fontSize}>{#each WHITEBOARD_FONT_SIZES as size}<option value={size}>{size}</option>{/each}</select></label>
+                </div>
+            {/if}
             {#if tool === 'spray'}
                 <div class="spray-tips" role="group" aria-label="Spray tips">
                     {#each SPRAY_TIPS as tip}
@@ -423,15 +464,19 @@
                 <button type="button" disabled={!shapes.length} on:click={clear} title="Clear the whiteboard for everyone"><Icon name="trash" size={15}/>Clear all</button>
             </div>
             </div>
-            <p>{tool === 'spray' ? 'Hold to spray. Linger for wet paint and long drips.' : tool === 'eraser' ? 'Drag across a mark to erase it for everyone.' : 'Draw on the picture. Tools tuck away as you draw.'} <span>Esc to finish.</span></p>
+            <p>{tool === 'text' ? 'Type a label, then click the video to place it.' : tool === 'spray' ? 'Hold to spray. Linger for wet paint and long drips.' : tool === 'eraser' ? 'Drag across a mark to erase it for everyone.' : 'Draw on the picture. Tools tuck away as you draw.'} <span>Esc to finish.</span></p>
         </section>
         </div>
     </div>
+    {/if}
 {/if}
 
 <style>
+    .text-options { display: grid; gap: 8px; margin-top: 10px; }
+    .text-field { display: grid; gap: 4px; margin-bottom: 8px; font-size: 11px; }
+    .text-field input, .text-field select { width: 100%; min-width: 0; padding: 6px; color: var(--text); background: #222226; border: 1px solid #ffffff30; border-radius: 4px; }
     .whiteboard-layer-mount { display: none; }
-    .whiteboard-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; overflow: hidden; }
+    .whiteboard-canvas { position: absolute; z-index: 3; pointer-events: none; overflow: hidden; }
     .whiteboard-canvas.drawing { pointer-events: auto; cursor: crosshair; touch-action: none; user-select: none; }
     .whiteboard-canvas.spraying.drawing { cursor: none; }
     .spray-tips { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 10px; }

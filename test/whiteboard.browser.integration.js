@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {readFile} from 'node:fs/promises';
+import path from 'node:path';
 import {chromium} from 'playwright';
 import {start, until} from './helpers.js';
 
@@ -228,5 +232,173 @@ test('whiteboard tools autohide into the left edge without ending drawing and re
     assert.ok(await dock.evaluate(node => getComputedStyle(node).transitionDuration.split(',').every(value => parseFloat(value) <= .001)));
     await page.keyboard.press('Escape');
     assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+    assert.deepEqual(errors, []);
+});
+
+
+test('per-video boards follow real video aspect ratios and share styled text across window shapes', {timeout: 90000}, async t => {
+    const {instance, url} = await start(t, {maxTranscoders: 0});
+    const room = instance.rooms.get('lobby');
+    room.desktops = [
+        {id: 'landscape', kind: 'desktop', title: 'Landscape stream', addedBy: 'Landscape', status: 'ready'},
+        {id: 'portrait', kind: 'desktop', title: 'Portrait stream', addedBy: 'Portrait', status: 'ready'},
+    ];
+    room.current = room.desktops[0];
+    const browser = await chromium.launch({channel: 'chrome', headless: true});
+    t.after(() => browser.close());
+    const a = await browser.newPage({viewport: {width: 1440, height: 1000}});
+    const b = await browser.newPage({viewport: {width: 1000, height: 1000}});
+    const errors = [];
+    const feedVideos = page => page.locator('video[data-whiteboard-video]').evaluateAll(async videos => {
+        for (const video of videos) {
+            const canvas = document.createElement('canvas');
+            const portrait = video.dataset.whiteboardVideo === 'portrait';
+            canvas.width = portrait ? 360 : 640; canvas.height = portrait ? 640 : 360;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = portrait ? '#164a35' : '#26395a'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            video.srcObject = canvas.captureStream(1); video.muted = true;
+            await video.play();
+        }
+    });
+    for (const page of [a, b]) {
+        page.setDefaultTimeout(8000);
+        page.on('pageerror', error => errors.push(error.message));
+        await page.goto(url);
+        await page.getByLabel('Username', {exact: true}).fill('admin');
+        await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+        await page.getByRole('button', {name: 'Enter Helltube'}).click();
+        await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
+        await until(async () => await page.locator('.whiteboard-canvas').count() === 2);
+        await feedVideos(page);
+    }
+    const canvas = (page, id) => page.locator('.whiteboard-canvas[data-video-id="' + id + '"]');
+    const marks = (page, id) => canvas(page, id).locator('[data-whiteboard-id]');
+    const panel = page => page.getByRole('region', {name: 'Whiteboard controls'});
+    const open = async page => {
+        if (!await panel(page).isVisible()) await page.getByRole('button', {name: 'Whiteboard tools', exact: true}).click();
+    };
+    const place = async (page, id, x = .55, y = .4) => {
+        await canvas(page, id).scrollIntoViewIfNeeded();
+        const rect = await canvas(page, id).boundingBox();
+        await page.mouse.click(rect.x + rect.width * x, rect.y + rect.height * y);
+    };
+    const checkBounds = async page => {
+        await until(() => page.locator('.whiteboard-canvas').evaluateAll(boards => boards.every(board => {
+            const video = board.parentElement.querySelector('video');
+            const rect = video.getBoundingClientRect(), drawing = board.getBoundingClientRect();
+            const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+            return Math.abs(drawing.width - video.videoWidth * scale) < 1 && Math.abs(drawing.height - video.videoHeight * scale) < 1
+                && Math.abs(drawing.x - rect.x - (rect.width - drawing.width) / 2) < 1
+                && Math.abs(drawing.y - rect.y - (rect.height - drawing.height) / 2) < 1;
+        })));
+    };
+    await b.setViewportSize({width: 700, height: 1000});
+    await checkBounds(a); await checkBounds(b);
+    await open(a);
+    await panel(a).getByRole('button', {name: 'Text', exact: true}).click();
+    await panel(a).getByRole('textbox', {name: 'Text', exact: true}).fill('Hello <svg onload="bad">');
+    await panel(a).getByLabel('Font face').selectOption('Georgia');
+    await panel(a).getByLabel('Font size').selectOption('48');
+    await place(a, 'landscape');
+    await until(async () => await marks(b, 'landscape').count() === 1);
+    assert.equal(await marks(b, 'portrait').count(), 0);
+    const text = marks(b, 'landscape').locator('text');
+    assert.equal(await text.textContent(), 'Hello <svg onload="bad">');
+    assert.equal(await text.getAttribute('font-family'), 'Georgia');
+    assert.equal(await text.getAttribute('font-size'), '48');
+    assert.equal(await marks(b, 'landscape').locator('svg').count(), 0, 'Text is escaped, never interpreted as SVG markup.');
+    assert.equal(await canvas(a, 'landscape').getAttribute('viewBox'), await canvas(b, 'landscape').getAttribute('viewBox'));
+    await open(a);
+    await panel(a).getByLabel('Whiteboard video').selectOption('portrait');
+    await panel(a).getByRole('button', {name: 'Pen', exact: true}).click();
+    await place(a, 'portrait', .6, .5);
+    await until(async () => await marks(b, 'portrait').count() === 1);
+    await open(a);
+    await panel(a).getByRole('button', {name: 'Clear all'}).click();
+    await until(async () => await marks(b, 'portrait').count() === 0);
+    assert.equal(await marks(b, 'landscape').count(), 1, 'Clearing a stream leaves other video annotations intact.');
+    await panel(a).getByLabel('Whiteboard video').selectOption('landscape');
+    await panel(a).getByRole('button', {name: 'Eraser', exact: true}).click();
+    await place(a, 'landscape', .56, .42);
+    await until(async () => await marks(b, 'landscape').count() === 0);
+    await open(a);
+    await panel(a).getByRole('button', {name: 'Text', exact: true}).click();
+    await panel(a).getByRole('textbox', {name: 'Text', exact: true}).fill('Retained');
+    await place(a, 'landscape');
+    await until(async () => await marks(b, 'landscape').count() === 1);
+    await a.getByRole('button', {name: 'Finish drawing', exact: true}).click();
+    await a.getByRole('button', {name: 'Focus on Portrait', exact: true}).click();
+    await until(async () => await a.locator('.desktop-tile.focused').getAttribute('data-item-id') === 'portrait');
+    await checkBounds(a);
+    assert.equal(await marks(a, 'landscape').count(), 1, 'Annotations follow the thumbnail after changing focus.');
+    await b.setViewportSize({width: 390, height: 844}); await checkBounds(b);
+    await b.reload();
+    await until(async () => await marks(b, 'landscape').count() === 1);
+    await feedVideos(b); await checkBounds(b);
+    await open(b);
+    await panel(b).getByRole('button', {name: 'Undo mine'}).click();
+    await until(async () => await marks(a, 'landscape').count() === 0);
+    assert.deepEqual(errors, []);
+});
+
+
+test('video playback uses letterboxed bounds and restores its own annotations from history', {timeout: 90000}, async t => {
+    const {instance, url, dir} = await start(t);
+    const sample = path.join(dir, 'whiteboard-video.mp4');
+    await promisify(execFile)(instance.media.config.ffmpeg, ['-v', 'error', '-y', '-f', 'lavfi', '-i',
+        'testsrc2=size=480x360:rate=15', '-t', '30', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '30', sample]);
+    const bytes = await readFile(sample);
+    const room = instance.rooms.get('lobby');
+    for (const name of ['First video', 'Second video']) {
+        const {uploadId, chunkSize} = await instance.uploads.create(room, instance.accounts.users[0], {name, size: bytes.length, duration: 30});
+        for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+            await instance.uploads.append(instance.uploads.get(uploadId), offset, bytes.subarray(offset, offset + chunkSize), 1);
+        }
+    }
+    const firstId = room.current.id, secondId = room.queue[0].id;
+    const browser = await chromium.launch({channel: 'chrome', headless: true});
+    t.after(() => browser.close());
+    const page = await browser.newPage({viewport: {width: 1440, height: 1000}});
+    page.setDefaultTimeout(8000);
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(url);
+    await page.getByLabel('Username', {exact: true}).fill('admin');
+    await page.getByLabel('Password', {exact: true}).fill('garbageTime_');
+    await page.getByRole('button', {name: 'Enter Helltube'}).click();
+    await page.getByRole('navigation', {name: 'Screening rooms'}).getByRole('button', {name: /^The living room(?: |$)/}).click();
+    await until(() => page.locator('video').evaluate(video => video.videoWidth === 480 && video.readyState >= 2), 30000);
+    const canvas = page.locator('.whiteboard-canvas');
+    const check = async () => {
+        await until(() => canvas.evaluate(board => {
+            const video = document.querySelector('.video-viewport > video'), box = video.getBoundingClientRect(), rect = board.getBoundingClientRect();
+            const scale = Math.min(box.width / video.videoWidth, box.height / video.videoHeight);
+            return Math.abs(rect.width - video.videoWidth * scale) < 1 && Math.abs(rect.height - video.videoHeight * scale) < 1
+                && Math.abs(rect.x - box.x - (box.width - rect.width) / 2) < 1 && Math.abs(rect.y - box.y - (box.height - rect.height) / 2) < 1;
+        }));
+    };
+    await check();
+    await page.getByRole('button', {name: 'Whiteboard tools', exact: true}).click();
+    const box = await canvas.boundingBox();
+    await page.mouse.move(box.x + box.width * .6, box.y + box.height * .4);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * .8, box.y + box.height * .55, {steps: 5});
+    await page.mouse.up();
+    await until(async () => await canvas.locator('[data-complete="true"]').count() === 1);
+    const mark = instance.whiteboards.snapshot(room.id, firstId).shapes[0];
+    await page.getByRole('button', {name: 'Finish drawing', exact: true}).click();
+    await page.getByRole('button', {name: 'Toggle fullscreen', exact: true}).click();
+    await until(() => page.evaluate(() => !!document.fullscreenElement));
+    await check();
+    await page.getByRole('button', {name: 'Toggle fullscreen', exact: true}).click();
+    await page.getByRole('button', {name: 'Skip video for everyone', exact: true}).click();
+    await until(async () => await canvas.getAttribute('data-video-id') === secondId && await canvas.locator('[data-whiteboard-id]').count() === 0);
+    await page.getByRole('button', {name: 'Play previous video for everyone', exact: true}).click();
+    await until(async () => await canvas.getAttribute('data-video-id') === firstId && await canvas.locator('[data-whiteboard-id]').count() === 1);
+    assert.deepEqual(instance.whiteboards.snapshot(room.id, firstId).shapes[0], mark);
+    await page.setViewportSize({width: 390, height: 844});
+    await until(() => page.locator('video').evaluate(video => video.videoWidth === 480 && video.readyState >= 2));
+    await check();
+    assert.equal(await canvas.getAttribute('viewBox'), '0 0 960 720');
     assert.deepEqual(errors, []);
 });
