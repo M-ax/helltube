@@ -90,7 +90,9 @@ test('real Worker shares encrypted HLS cache with per-hit auth while uploads and
       '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
       '-t', '16', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '60', '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-movflags', '+faststart', sample], { timeout: 20000 });
-    instance.app.get('/worker-test-source.mp4', (_req, res) => res.sendFile(sample));
+    // A checkout may live under .delta or another hidden parent. Restrict the
+    // fixture to its own root rather than having sendFile reject that parent.
+    instance.app.get('/worker-test-source.mp4', (_req, res) => res.sendFile(path.basename(sample), { root: dir }));
     t.mock.method(instance.youtube, 'resolve', async () => ({ duration: 16,
       inputs: [{ url: `${backendOrigin}/worker-test-source.mp4`, headers: {} }] }));
     worker = await unstable_dev(path.resolve('worker.js'), {
