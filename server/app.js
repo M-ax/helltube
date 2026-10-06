@@ -27,7 +27,7 @@ import { RemoteMedia } from './remote-media.js';
 import { sourceKind } from '../shared/media-source.js';
 import { Media, available } from './media.js';
 import { StateStore } from './store.js';
-import { DirectAccess, equalSecret } from './direct-access.js';
+import { DirectAccess, equalSecret, strifeMediaOrigin, MEDIA_GRANT_TTL } from './direct-access.js';
 import { deploymentOrigin, securityHeaders, normalizeCommit } from '../shared/deployment.js';
 import { Deployment } from './deployment.js';
 import { DesktopShares } from './desktop.js';
@@ -130,12 +130,23 @@ export async function createApp(overrides = {}) {
     req.edge = equalSecret(req.headers['x-helltube-edge'], config.edgeProxySecret);
     if (req.headers['x-helltube-edge'] !== undefined && !req.edge) return next(httpError(403, 'Invalid edge proxy credentials.'));
     const direct = req.path === '/direct' || req.path.startsWith('/direct/');
+    const scopedMedia = direct && config.bareMetalOrigin && typeof req.query.grant === 'string' && req.query.grant.startsWith('v2.');
+    if (scopedMedia) {
+      const match = /^\/direct\/media\/([a-f0-9-]{36})\/([^/]+)$/.exec(req.path);
+      if (!match || !(publicMediaFile.test(match[2]) || match[2] === 'key.bin') ||
+          !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next(httpError(403, 'Invalid direct media request.'));
+      req.auth = directAccess.authenticate(req.query.grant, `media:${match[1]}`, req.headers.origin);
+      mediaJob(match[1], req.auth);
+      res.set('Access-Control-Allow-Origin', req.headers.origin);
+      res.vary('Origin');
+      res.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+    }
     const trustedDirect = direct && config.bareMetalOrigin && config.origins.includes(req.headers.origin);
     // Attachment navigations omit Origin. The download route still validates its scoped grant.
     const grantedDownload = config.bareMetalOrigin && ['GET', 'HEAD'].includes(req.method) &&
       /^\/direct\/files\/[a-f0-9-]{36}\/download$/.test(req.path) && typeof req.query.grant === 'string';
-    if (!validOrigin(req.headers.origin, req.headers.host, config) ||
-      (req.headers['sec-fetch-site'] === 'cross-site' && !trustedDirect && !grantedDownload)) {
+    if ((!scopedMedia && !validOrigin(req.headers.origin, req.headers.host, config)) ||
+      (req.headers['sec-fetch-site'] === 'cross-site' && !scopedMedia && !trustedDirect && !grantedDownload)) {
       return next(httpError(403, 'Cross-origin requests are not allowed.'));
     }
     if (direct) {
@@ -147,9 +158,10 @@ export async function createApp(overrides = {}) {
       }
       if (req.method === 'OPTIONS') {
         const headers = String(req.headers['access-control-request-headers'] || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean);
-        if (!trustedDirect || !['GET', 'HEAD', 'PUT'].includes(req.headers['access-control-request-method']) ||
+        const methods = scopedMedia ? ['GET', 'HEAD'] : ['GET', 'HEAD', 'PUT'];
+        if ((!trustedDirect && !scopedMedia) || !methods.includes(req.headers['access-control-request-method']) ||
           headers.some(header => !['content-type', 'range'].includes(header))) return next(httpError(403, 'Invalid direct request preflight.'));
-        res.set({ 'Access-Control-Allow-Methods': 'GET, HEAD, PUT', 'Access-Control-Allow-Headers': 'Content-Type, Range',
+        res.set({ 'Access-Control-Allow-Methods': methods.join(', '), 'Access-Control-Allow-Headers': 'Content-Type, Range',
           'Access-Control-Max-Age': '600' });
         return res.status(204).end();
       }
@@ -197,12 +209,13 @@ export async function createApp(overrides = {}) {
     return room;
   };
   const requireMedia = () => { if (!capabilities.ffmpeg) throw httpError(503, 'FFmpeg is missing. Install it and restart the server.'); };
-  const directUrl = (route, auth, scope) => `${config.bareMetalOrigin}${route}?grant=${directAccess.issue(auth, scope)}`;
+  const directUrl = (route, auth, scope, origin = null, grant = null) =>
+    `${config.bareMetalOrigin}${route}?grant=${grant || directAccess.issue(auth, scope, origin)}`;
   const uploadStatus = (upload, auth, status = uploads.status(upload)) => ({ ...status,
     ...(config.bareMetalOrigin ? { transferUrl: directUrl(`/direct/uploads/${upload.id}`, auth, `upload:${upload.id}`) } : {}) });
   const identifyDirect = scope => (req, res, next) => {
     if (req.query.grant !== undefined) {
-      req.auth = directAccess.authenticate(req.query.grant, scope(req));
+      req.auth = directAccess.authenticate(req.query.grant, scope(req), req.headers.origin);
       return next();
     }
     if (config.bareMetalOrigin) return next(httpError(401, 'A direct access grant is required.'));
@@ -253,14 +266,21 @@ export async function createApp(overrides = {}) {
     obs.revoke(req.auth.user.id, req.params.id, 'strife', req.body.token);
     res.json({ok: true});
   });
-  app.get('/api/config', (_req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin }));
+  app.get('/api/config', (req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin,
+    ...(config.bareMetalOrigin && strifeMediaOrigin(req.headers['x-strife-media-origin'])
+      ? { strifeDirectMedia: 1, strifeDirectMediaOrigin: config.bareMetalOrigin } : {}) }));
   app.get('/api/media/:jobId/access', (req, res) => {
     const job = mediaJob(req.params.jobId, req.auth);
-    const directOnly = ['upload', 'desktop'].includes(job.item.kind);
+    const recipient = strifeMediaOrigin(req.headers['x-strife-media-origin']);
+    const directOnly = recipient || ['upload', 'desktop'].includes(job.item.kind);
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + MEDIA_GRANT_TTL;
     const metalUrl = config.bareMetalOrigin
-      ? directUrl(`/direct/media/${job.id}/index.m3u8`, req.auth, `media:${job.id}`) : null;
+      ? directUrl(`/direct/media/${job.id}/index.m3u8`, req.auth, `media:${job.id}`, recipient,
+        recipient ? directAccess.issue(req.auth, `media:${job.id}`, recipient, expiresAt) : null) : null;
     res.json({ url: config.bareMetalOrigin && directOnly
       ? metalUrl : `/media/${job.id}/index.m3u8`,
+      ...(metalUrl && recipient ? { issuedAt, expiresAt } : {}),
       ...(metalUrl && !directOnly ? { fallbackUrl: metalUrl } : {}) });
   });
   app.get('/api/edge/media/:jobId/:file', async (req, res) => {
@@ -416,12 +436,15 @@ export async function createApp(overrides = {}) {
       contents = sponsorPlaylist(contents, job.item, job.baseTime);
       if (!config.bareMetalOrigin) return res.send(contents);
       const scope = `media:${job.id}`;
-      const keyUrl = directUrl(`/direct/media/${job.id}/key.bin`, req.auth, scope);
+      // Child requests inherit the original recipient and deadline; reading a playlist cannot renew it.
+      const grant = typeof req.query.grant === 'string' && req.query.grant.startsWith('v2.') ? req.query.grant : null;
+      const childUrl = file => directUrl(`/direct/media/${job.id}/${file}`, req.auth, scope, null, grant);
+      const keyUrl = childUrl('key.bin');
       contents = contents.replace(/^#EXT-X-KEY:.*$/gm, line => line.replace(/URI="[^"]*"/, `URI="${keyUrl}"`));
       if (req.path.startsWith('/direct/')) {
-        contents = contents.replace(/^segment-\d{6,}\.(?:ts|m4s)$/gm, file => directUrl(`/direct/media/${job.id}/${file}`, req.auth, scope));
+        contents = contents.replace(/^segment-\d{6,}\.(?:ts|m4s)$/gm, file => childUrl(file));
         contents = contents.replace(/^(#EXT-X-MAP:)URI="init\.mp4"/gm,
-          `$1URI="${directUrl(`/direct/media/${job.id}/init.mp4`, req.auth, scope)}"`);
+          `$1URI="${childUrl('init.mp4')}"`);
       }
       return res.send(contents);
     }

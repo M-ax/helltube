@@ -33,7 +33,7 @@
     import {targetPosition, driftCorrection, time, bufferDuration} from '../lib/format.js';
     import {sourceLabels, sourceIcons} from '../../shared/media-source.js';
     import {sponsorPosition} from '../../shared/sponsorblock.js';
-    import {delivery, isSameOriginUrl} from '../lib/delivery.js';
+    import {delivery, isSameOriginUrl, directMediaRequest} from '../lib/delivery.js';
     import {createBufferHealth, isProxyLoadFailure} from '../lib/buffer-health.js';
     import {createVideoRenderer} from '../lib/video-renderer.js';
     import {createSeekPreview} from '../lib/seek-preview.js';
@@ -110,6 +110,7 @@
     let sourceGeneration = 0;
     let sourceController;
     let mediaAccess = null;
+    let accessRenewal = null;
     let bufferMonitor = null;
     let bufferReport = null;
     let metalItemId = null;
@@ -208,7 +209,7 @@
     $: scheduleControlsHide(canAutoHide, holdControls);
     $: applyPreferences(preferences, preferenceKey);
     $: volumePosition = Math.round(Math.log1p(volume * (VOLUME_CURVE - 1)) / Math.log(VOLUME_CURVE) * 100) / 100;
-    $: if (video && !live) attach(item?.id, media?.url, media?.baseTime);
+    $: if (video && !live) attach(item?.id, media?.url, media?.baseTime, null, room?.id);
     $: if (video) {
         video.volume = volume;
         video.muted = muted || captureMuted;
@@ -404,6 +405,8 @@
         sourceGeneration++;
         sourceController?.abort();
         sourceController = null;
+        accessRenewal?.controller?.abort();
+        accessRenewal = null;
         mediaAccess = null;
         bufferMonitor = null;
         bufferReport = null;
@@ -432,8 +435,8 @@
         return {destroy() { cleanupSource(node); sourceKey = ''; }};
     }
 
-    async function attach(id, url, baseTime, accessOverride = null) {
-        const key = `${id || ''}|${url || ''}|${baseTime || 0}|hls`;
+    async function attach(id, url, baseTime, accessOverride = null, roomId = room?.id) {
+        const key = `${roomId || ''}|${id || ''}|${url || ''}|${baseTime || 0}|hls`;
         if (sourceKey === key) return;
         cleanupSource();
         sourceKey = key;
@@ -456,9 +459,10 @@
         sourceController = new AbortController();
         let access;
         let Hls;
+        let FetchLoader;
         try {
             // Load the decoder only for HLS playback, alongside the access request.
-            [access, {default: Hls}] = await Promise.all([
+            [access, {default: Hls, FetchLoader}] = await Promise.all([
                 accessOverride || delivery.resolveMediaAccess(url, {signal: sourceController.signal}),
                 import('hls.js'),
             ]);
@@ -476,8 +480,15 @@
         bufferMonitor = createBufferHealth();
         const source = access.url;
         const target = Math.max(0, targetPosition(room, clockOffset) - (baseTime || 0));
+        if (access.secureDirect && typeof FetchLoader !== 'function') {
+            playerError = 'Secure direct playback requires the current HLS player. Reload to update.';
+            localBuffering = false;
+            return;
+        }
         if (Hls.isSupported()) {
             const instance = new Hls({
+                ...(access.secureDirect ? {loader: FetchLoader,
+                    fetchSetup: (context, init) => directMediaRequest(source, context, init)} : {}),
                 autoStartLoad: false,
                 startPosition: target,
                 maxBufferLength: 30,
@@ -524,7 +535,7 @@
                 }
             });
             instance.attachMedia(video);
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        } else if (!access.secureDirect && video.canPlayType('application/vnd.apple.mpegurl')) {
             video.src = source;
             video.load();
         } else {
@@ -591,11 +602,51 @@
         });
     }
 
+    function refreshMediaAccess(timestamp = performance.now()) {
+        if (!connected || !mediaAccess?.secureDirect || !media ||
+            timestamp < mediaAccess.renewDeadline - 30000) return false;
+        const renewal = accessRenewal ||= {pending: false, attempts: 0, nextAttempt: 0};
+        if (renewal.pending || timestamp < renewal.nextAttempt) return false;
+        const generation = sourceGeneration;
+        const {id} = item;
+        const {url, baseTime} = media;
+        const deadline = mediaAccess.renewDeadline;
+        renewal.pending = true;
+        renewal.attempts++;
+        renewal.controller = new AbortController();
+        // A stalled access request must not consume the entire renewal window.
+        const timeout = setTimeout(() => renewal.controller.abort(), 10000);
+        void delivery.resolveMediaAccess(url, {signal: renewal.controller.signal}).then(access => {
+            if (generation !== sourceGeneration) return;
+            // Only replace the working decoder once authenticated replacement access exists.
+            sourceKey = '';
+            void attach(id, url, baseTime, access);
+        }).catch(error => {
+            if (generation !== sourceGeneration) return;
+            const transient = error.name !== 'DeliveryError' &&
+                (!error.status || error.status === 408 || error.status === 429 || error.status >= 500);
+            const retryAt = performance.now() + Math.min(8000, 1000 * 2 ** (renewal.attempts - 1));
+            if (transient && renewal.attempts < 5 && retryAt < deadline) {
+                renewal.nextAttempt = retryAt;
+                return;
+            }
+            // Denial, invalid access or exhausted/expired retries must stop, never fall back.
+            cleanupSource();
+            playerError = error.message || 'Media access could not be renewed. Retry playback.';
+            localBuffering = false;
+        }).finally(() => {
+            clearTimeout(timeout);
+            renewal.pending = false;
+        });
+        return true;
+    }
+
     function sync() {
         now = Date.now();
         if (connected) position = targetPosition(room, clockOffset, now);
         refreshPreview();
         if (live) return;
+        refreshMediaAccess();
         if (!video || !media || !connected || playerError) {
             video?.pause();
             return;
