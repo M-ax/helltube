@@ -30,6 +30,76 @@ async function availablePort() {
     return port;
 }
 
+test('admins stop individual streams from normal tiles and mobile thumbnails while other streams keep playing', {timeout: 90000}, async t => {
+    const {instance, url, api} = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', desktopIceServers: '[]'});
+    assert.equal((await api('/api/users', {method: 'POST', body: {
+        username: 'sharer', displayName: 'Sharer', password: 'garbageTime_',
+    }})).status, 201);
+    const browser = await chromium.launch({channel: 'chrome', headless: true});
+    t.after(() => browser.close());
+    const errors = [];
+    const senders = [];
+    for (let index = 0; index < 2; index++) {
+        const page = await browser.newPage();
+        page.setDefaultTimeout(15000);
+        page.on('pageerror', error => errors.push(error.message));
+        await page.addInitScript(() => {
+            navigator.mediaDevices.getDisplayMedia = async () => {
+                const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+                const context = canvas.getContext('2d');
+                const draw = () => { context.fillStyle = 'red'; context.fillRect(0, 0, 640, 360); };
+                draw();
+                const timer = setInterval(draw, 50);
+                window.addEventListener('pagehide', () => clearInterval(timer), {once: true});
+                window.capturedStream = canvas.captureStream(20);
+                return window.capturedStream;
+            };
+        });
+        await join(page, url, 'sharer');
+        await page.getByRole('button', {name: 'Share desktop', exact: true}).click();
+        await page.getByRole('button', {name: 'Choose screen to share'}).click();
+        await page.getByRole('button', {name: 'Stop sharing', exact: true}).waitFor();
+        senders.push(page);
+    }
+    const admin = await browser.newPage({viewport: {width: 1280, height: 900}});
+    admin.setDefaultTimeout(15000);
+    admin.on('pageerror', error => errors.push(error.message));
+    await join(admin, url);
+    const room = instance.rooms.get('lobby');
+    await until(() => admin.locator('.desktop-tile video').evaluateAll(videos => videos.length === 2 &&
+        videos.every(video => video.readyState >= 2 && !video.paused)), 20000);
+    const [first, second] = room.desktops;
+    const sessions = [...instance.desktop.sessions.values()];
+    const firstSession = sessions.find(session => session.item.id === first.id);
+    const secondSession = sessions.find(session => session.item.id === second.id);
+    for (const sender of senders) assert.equal(await sender.locator('.desktop-stop').count(), 0);
+    const secondVideo = admin.locator(`[data-item-id="${second.id}"] video`);
+    await secondVideo.evaluate(video => { window.retainedStream = {video, stream: video.srcObject}; });
+    await admin.locator(`[data-item-id="${second.id}"] .desktop-focus`).click();
+    await admin.setViewportSize({width: 390, height: 844});
+    const firstTile = admin.locator(`[data-item-id="${first.id}"].thumbnail`);
+    await firstTile.waitFor();
+    const stopFirst = firstTile.getByRole('button', {name: `Stop ${first.title} for everyone`, exact: true});
+    assert.equal(await stopFirst.isEnabled(), true);
+    await admin.screenshot({path: 'test-artifacts/admin-stop-stream-mobile.png'});
+    await stopFirst.click();
+    await until(() => senders[0].evaluate(() => window.capturedStream.getTracks().every(track => track.readyState === 'ended')));
+    await until(() => admin.locator('.desktop-tile').count().then(count => count === 1));
+    assert.equal(firstSession.router.closed, true);
+    assert.equal(secondSession.router.closed, false);
+    assert.equal(await senders[1].evaluate(() => window.capturedStream.getTracks().every(track => track.readyState === 'live')), true);
+    assert.equal(await secondVideo.evaluate(video => video === window.retainedStream.video &&
+        video.srcObject === window.retainedStream.stream && !video.paused), true);
+    await senders[0].getByText('An administrator stopped this stream.', {exact: true}).waitFor();
+    await admin.setViewportSize({width: 1280, height: 900});
+    await admin.getByRole('button', {name: `Stop ${second.title} for everyone`, exact: true}).click();
+    await until(() => senders[1].evaluate(() => window.capturedStream.getTracks().every(track => track.readyState === 'ended')));
+    await until(() => instance.desktop.sessions.size === 0 && room.current === null);
+    await until(() => admin.locator('.desktop-tile').count().then(count => count === 0));
+    assert.equal(secondSession.router.closed, true);
+    assert.deepEqual(errors, []);
+});
+
 for (const blockMuted of [false, true]) {
 test(`mobile viewers without screen capture can enable ${blockMuted ? 'playback' : 'sound'} by touch`, {timeout: 60000}, async t => {
     const {instance, url, api} = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', desktopIceServers: '[]'});
@@ -598,10 +668,14 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     }, {withAudio, codecScenario});
     await join(sender, url);
     await sender.getByRole('button', {name: 'Share desktop', exact: true}).click();
-    const bitrateControl = sender.getByRole('combobox', {name: 'Video bitrate', exact: true});
-    assert.equal(await bitrateControl.inputValue(), '12000000');
-    const initialBitrate = withAudio ? 4_000_000 : 12_000_000;
-    if (withAudio) await bitrateControl.selectOption(String(initialBitrate));
+    const bitrateControl = sender.getByRole('spinbutton', {name: 'Video bitrate', exact: true});
+    assert.equal(await bitrateControl.inputValue(), '');
+    const setVideoBitrate = async bitrate => {
+        await bitrateControl.fill(bitrate ? String(bitrate / 1_000_000) : '');
+        await bitrateControl.press('Tab');
+    };
+    const initialBitrate = withAudio ? 4_000_000 : undefined;
+    if (withAudio) await setVideoBitrate(initialBitrate);
     await sender.getByRole('button', {name: 'Choose screen to share'}).click();
     await sender.getByRole('button', {name: 'Stop sharing', exact: true}).waitFor();
     await until(() => instance.rooms.get('lobby').current?.transport === 'mediasoup' && [...instance.desktop.sessions.values()][0]?.ready);
@@ -678,11 +752,11 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
     const producerId = publisher.producers.get('video').id;
     const getVideoBitrate = () => sender.evaluate(() => window.desktopPeers.find(peer => peer.connectionState !== 'closed')
         .getSenders().find(sender => sender.track?.kind === 'video').getParameters().encodings[0].maxBitrate);
-    for (const bitrate of [2_000_000, 12_000_000]) {
+    for (const bitrate of [2_000_000, 20_000_000, 0]) {
         const frames = await viewer.locator('video').evaluate(video => video.getVideoPlaybackQuality().totalVideoFrames);
         await until(() => bitrateControl.isEnabled());
-        await bitrateControl.selectOption(String(bitrate));
-        await until(async () => await getVideoBitrate() === bitrate);
+        await setVideoBitrate(bitrate);
+        await until(async () => await getVideoBitrate() === (bitrate || undefined));
         await until(() => viewer.locator('video').evaluate((video, frames) =>
             !video.paused && video.getVideoPlaybackQuality().totalVideoFrames > frames, frames));
         assert.equal(publisher.publisher.transport.id, publisherTransport);
@@ -693,13 +767,16 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
             window.originalSetParameters = RTCRtpSender.prototype.setParameters;
             RTCRtpSender.prototype.setParameters = () => Promise.reject(new Error('Simulated bitrate update failure'));
         });
-        await bitrateControl.selectOption('8000000');
+        await setVideoBitrate(8_000_000);
         await sender.getByRole('alert').filter({hasText: 'Could not change the video bitrate'}).waitFor();
-        assert.equal(await bitrateControl.inputValue(), '12000000');
-        assert.equal(await getVideoBitrate(), 12_000_000);
+        assert.equal(await bitrateControl.inputValue(), '');
+        assert.equal(await getVideoBitrate(), undefined);
         await sender.evaluate(() => { RTCRtpSender.prototype.setParameters = window.originalSetParameters; });
-        await bitrateControl.selectOption('12000000');
+        await setVideoBitrate(2_000_000);
         await until(() => sender.getByRole('alert').filter({hasText: 'Could not change the video bitrate'}).count().then(count => count === 0));
+        await until(() => bitrateControl.isEnabled());
+        await setVideoBitrate(0);
+        await until(async () => await getVideoBitrate() === undefined);
     }
     const encoding = await sender.evaluate(async () => {
         const peer = window.desktopPeers.find(peer => peer.connectionState !== 'closed');
@@ -881,7 +958,7 @@ test(`desktop capture delivers ${withAudio ? 'video and audible audio' : 'video 
         });
     } else await sender.getByRole('button', {name: 'Stop sharing', exact: true}).click();
     await until(() => instance.rooms.get('lobby').current === null && instance.desktop.sessions.size === 0);
-    assert.equal(await bitrateControl.inputValue(), '12000000', 'The bitrate selection survives stopping capture');
+    assert.equal(await bitrateControl.inputValue(), '', 'Automatic bitrate survives stopping capture');
     assert.equal(await sender.evaluate(() => window.captureTracks.every(track => track.readyState === 'ended')), true);
     assert.equal(instance.rooms.get('lobby').history.length, 0);
     assert.equal(instance.media.jobs.has(item.id), false);

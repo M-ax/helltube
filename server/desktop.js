@@ -330,6 +330,13 @@ export class DesktopShares {
 
   leave(ws) { this.unwatch(ws); this.stop(ws); }
 
+  stopStream(room, itemId, user) {
+    if (user.role !== 'admin') throw httpError(403, 'Administrator access required.');
+    const session = this.current(room, itemId);
+    if (session.external) throw httpError(409, 'Use playback controls to end the shared Spotify desktop.');
+    this.stop(session.ws, 'An administrator stopped this stream.');
+  }
+
   stop(ws, error = '') {
     const session = this.sessions.get(ws.id);
     if (!session) return;

@@ -187,7 +187,9 @@ export async function createApp(overrides = {}) {
     if (!value || value.until < now) { value = { count: 0, until: now + windowMs }; limits.set(key, value); }
     if (++value.count > max) throw httpError(429, 'Too many requests. Please wait a moment.');
   }
-  const cookie = token => `session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${token ? 604800 : 0}${config.secureCookies ? '; Secure' : ''}`;
+  // Browsers cap persistent cookies at 400 days; session checks renew this lifetime.
+  const cookieAge = 400 * 24 * 60 * 60;
+  const cookie = token => `session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${token ? cookieAge : 0}${config.secureCookies ? '; Secure' : ''}`;
   const clientIP = req => {
     const edgeIP = req.edge && req.headers['x-helltube-client-ip'];
     return typeof edgeIP === 'string' && isIP(edgeIP) ? edgeIP : req.ip;
@@ -297,7 +299,8 @@ export async function createApp(overrides = {}) {
     expireSockets();
     res.set('Set-Cookie', cookie('')).json({ ok: true });
   });
-  app.get('/api/me', (req, res) => res.json({ user: publicUser(req.auth.user), capabilities }));
+  app.get('/api/me', (req, res) =>
+    res.set('Set-Cookie', cookie(req.auth.token)).json({ user: publicUser(req.auth.user), capabilities }));
   app.patch('/api/me/preferences', async (req, res) => {
     limit(`preferences:${req.auth.user.id}`, 120);
     res.json({ user: publicUser(await accounts.updatePreferences(req.auth.user.id, req.body)) });
@@ -600,6 +603,8 @@ export async function createApp(overrides = {}) {
           await desktop.start(room, ws, current.user, message);
         } else if (message.type === 'desktop:stop') {
           if (desktop.sessions.get(ws.id)?.requestId === message.requestId) desktop.stop(ws);
+        } else if (message.type === 'stream:stop') {
+          desktop.stopStream(room, message.itemId, current.user);
         } else if (message.type === 'desktop:watch') {
           limit(`watch:${ws.id}`, 12, 10000);
           await desktop.watch(room, ws, message);

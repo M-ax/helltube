@@ -41,6 +41,7 @@
 
     export let username = 'guest';
     export let userId = null;
+    export let isAdmin = false;
     export let room = null;
     export let connected = false;
     export let clockOffset = 0;
@@ -918,7 +919,7 @@
                  data-columns={desktopGrid.columns} data-rows={desktopGrid.rows}
                  style={`--desktop-columns: ${desktopGrid.columns}; --desktop-rows: ${desktopGrid.rows}; --desktop-thumbnails: ${thumbnailIds.length}; --desktop-thumbnail-width: ${thumbnailWidth}px`}>
                 {#each desktops as desktop (desktop.id)}
-                    <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {userId} {connected} {volume} {muted} ducked={duckStreams}
+                    <DesktopPlayer item={desktop} playback={desktopPlayback[desktop.id]} {userId} {isAdmin} {connected} {volume} {muted} ducked={duckStreams}
                                    {captureMuted} {audioAnalysis} {bassBoost} {wacko} inputDisabled={reactionInputActive} {whiteboardOpen}
                                    {focusAvailable} unfocusLabel={mediaDesktops ? 'Back to video' : desktops.length === 1 ? 'Minimize my stream' : 'Show all desktops'} focused={focusedDesktopId === desktop.id}
                                    thumbnail={thumbnailIds.includes(desktop.id)} thumbnailIndex={thumbnailIds.indexOf(desktop.id)}
@@ -927,7 +928,7 @@
                                    videoRequested={sharedSpotify && spotifyView === 'desktop'}
                                    onVideoReady={(ready, stream) => spotifyReadyStream = ready ? stream : null}
                                    visualized={spotifyVisualization && webglEffectsActive} onRetry={onRetryDesktop}
-                                   onRetryVideo={onRetryDesktopVideo}/>
+                                   onRetryVideo={onRetryDesktopVideo} onStop={itemId => onCommand({type: 'stream:stop', itemId})}/>
                 {/each}
             </div>
         {/if}

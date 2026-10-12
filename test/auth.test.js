@@ -105,14 +105,53 @@ test('sessions survive restart, while logout, revocation, password resets and de
   assert.deepEqual(deleted.store.load('sessions'), []);
 });
 
-test('expired and orphaned sessions are removed durably on init, authentication and login', async t => {
+test('sessions do not expire with time or restart, and new logins preserve existing tokens', async t => {
+  const f = await fixture(t);
+  const accounts = await f.open();
+  const first = await accounts.login('admin', 'garbageTime_');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(100 * 365 * 24 * 60 * 60 * 1000);
+  assert.equal(accounts.authenticate(`session=${first.token}`).user.id, first.user.id);
+  const second = await accounts.login('admin', 'garbageTime_');
+  assert.equal(accounts.authenticate(`session=${first.token}`).user.id, first.user.id);
+  await accounts.close();
+  const reloaded = await f.open();
+  for (const { token } of [first, second]) {
+    assert.equal(reloaded.authenticate(`session=${token}`).user.id, first.user.id);
+    assert.equal(reloaded.store.load('sessions').find(session => session.token === token).expires, null);
+  }
+});
+
+test('valid legacy sessions become non-expiring without reviving expired sessions', async t => {
+  const f = await fixture(t);
+  const accounts = await f.open();
+  const user = accounts.users[0];
+  const legacy = { token: 'c'.repeat(64), userId: user.id, expires: Date.now() + 60000 };
+  const expired = { token: 'd'.repeat(64), userId: user.id, expires: 1 };
+  accounts.store.save('sessions', legacy.token, legacy);
+  accounts.store.save('sessions', expired.token, expired);
+  await accounts.close();
+  const migrated = await f.open();
+  assert.deepEqual(migrated.store.load('sessions'), [{ ...legacy, expires: null }]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(100 * 365 * 24 * 60 * 60 * 1000);
+  assert.equal(migrated.authenticate(`session=${legacy.token}`).user.id, user.id);
+  await migrated.close();
+  const reloaded = await f.open();
+  assert.equal(reloaded.authenticate(`session=${legacy.token}`).user.id, user.id);
+  assert.equal(reloaded.authenticate(`session=${expired.token}`), null);
+});
+
+test('expired legacy and orphaned sessions are removed durably on init, authentication and login', async t => {
   const f = await fixture(t);
   const accounts = await f.open();
   const admin = accounts.users[0];
   const expired = { token: 'a'.repeat(64), userId: admin.id, expires: 1 };
   const orphaned = { token: 'b'.repeat(64), userId: 'deleted-user', expires: Date.now() + 60000 };
+  const permanentOrphan = { token: 'c'.repeat(64), userId: 'deleted-user', expires: null };
   accounts.store.save('sessions', expired.token, expired);
   accounts.store.save('sessions', orphaned.token, orphaned);
+  accounts.store.save('sessions', permanentOrphan.token, permanentOrphan);
   await accounts.close();
   const reloaded = await f.open();
   assert.deepEqual(reloaded.store.load('sessions'), []);

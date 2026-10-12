@@ -146,15 +146,15 @@ index 74cd06e74..8f31b2d29 100644
  	}
  }
 diff --git a/plugins/obs-webrtc/whip-service.cpp b/plugins/obs-webrtc/whip-service.cpp
-index 33690fb39..2f11f190e 100644
+index 33690fb39..9b30cde44 100644
 --- a/plugins/obs-webrtc/whip-service.cpp
 +++ b/plugins/obs-webrtc/whip-service.cpp
-@@ -95,4 +95,46 @@ void register_whip_service()
+@@ -95,4 +95,36 @@ void register_whip_service()
  		return static_cast<WHIPService *>(priv_data)->GetConnectInfo((enum obs_service_connect_info)type);
  	};
  	obs_register_service(&info);
 +
-+	// Helltube uses the same WHIP output, with codecs and limits supported by
++	// Helltube uses the same WHIP output, with codecs and capture settings supported by
 +	// its room relay. A separate service ID survives service-list updates.
 +	info.id = "helltube_whip";
 +	info.get_name = [](void *) -> const char * {
@@ -174,17 +174,7 @@ index 33690fb39..2f11f190e 100644
 +			obs_data_set_string(video, "profile", "baseline");
 +			obs_data_set_string(video, "rate_control", "CBR");
 +			obs_data_set_int(video, "keyint_sec", 2);
-+			if (obs_data_get_int(video, "bitrate") > 12000)
-+				obs_data_set_int(video, "bitrate", 12000);
 +		}
-+		if (audio && obs_data_get_int(audio, "bitrate") > 192)
-+			obs_data_set_int(audio, "bitrate", 192);
-+	};
-+	info.get_max_bitrate = [](void *, int *video, int *audio) {
-+		if (video)
-+			*video = 12000;
-+		if (audio)
-+			*audio = 192;
 +	};
 +	info.get_max_fps = [](void *, int *fps) {
 +		*fps = 60;
