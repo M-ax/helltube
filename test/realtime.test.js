@@ -5,13 +5,14 @@ import {createRealtime} from '../src/lib/realtime.js';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture(t, {constructorFailures = 0} = {}) {
+async function fixture(t, {constructorFailures = 0, ticketResponse = {mode: 'same-origin'}, ticketHandler} = {}) {
     t.mock.timers.enable({apis: ['setTimeout', 'setInterval', 'Date'], now: 1700000000000});
     t.mock.method(Math, 'random', () => 0);
     let monotonicTime = 0;
     let sessionEnded = 0;
     const sockets = [];
     const requests = [];
+    const ticketRequests = [];
     const notices = [];
     const stored = new Map([['helltube:room:viewer', 'lobby']]);
     const windowTarget = Object.assign(new EventTarget(), {
@@ -53,6 +54,10 @@ function fixture(t, {constructorFailures = 0} = {}) {
         windowTarget, documentTarget, WebSocketImpl: FakeWebSocket, now: () => monotonicTime,
         onMessage: (...args) => notices.push(args), onSessionEnded: () => sessionEnded++,
         request: (url, options) => {
+            if (url === '/api/realtime-ticket') {
+                ticketRequests.push(options);
+                return ticketHandler ? ticketHandler(options) : Promise.resolve(ticketResponse);
+            }
             const deferred = Promise.withResolvers();
             requests.push({url, ...options, ...deferred});
             options.signal.addEventListener('abort', () => deferred.reject(options.signal.reason), {once: true});
@@ -61,15 +66,17 @@ function fixture(t, {constructorFailures = 0} = {}) {
     });
     t.after(() => client.disconnect());
     client.connect('viewer');
+    await flush();
     return {
-        client, sockets, requests, notices, windowTarget, documentTarget,
+        client, sockets, requests, ticketRequests, notices, windowTarget, documentTarget,
         state: () => get(client.state), sessionEnded: () => sessionEnded,
-        advance(ms) {
+        async advance(ms) {
             // Deliver regular callbacks while both clocks advance.
             while (ms > 0) {
                 const step = Math.min(ms, 250);
                 monotonicTime += step;
                 t.mock.timers.tick(step);
+                await flush();
                 ms -= step;
             }
         },
@@ -81,17 +88,17 @@ function fixture(t, {constructorFailures = 0} = {}) {
     };
 }
 
-test('brief response delays survive and healthy long-lived sessions retain their socket', t => {
-    const h = fixture(t);
+test('brief response delays survive and healthy long-lived sessions retain their socket', async t => {
+    const h = await fixture(t);
     const ws = h.sockets[0];
     assert.equal(ws.url, 'wss://watch.example/ws');
     ws.open();
     ws.room();
-    h.advance(7500);
+    await h.advance(7500);
     assert.equal(ws.closes, 0, 'A delay longer than the old five-second timeout is tolerated.');
     ws.pong();
     for (let i = 0; i < 360; i++) {
-        h.advance(10000);
+        await h.advance(10000);
         ws.pong();
     }
     assert.equal(h.sockets.length, 1);
@@ -99,8 +106,8 @@ test('brief response delays survive and healthy long-lived sessions retain their
     assert.equal(h.state().joined, true);
 });
 
-test('finger snapshots preserve the local socket identity, ignore other rooms and reset on reconnect', t => {
-    const h = fixture(t);
+test('finger snapshots preserve the local socket identity, ignore other rooms and reset on reconnect', async t => {
+    const h = await fixture(t);
     const ws = h.sockets[0];
     ws.open(); ws.room();
     ws.receive({type: 'reactions:state', roomId: 'lobby', clientId: 'self', ball: null, fingers: [], serverTime: Date.now()});
@@ -115,8 +122,8 @@ test('finger snapshots preserve the local socket identity, ignore other rooms an
     assert.equal(get(h.client.reactions).clientId, null);
 });
 
-test('file snapshots require current membership and clear across room switches and disconnects', t => {
-    const h = fixture(t);
+test('file snapshots require current membership and clear across room switches and disconnects', async t => {
+    const h = await fixture(t);
     const ws = h.sockets[0];
     const snapshot = {type: 'files:state', roomId: 'lobby', files: [{id: 'one'}]};
     ws.open(); ws.receive(snapshot);
@@ -127,7 +134,7 @@ test('file snapshots require current membership and clear across room switches a
     assert.deepEqual(get(h.client.sharedFiles), snapshot);
     ws.fail();
     assert.equal(get(h.client.sharedFiles), null);
-    h.advance(750);
+    await h.advance(750);
     const next = h.sockets.at(-1);
     next.open(); next.room(); next.receive(snapshot);
     h.client.join('other');
@@ -136,8 +143,8 @@ test('file snapshots require current membership and clear across room switches a
     assert.equal(get(h.client.sharedFiles), null);
 });
 
-test('whiteboard snapshots and deltas stay in their room and reset across clear and reconnect', t => {
-    const h = fixture(t);
+test('whiteboard snapshots and deltas stay in their room and reset across clear and reconnect', async t => {
+    const h = await fixture(t);
     const ws = h.sockets[0];
     const snapshot = {type: 'whiteboard:state', roomId: 'lobby', epoch: 'first', revision: 0, shapes: []};
     ws.open();
@@ -158,25 +165,25 @@ test('whiteboard snapshots and deltas stay in their room and reset across clear 
     assert.equal(get(h.client.whiteboard).roomId, null);
 });
 
-test('hidden tabs and suspended callbacks probe before applying a fresh visible deadline', t => {
-    const h = fixture(t);
+test('hidden tabs and suspended callbacks probe before applying a fresh visible deadline', async t => {
+    const h = await fixture(t);
     const ws = h.sockets[0];
     ws.open();
     h.documentTarget.visibilityState = 'hidden';
-    h.advance(60000);
+    await h.advance(60000);
     h.suspend(10 * 60 * 1000);
     assert.equal(ws.closes, 0);
     h.documentTarget.visibilityState = 'visible';
-    h.documentTarget.dispatchEvent(new Event('visibilitychange'));
-    h.advance(14000);
+    await h.documentTarget.dispatchEvent(new Event('visibilitychange'));
+    await h.advance(14000);
     assert.equal(ws.closes, 0);
-    h.advance(1000);
+    await h.advance(1000);
     assert.equal(ws.closes, 1, 'A resumed tab still detects a genuinely unresponsive connection.');
     assert.equal(h.state().status, 'reconnecting');
 });
 
-test('a healthy socket survives a delayed timer and probes on focus and pageshow', t => {
-    const h = fixture(t);
+test('a healthy socket survives a delayed timer and probes on focus and pageshow', async t => {
+    const h = await fixture(t);
     const ws = h.sockets[0];
     ws.open();
     ws.room();
@@ -185,7 +192,7 @@ test('a healthy socket survives a delayed timer and probes on focus and pageshow
     ws.pong();
     for (const name of ['focus', 'pageshow', 'online']) {
         const before = ws.sent.length;
-        h.windowTarget.dispatchEvent(new Event(name));
+        await h.windowTarget.dispatchEvent(new Event(name));
         assert.equal(ws.sent.length, before + 1);
         assert.equal(ws.sent.at(-1).type, 'ping');
         ws.pong();
@@ -194,18 +201,18 @@ test('a healthy socket survives a delayed timer and probes on focus and pageshow
     assert.equal(h.state().joined, true);
 });
 
-test('response timeouts reconnect without a close event, rejoin and reject stale commands', t => {
-    const h = fixture(t);
+test('response timeouts reconnect without a close event, rejoin and reject stale commands', async t => {
+    const h = await fixture(t);
     const old = h.sockets[0];
     old.open();
     old.room(50);
     old.pong(700);
     assert.equal(h.state().clockReady, true);
-    h.advance(15000);
+    await h.advance(15000);
     assert.equal(old.closes, 1);
     assert.equal(h.state().joined, false);
     assert.equal(h.client.command({type: 'control', action: 'pause'}), false);
-    h.advance(750);
+    await h.advance(750);
     const replacement = h.sockets[1];
     replacement.open();
     assert.deepEqual(replacement.sent.map(message => message.type), ['ping', 'client:disconnect', 'join']);
@@ -229,25 +236,25 @@ test('response timeouts reconnect without a close event, rejoin and reject stale
     assert.equal(h.state().joined, true);
 });
 
-test('stalled handshakes have a deadline and repeated failures back off', t => {
-    const h = fixture(t);
-    h.advance(15000);
+test('stalled handshakes have a deadline and repeated failures back off', async t => {
+    const h = await fixture(t);
+    await h.advance(15000);
     assert.equal(h.sockets[0].closes, 1);
     assert.equal(h.state().status, 'reconnecting');
-    h.advance(749);
+    await h.advance(749);
     assert.equal(h.sockets.length, 1);
-    h.advance(1);
+    await h.advance(1);
     assert.equal(h.sockets.length, 2);
-    h.advance(15000);
-    h.advance(1499);
+    await h.advance(15000);
+    await h.advance(1499);
     assert.equal(h.sockets.length, 2);
-    h.advance(1);
+    await h.advance(1);
     assert.equal(h.sockets.length, 3);
 });
 
 test('transport errors and send failures recover even if close never fires', async t => {
-    for (const failure of ['error', 'send']) await t.test(failure, t => {
-        const h = fixture(t);
+    for (const failure of ['error', 'send']) await t.test(failure, async t => {
+        const h = await fixture(t);
         const ws = h.sockets[0];
         ws.open();
         ws.room();
@@ -257,68 +264,68 @@ test('transport errors and send failures recover even if close never fires', asy
             assert.equal(h.client.command({type: 'control', action: 'pause'}), false);
         }
         assert.equal(h.state().status, 'reconnecting');
-        h.advance(750);
+        await h.advance(750);
         assert.equal(h.sockets.length, 2);
         ws.end();
         assert.equal(h.sockets.length, 2);
     });
 });
 
-test('wall clock adjustments do not trigger a transport timeout', t => {
-    const h = fixture(t);
+test('wall clock adjustments do not trigger a transport timeout', async t => {
+    const h = await fixture(t);
     const ws = h.sockets[0];
     ws.open();
     const wallNow = Date.now;
     let adjustment = 60 * 60 * 1000;
     t.mock.method(Date, 'now', () => wallNow() + adjustment);
-    h.advance(1500);
+    await h.advance(1500);
     assert.equal(ws.closes, 0);
     ws.pong();
     adjustment = -60 * 60 * 1000;
-    h.advance(15000);
+    await h.advance(15000);
     assert.equal(ws.closes, 1, 'A backward wall clock jump must not delay timeout detection.');
 });
 
-test('online and wake events recover once and cleanup removes every lifecycle listener', t => {
-    const h = fixture(t);
+test('online and wake events recover once and cleanup removes every lifecycle listener', async t => {
+    const h = await fixture(t);
     h.sockets[0].open();
     h.windowTarget.navigator.onLine = false;
-    h.windowTarget.dispatchEvent(new Event('offline'));
-    h.advance(60000);
+    await h.windowTarget.dispatchEvent(new Event('offline'));
+    await h.advance(60000);
     assert.equal(h.state().status, 'offline');
     assert.equal(h.sockets.length, 1);
     h.windowTarget.navigator.onLine = true;
-    for (const name of ['online', 'online', 'focus', 'pageshow']) h.windowTarget.dispatchEvent(new Event(name));
+    for (const name of ['online', 'online', 'focus', 'pageshow']) await h.windowTarget.dispatchEvent(new Event(name));
     assert.equal(h.sockets.length, 2);
     h.sockets[1].open();
     h.sockets[1].end();
-    h.windowTarget.dispatchEvent(new Event('pageshow'));
+    await h.windowTarget.dispatchEvent(new Event('pageshow'));
     assert.equal(h.sockets.length, 3, 'Returning to the page wakes a pending retry.');
     h.sockets[2].open();
-    h.advance(750);
+    await h.advance(750);
     assert.equal(h.sockets.length, 3, 'The old retry was cancelled.');
     h.client.disconnect();
-    for (const name of ['online', 'focus', 'pageshow', 'offline']) h.windowTarget.dispatchEvent(new Event(name));
-    h.documentTarget.dispatchEvent(new Event('visibilitychange'));
-    h.advance(60000);
+    for (const name of ['online', 'focus', 'pageshow', 'offline']) await h.windowTarget.dispatchEvent(new Event(name));
+    await h.documentTarget.dispatchEvent(new Event('visibilitychange'));
+    await h.advance(60000);
     assert.equal(h.sockets.length, 3);
     assert.equal(h.state().status, 'offline');
 });
 
 test('session checks are bounded, deduplicated during outages and cancelled on recovery', async t => {
-    const h = fixture(t);
+    const h = await fixture(t);
     h.sockets[0].fail();
     assert.equal(h.requests.length, 1);
     assert.equal(h.requests[0].url, '/api/me');
-    h.advance(750);
+    await h.advance(750);
     h.sockets[1].fail();
     assert.equal(h.requests.length, 1);
-    h.advance(9250);
+    await h.advance(9250);
     assert.equal(h.requests[0].signal.aborted, true);
     await flush();
     h.sockets.at(-1).fail();
     assert.equal(h.requests.length, 2);
-    h.client.retry();
+    await h.client.retry();
     h.sockets.at(-1).open();
     assert.equal(h.requests[1].signal.aborted, true);
     await flush();
@@ -327,7 +334,7 @@ test('session checks are bounded, deduplicated during outages and cancelled on r
 
 test('authentication failures end the session once and cancel future retries', async t => {
     for (const cause of ['message', 1008, 4001, 4401, '401']) await t.test(String(cause), async t => {
-        const h = fixture(t);
+        const h = await fixture(t);
         const ws = h.sockets[0];
         ws.open();
         if (cause === 'message') ws.receive({type: 'session-ended'});
@@ -338,7 +345,7 @@ test('authentication failures end the session once and cancel future retries', a
         } else ws.end(cause);
         assert.equal(h.sessionEnded(), 1);
         ws.end(1008);
-        h.advance(60000);
+        await h.advance(60000);
         assert.equal(h.sessionEnded(), 1);
         assert.equal(h.sockets.length, 1);
         assert.equal(h.state().status, 'offline');
@@ -347,29 +354,111 @@ test('authentication failures end the session once and cancel future retries', a
 
 test('late authentication responses cannot end a recovered or newly signed-in session', async t => {
     for (const action of ['recover', 'signin']) await t.test(action, async t => {
-        const h = fixture(t);
+        const h = await fixture(t);
         h.sockets[0].fail();
+        if (action === 'recover') { await h.advance(750); h.sockets[1].open(); }
+        else await h.client.connect('another-viewer');
         h.requests[0].reject(Object.assign(new Error('Old session expired'), {status: 401}));
-        if (action === 'recover') { h.advance(750); h.sockets[1].open(); }
-        else h.client.connect('another-viewer');
         await flush();
         assert.equal(h.sessionEnded(), 0);
         assert.equal(h.requests[0].signal.aborted, true);
     });
 });
 
+const direct = (ticket = 'a'.repeat(64)) => ({mode: 'direct', realtimeOrigin: 'https://metal.example',
+    recipientOrigin: 'https://watch.example', ticket});
+
+test('direct connections acquire a new ticket on every attempt and preserve room recovery', async t => {
+    let sequence = 0;
+    const h = await fixture(t, {ticketHandler: async () => direct(String(++sequence).padStart(64, '0'))});
+    const first = h.sockets[0];
+    assert.equal(first.url, 'wss://metal.example/ws?ticket=' + '1'.padStart(64, '0'));
+    assert.equal(h.ticketRequests[0].method, 'POST');
+    assert.deepEqual(h.ticketRequests[0].body, {origin: 'https://watch.example'});
+    first.open(); first.room(); first.end();
+    await h.advance(750);
+    const next = h.sockets[1];
+    assert.equal(next.url, 'wss://metal.example/ws?ticket=' + '2'.padStart(64, '0'));
+    next.open(); next.room();
+    assert.equal(next.sent.at(-1).roomId, 'lobby');
+    assert.equal(h.state().joined, true);
+    assert.equal(h.ticketRequests.length, 2);
+});
+
+test('pending ticket requests have a deadline, deduplicate wake events and discard stale replies', async t => {
+    const pending = [];
+    const h = await fixture(t, {ticketHandler: () => {
+        const request = Promise.withResolvers(); pending.push(request); return request.promise;
+    }});
+    for (const event of ['focus', 'pageshow', 'online']) h.windowTarget.dispatchEvent(new Event(event));
+    assert.equal(h.ticketRequests.length, 1);
+    assert.equal(h.sockets.length, 0);
+    await h.advance(15000);
+    assert.equal(h.ticketRequests[0].signal.aborted, true);
+    await h.advance(750);
+    assert.equal(pending.length, 2);
+    pending[0].resolve(direct());
+    await flush();
+    assert.equal(h.sockets.length, 0);
+    pending[1].resolve(direct('b'.repeat(64)));
+    await flush();
+    assert.equal(h.sockets.length, 1);
+    assert.match(h.sockets[0].url, /ticket=b{64}$/);
+});
+
+test('signout, offline events and a new signin cancel ticket acquisition', async t => {
+    for (const action of ['signout', 'offline', 'signin']) await t.test(action, async t => {
+        const pending = [];
+        const h = await fixture(t, {ticketHandler: () => {
+            const request = Promise.withResolvers(); pending.push(request); return request.promise;
+        }});
+        if (action === 'signout') h.client.disconnect();
+        if (action === 'offline') {
+            h.windowTarget.navigator.onLine = false;
+            h.windowTarget.dispatchEvent(new Event('offline'));
+        }
+        if (action === 'signin') h.client.connect('another-viewer');
+        assert.equal(h.ticketRequests[0].signal.aborted, true);
+        pending[0].resolve(direct());
+        await flush();
+        assert.equal(h.sockets.length, 0);
+    });
+});
+
+test('ticket failures retry directly without falling back to the Worker and 401 ends the session', async t => {
+    for (const status of [401, 429, 502]) await t.test(String(status), async t => {
+        const h = await fixture(t, {ticketHandler: async () => { throw Object.assign(new Error('Ticket request failed'), {status}); }});
+        assert.equal(h.sockets.length, 0);
+        assert.equal(h.sessionEnded(), status === 401 ? 1 : 0);
+        await h.advance(750);
+        assert.equal(h.ticketRequests.length, status === 401 ? 1 : 2);
+    });
+});
+
+test('invalid connection settings never leak a ticket to an arbitrary destination', async t => {
+    for (const response of [{}, direct('invalid'), {...direct(), realtimeOrigin: 'https://metal.example/ws'},
+        {...direct(), realtimeOrigin: 'https://user:secret@metal.example'}, {...direct(), realtimeOrigin: 'http://metal.example'},
+        {...direct(), recipientOrigin: 'https://other.example'}, {...direct(), realtimeOrigin: 'javascript:alert(1)'}]) {
+        await t.test(JSON.stringify(response), async t => {
+            const h = await fixture(t, {ticketResponse: response});
+            assert.equal(h.sockets.length, 0);
+            assert.equal(h.state().status, 'reconnecting');
+        });
+    }
+});
+
 const reports = ws => ws.sent.filter(message => message.type === 'client:disconnect').map(message => message.report);
 
-test('disconnect reports correlate the old connection and preserve close details after an error', t => {
-    const h = fixture(t);
+test('disconnect reports correlate the old connection and preserve close details after an error', async t => {
+    const h = await fixture(t);
     const old = h.sockets[0];
     old.open(); old.room();
     old.receive({type: 'rooms', rooms: [{id: 'lobby'}], clientId: 'old-connection'});
     assert.deepEqual(reports(old), [], 'Initial connections do not claim a disconnect.');
-    h.advance(3000);
+    await h.advance(3000);
     old.fail();
     old.end(1013, 'Client too slow; reconnect.', true);
-    h.advance(750);
+    await h.advance(750);
     const next = h.sockets[1];
     next.open();
     const [report] = reports(next);
@@ -388,31 +477,31 @@ test('disconnect reports correlate the old connection and preserve close details
     assert.equal(report.at, 1700000003000);
 });
 
-test('unacknowledged reports survive another failed connection and acknowledged reports stop replaying', t => {
-    const h = fixture(t);
+test('unacknowledged reports survive another failed connection and acknowledged reports stop replaying', async t => {
+    const h = await fixture(t);
     h.sockets[0].open();
     h.sockets[0].end(1006, 'Lost transport');
-    h.advance(750);
+    await h.advance(750);
     h.sockets[1].open();
     const [original] = reports(h.sockets[1]);
     h.sockets[1].fail();
-    h.client.retry();
+    await h.client.retry();
     const recovered = h.sockets[2];
     recovered.open();
     assert.equal(reports(recovered).length, 2);
     assert.deepEqual(reports(recovered)[0], original);
     for (const report of reports(recovered)) recovered.receive({type: 'client:disconnect:ack', id: report.id});
     recovered.end(1000, 'Server restart', true);
-    h.client.retry();
+    await h.client.retry();
     h.sockets[3].open();
     assert.equal(reports(h.sockets[3]).length, 1);
     assert.equal(reports(h.sockets[3])[0].reason, 'Server restart');
 });
 
-test('reports survive a failed send of the diagnostics themselves', t => {
-    const h = fixture(t);
+test('reports survive a failed send of the diagnostics themselves', async t => {
+    const h = await fixture(t);
     h.sockets[0].fail();
-    h.advance(750);
+    await h.advance(750);
     const broken = h.sockets[1];
     const send = broken.send.bind(broken);
     broken.send = data => {
@@ -420,41 +509,41 @@ test('reports survive a failed send of the diagnostics themselves', t => {
         send(data);
     };
     broken.open();
-    h.client.retry();
+    await h.client.retry();
     h.sockets[2].open();
     assert.deepEqual(reports(h.sockets[2]).map(report => report.cause), ['socket-error', 'send-error']);
     assert.equal(reports(h.sockets[2])[1].error, 'Report transport failed');
 });
 
-test('unacknowledged diagnostics retry on a healthy socket without interrupting playback', t => {
-    const h = fixture(t);
+test('unacknowledged diagnostics retry on a healthy socket without interrupting playback', async t => {
+    const h = await fixture(t);
     h.sockets[0].fail();
-    h.client.retry();
+    await h.client.retry();
     const ws = h.sockets.at(-1);
     ws.open(); ws.room();
     ws.receive({type: 'client:disconnect:error', message: 'Too many requests.'});
     assert.deepEqual(h.notices, [], 'Background diagnostics do not show room command errors.');
-    for (let i = 0; i < 6; i++) { h.advance(10000); ws.pong(); }
+    for (let i = 0; i < 6; i++) { await h.advance(10000); ws.pong(); }
     assert.equal(reports(ws).length, 2);
     assert.deepEqual(reports(ws)[0], reports(ws)[1]);
     ws.receive({type: 'client:disconnect:ack', id: reports(ws)[0].id});
-    for (let i = 0; i < 6; i++) { h.advance(10000); ws.pong(); }
+    for (let i = 0; i < 6; i++) { await h.advance(10000); ws.pong(); }
     assert.equal(reports(ws).length, 2);
     assert.equal(h.state().joined, true);
 });
 
 test('offline events, connection deadlines, constructor exceptions and retries report their causes', async t => {
     for (const cause of ['browser-offline', 'connection-timeout', 'connection-error', 'manual-retry']) {
-        await t.test(cause, t => {
-            const h = fixture(t, {constructorFailures: cause === 'connection-error' ? 1 : 0});
+        await t.test(cause, async t => {
+            const h = await fixture(t, {constructorFailures: cause === 'connection-error' ? 1 : 0});
             if (cause === 'browser-offline') {
                 h.sockets[0].open();
                 h.windowTarget.navigator.onLine = false;
                 h.documentTarget.visibilityState = 'hidden';
-                h.windowTarget.dispatchEvent(new Event('offline'));
+                await h.windowTarget.dispatchEvent(new Event('offline'));
                 h.windowTarget.navigator.onLine = true;
-            } else if (cause === 'connection-timeout') h.advance(15000);
-            h.client.retry();
+            } else if (cause === 'connection-timeout') await h.advance(15000);
+            await h.client.retry();
             const next = h.sockets.at(-1);
             next.open();
             const [report] = reports(next);
@@ -468,18 +557,18 @@ test('offline events, connection deadlines, constructor exceptions and retries r
     }
 });
 
-test('outage history is bounded, accounts for omitted failures, and cannot cross sign-ins', t => {
-    const h = fixture(t);
+test('outage history is bounded, accounts for omitted failures, and cannot cross sign-ins', async t => {
+    const h = await fixture(t);
     for (let i = 0; i < 30; i++) {
         h.sockets.at(-1).fail();
-        h.client.retry();
+        await h.client.retry();
     }
     h.sockets.at(-1).open();
     const queued = reports(h.sockets.at(-1));
     assert.equal(queued.length, 20);
     assert.equal(queued.reduce((sum, report) => sum + report.droppedReports, 0), 10);
     assert.match(queued[0].id, /-1$/);
-    h.client.connect('another-viewer');
+    await h.client.connect('another-viewer');
     h.sockets.at(-1).open();
     assert.deepEqual(reports(h.sockets.at(-1)), []);
 });

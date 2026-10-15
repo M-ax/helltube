@@ -38,6 +38,7 @@ import { desktopRelayOptions } from './desktop-relay.js';
 import { encryptedMediaFile, publicMediaFile, mediaContentType } from '../shared/media-files.js';
 import { disconnectReport, logConnection, proxyRequestId } from './connection-logging.js';
 import { diagnosticText } from '../shared/connection-diagnostics.js';
+import { RealtimeTickets } from './realtime-tickets.js';
 
 export function validOrigin(origin, host, config) {
   return !origin || origin === `http://${host}` || origin === `https://${host}` || config.origins.includes(origin);
@@ -66,6 +67,7 @@ export async function createApp(overrides = {}) {
     });
   } catch (error) { store.close(); throw error; }
   const accounts = new Accounts(config.dataDir, store);
+  const realtimeTickets = new RealtimeTickets(accounts);
   const accountRequests = new AccountRequests(accounts);
   const deployment = new Deployment(config, store);
   const youtube = new YouTube(config);
@@ -250,6 +252,21 @@ export async function createApp(overrides = {}) {
     limit, clientIP, cookie, config, capabilities });
   obsIngestRoutes(app, obs, {limit, clientIP});
   app.use('/api', identify, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.post('/api/realtime-ticket', (req, res) => {
+    if (!config.bareMetalOrigin || !config.directWebSocket) return res.json({mode: 'same-origin'});
+    limit(`realtime-ticket:${req.auth.user.id}`, 60);
+    const origin = req.headers.origin;
+    if (!origin || !validOrigin(origin, req.headers.host, config)) throw httpError(403, 'Invalid connection origin.');
+    const recipient = strifeMediaOrigin(req.headers['x-strife-media-origin']) || origin;
+    if (req.body.origin !== recipient) {
+      // Older Strife proxies do not advertise their browser's loopback origin.
+      // Keep their explicitly negotiated cookie-authenticated proxy route.
+      if (!req.headers['x-strife-media-origin'] && strifeMediaOrigin(req.body.origin)) return res.json({mode: 'same-origin'});
+      throw httpError(403, 'Invalid connection origin.');
+    }
+    res.json({mode: 'direct', realtimeOrigin: config.bareMetalOrigin, recipientOrigin: recipient,
+      ticket: realtimeTickets.issue(req.auth, recipient)});
+  });
   roomFileRoutes(app, {files: roomFiles, membership, reauthorize, identifyDirect, directUrl, config, limit});
   app.post('/api/rooms/:id/obs-token', (req, res) => {
     limit(`obs-token:${req.auth.user.id}`, 12);
@@ -528,25 +545,38 @@ export async function createApp(overrides = {}) {
     for (const ws of wss.clients) if (ws.roomId === room.id) send(ws, { type: 'overlay', message, expiresAt: Date.now() + 10000 });
   });
   server.on('upgrade', (req, socket, head) => {
-    const auth = accounts.authenticate(req.headers.cookie);
-    const rejected = req.url !== '/ws' ? 'invalid-path' : !auth ? 'unauthenticated'
-      : !req.headers.origin || !validOrigin(req.headers.origin, req.headers.host, config) ? 'invalid-origin'
+    const edge = equalSecret(req.headers['x-helltube-edge'], config.edgeProxySecret);
+    const ticketed = req.url?.startsWith('/ws?');
+    const url = ticketed ? new URL(req.url, 'http://localhost') : null;
+    const validPath = req.url === '/ws' || (ticketed && url.pathname === '/ws' &&
+      url.searchParams.size === 1 && url.searchParams.has('ticket'));
+    const ticketRoute = ticketed && config.bareMetalOrigin && config.directWebSocket && req.headers['x-helltube-edge'] === undefined;
+    const auth = ticketed ? (validPath && ticketRoute ? realtimeTickets.consume(url.searchParams.get('ticket'), req.headers.origin) : null)
+      : accounts.authenticate(req.headers.cookie);
+    const realtimeRoute = ticketed ? 'direct' : edge ? 'edge' : 'same-origin';
+    // Ticket origins were authorized at issuance, including negotiated Strife
+    // loopback recipients. Cookie upgrades retain their existing origin policy.
+    const rejected = !validPath ? 'invalid-path' : !auth ? ticketed ? 'invalid-ticket' : 'unauthenticated'
+      : !req.headers.origin || (!ticketed && !validOrigin(req.headers.origin, req.headers.host, config)) ? 'invalid-origin'
       : wss.clients.size >= 500 ? 'server-connection-limit'
       : [...wss.clients].filter(ws => ws.userId === auth.user.id).length >= 8 ? 'user-connection-limit' : null;
     if (rejected) {
       logConnection('ws.upgrade-rejected', {id: null, userId: auth?.user.id || null,
-        username: auth?.user.username, connectedAt: performance.now(), proxyRequestId: proxyRequestId(req)}, {cause: rejected});
+        username: auth?.user.username, connectedAt: performance.now(), proxyRequestId: proxyRequestId(req), realtimeRoute}, {cause: rejected});
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
-    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req, auth));
+    wss.handleUpgrade(req, socket, head, ws => {
+      ws.realtimeRoute = realtimeRoute;
+      wss.emit('connection', ws, req, auth);
+    });
   });
   wss.on('connection', (ws, req, auth) => {
     ws.id = randomUUID();
     ws.userId = auth.user.id;
     ws.username = auth.user.username;
     ws.proxyRequestId = proxyRequestId(req);
-    ws.cookie = req.headers.cookie;
+    ws.cookie = `session=${auth.token}`;
     ws.alive = true;
     ws.connectedAt = ws.lastPongAt = ws.lastMessageAt = performance.now();
     logConnection('ws.connected', ws);
@@ -666,6 +696,7 @@ export async function createApp(overrides = {}) {
     for (const [key, value] of limits) if (value.until < Date.now()) limits.delete(key);
     for (const [key, at] of reportedDisconnects) if (Date.now() - at > 24 * 60 * 60 * 1000) reportedDisconnects.delete(key);
     directAccess.prune();
+    realtimeTickets.prune();
   }, 15000);
   tick.unref();
   heartbeat.unref();
@@ -697,6 +728,7 @@ export async function createApp(overrides = {}) {
         stopReactionTick();
         clearInterval(heartbeat);
         clearInterval(housekeeping);
+        realtimeTickets.pending.clear();
         closeAccountRequests();
         await benZone.close();
         const stopped = server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve();

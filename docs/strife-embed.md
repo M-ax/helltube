@@ -24,4 +24,8 @@ The authenticated access response includes server `issuedAt` and `expiresAt` tim
 
 Normal website grants, existing browser delivery, uploads and shared files keep their existing behavior. Old servers lacking the capability retain Strife's existing proxy path.
 
+## Direct room WebSockets
+
+When metal is configured for direct room sockets, `POST /api/realtime-ticket` still travels through Strife's authenticated HTTP proxy. The frame supplies its current origin in the JSON body. An updated Strife proxy's existing `X-Strife-Media-Origin` hint binds the one-use ticket to that exact loopback origin; the returned `realtimeOrigin` identifies metal, and the frame opens the WebSocket directly with the ticket. Session cookies remain inside the authenticated HTTP path. A legacy proxy that does not advertise its loopback origin explicitly negotiates `{mode:'same-origin'}` and keeps its existing WebSocket proxy route. This does not add blanket loopback permissions to account APIs or cookie-authenticated socket upgrades.
+
 Validation: `node --test test/strife-embed.test.js`, `npm run test:obs`, `npm run test:embed`, and `npm run test:obs:browser`. Strife's `npm run test:sharing` exercises the complete embedded UI and a real native WHIP publisher using generated media. Full protocol/build notes are maintained in Strife's `docs/helltube-embed.md`.

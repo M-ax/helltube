@@ -38,6 +38,7 @@ export function logConnection(event, ws, details = {}) {
     timestamp: new Date().toISOString(), event,
     connectionId: ws.id, userId: ws.userId, username: diagnosticText(ws.username, 80),
     proxyRequestId: ws.proxyRequestId || null,
+    route: ws.realtimeRoute || null,
     roomId: ws.roomId || ws.lastRoomId || null,
     connectionAgeMs: Math.max(0, Math.round(performance.now() - ws.connectedAt)),
     ...details,

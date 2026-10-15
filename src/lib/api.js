@@ -19,7 +19,9 @@ export async function api(path, {body, headers, ...options} = {}) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-        if (response.status === 401 && path !== '/api/login' && path !== '/api/me') {
+        // Startup and realtime own their generation/cancellation checks. A late
+        // 401 from an old connection attempt must not sign out a newer login.
+        if (response.status === 401 && !['/api/login', '/api/me', '/api/realtime-ticket'].includes(path)) {
             window.dispatchEvent(new Event('helltube:session-ended'));
         }
         throw new ApiError(data.error || `Request failed (${response.status}). Please try again.`, response.status);

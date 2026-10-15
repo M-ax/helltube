@@ -2,6 +2,7 @@ import {get, writable} from 'svelte/store';
 import {api} from './api.js';
 import {emptyWhiteboard, reduceWhiteboards} from '../../shared/whiteboard.js';
 import {closeDetails, diagnosticText, MAX_DISCONNECT_REPORTS} from '../../shared/connection-diagnostics.js';
+import {deploymentOrigin} from '../../shared/deployment.js';
 
 const HEARTBEAT_INTERVAL = 1500;
 const RESPONSE_TIMEOUT = 15000;
@@ -25,6 +26,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
     let retryTimer;
     let heartbeat;
     let connectionTimer;
+    let connectionRequest;
     let sessionCheck;
     let sessionTimer;
     let attempt = 0;
@@ -88,6 +90,8 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         clearTimeout(retryTimer);
         clearTimeout(connectionTimer);
         clearInterval(heartbeat);
+        connectionRequest?.abort();
+        connectionRequest = null;
         const previous = socket;
         socket = null;
         connection = null;
@@ -159,6 +163,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
 
     function wake() {
         if (stopped || documentTarget.visibilityState === 'hidden' || windowTarget.navigator.onLine === false) return;
+        if (connectionRequest) return;
         if (socket?.readyState === WebSocketImpl.OPEN) {
             const time = now();
             if (time - lastResponse >= RESPONSE_TIMEOUT) {
@@ -184,7 +189,7 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         send({type: 'join', roomId});
     }
 
-    function open() {
+    async function open() {
         if (stopped) return;
         reactions.set(emptyReactions());
         whiteboard.set(emptyWhiteboard());
@@ -197,15 +202,43 @@ export function createRealtime({onMessage, onSessionEnded, windowTarget = window
         const activeConnection = connection = {id: null, startedAt: now(), opened: false, report: null};
         state.update((current) => ({...current, status: attempt ? 'reconnecting' : 'connecting', joined: false}));
         const {location} = windowTarget;
-        try {
-            socket = new WebSocketImpl(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
-        } catch (error) {
-            reconnect('connection-error', {error});
-            return;
-        }
+        const origin = `${location.protocol}//${location.host}`;
+        const controller = connectionRequest = new AbortController();
         connectionTimer = setTimeout(() => {
             if (generation === activeGeneration && !stopped) reconnect('connection-timeout');
         }, CONNECTION_TIMEOUT);
+        try {
+            const response = await request('/api/realtime-ticket', {
+                method: 'POST', body: {origin}, cache: 'no-store', signal: controller.signal,
+            });
+            if (generation !== activeGeneration || stopped || controller.signal.aborted) return;
+            let address;
+            if (response?.mode === 'same-origin') {
+                address = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+            } else {
+                // Derive the fixed path from a canonical configured origin;
+                // never follow a server-supplied arbitrary WebSocket URL.
+                const metal = deploymentOrigin(response?.realtimeOrigin);
+                if (response?.mode !== 'direct' || !metal || metal !== response.realtimeOrigin ||
+                    response.recipientOrigin !== origin || typeof response.ticket !== 'string' ||
+                    !/^[a-f0-9]{64}$/.test(response.ticket)) throw new Error('Invalid realtime connection settings.');
+                const target = new URL('/ws', metal);
+                target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
+                target.searchParams.set('ticket', response.ticket);
+                address = target.href;
+            }
+            connectionRequest = null;
+            socket = new WebSocketImpl(address);
+        } catch (error) {
+            if (generation !== activeGeneration || stopped || controller.signal.aborted) return;
+            if (error.status === 401) {
+                disconnect();
+                onSessionEnded();
+                return;
+            }
+            reconnect('connection-error', {error});
+            return;
+        }
 
         socket.onopen = () => {
             if (generation !== activeGeneration || stopped) return;

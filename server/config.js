@@ -13,6 +13,7 @@ export const config = {
   trustProxy: process.env.TRUST_PROXY === 'true',
   origins: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173').split(',').map(value => value.trim()),
   bareMetalOrigin: process.env.BARE_METAL_ORIGIN || '',
+  directWebSocket: process.env.DIRECT_WEBSOCKET !== 'false',
   edgeProxySecret: process.env.EDGE_PROXY_SECRET || '',
   desktopIceServers: process.env.DESKTOP_ICE_SERVERS || '[]',
   desktopTurnSecret: process.env.DESKTOP_TURN_SECRET || '',

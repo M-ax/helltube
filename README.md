@@ -48,6 +48,8 @@ The server and Cloudflare Worker allow iframe ancestors from the same origin and
 
 Managed Ubuntu installs write JSON request records to `/var/log/nginx/helltube-access.log`, covered by the nginx logrotate policy. Records include route family (`api`, `ws`, `direct`, `media`, `internal`, or `other`), status, bytes, duration, upstream status/connect/header/response timings, completion, connection number and request ID. Paths, query strings, cookies, authorization, referrers and bodies are omitted. Nginx overwrites `X-Helltube-Request-Id`; backend WebSocket events retain that value as `proxyRequestId` to correlate both ends of the proxy connection. WebSocket access records appear when the connection closes.
 
+Backend WebSocket diagnostics include `route: 'direct'`, `'edge'`, or `'same-origin'`, so disconnect rates can be compared after a rollout. Tickets and session credentials are never logged. Preserve the managed nginx logging policy when adding a reverse proxy: WebSocket URLs contain a short-lived ticket, and raw URLs/query strings must stay out of access and error logs.
+
 Nginx errors and Tinyproxy CONNECT events go through a private [Unix syslog socket](https://nginx.org/en/docs/syslog.html) to `helltube-connection-log.service`. The collector emits recognized failure categories, severity and numeric correlation fields. Raw messages never reach disk or the journal; unknown messages appear as `unclassified`. Tinyproxy's `/dev/log` is bound to this socket inside its service, with AppArmor and VPN isolation retained. The socket stays available during collector restarts. Access records use nginx's [JSON escaping](https://nginx.org/en/docs/http/ngx_http_log_module.html).
 
 The backend also logs `extractor.failed` and `media.conversion-failed` with provider, phase or media job, HTTP status, failure category, exit code and duration. Cookie/proxy configuration is recorded only as booleans. Raw extractor/FFmpeg diagnostics remain private, including for unknown failures; a generic extraction error does not prove expired cookies.
@@ -132,16 +134,21 @@ The suite also checks HLS → desktop → HLS playback and saved-position recove
 
 ## Cloudflare Worker frontend + bare-metal backend
 
-`worker.js` serves the built frontend and proxies API/WebSocket traffic. **Set `BARE_METAL_ORIGIN` to your bare-metal HTTPS origin both as a Worker runtime binding and in the backend service environment.** This checkout uses a Worker secret for that binding; it is intentionally not set in `wrangler.jsonc`. No frontend rebuild is needed when changing the backend setting, but deploy the Worker with matching settings. Leave the backend setting empty for the original single-server/Vite setup.
+`worker.js` serves the built frontend and proxies API traffic. Room WebSockets connect directly to metal by default when `BARE_METAL_ORIGIN` is configured. **Set `BARE_METAL_ORIGIN` to your bare-metal HTTPS origin both as a Worker runtime binding and in the backend service environment.** This checkout uses a Worker secret for that binding; it is intentionally not set in `wrangler.jsonc`. No frontend rebuild is needed when changing the backend setting, but deploy the Worker with matching settings. Leave the backend setting empty for the original single-server/Vite setup.
 
 ```text
-Browser → Worker: frontend, API, WebSocket, remote-media playlists
+Browser → Worker: frontend, API, remote-media playlists
+Browser → metal directly: room WebSocket, authenticated with a one-use ticket
 Browser → Worker cache: encrypted YouTube, Twitch VOD, and hosted-media segments (90 seconds)
 Worker → bare metal: live authorization before every cached segment
 Browser → bare metal directly: HLS keys, upload bytes, uploaded-video HLS
 Sharer → metal SFU → viewers: desktop WebRTC video/audio
 Browser → bare metal on slow Cloudflare delivery: proxied playlists and segments
 ```
+
+Each connection attempt first makes an authenticated, uncached `POST /api/realtime-ticket` through the normal frontend API. Metal issues a random, single-use ticket valid for 30 seconds and bound to that login and the browser's exact origin. The browser then opens `wss://<metal>/ws?ticket=...`; no cross-host session cookie is required. The ticket authorizes one upgrade, and the socket continues to enforce current sessions, room permissions and connection limits. Logout and session revocation, including administrator password resets, still end its access. Every reconnect requests a fresh ticket and retains the existing backoff, room restoration and disconnect reports. Direct failures retry directly, without silently switching to the Worker.
+
+For rollout, deploy the backend first, then the updated frontend/Worker. Existing cookie-authenticated `/ws` connections remain supported for older frontends. Set **`DIRECT_WEBSOCKET=false`** in metal's service environment and restart the backend to return updated browsers to the same-origin WebSocket route without rebuilding the frontend. The default is `true`; an empty `BARE_METAL_ORIGIN` also selects the same-origin route. Website, API and video-cache routing remain as configured.
 
 ### Bare metal
 
@@ -532,6 +539,7 @@ Environment variables (set in PowerShell or your service manager; `.env` is not 
 | `TRUST_PROXY` | `false` | Trust loopback reverse proxies for client IPs; enable only when the proxy replaces `X-Forwarded-For` with its connection peer address (managed nginx does this) |
 | `ALLOWED_ORIGINS` | localhost Vite origins | Comma-separated additional trusted browser origins; same-origin always accepted |
 | `BARE_METAL_ORIGIN` | empty | Public DNS-only HTTPS backend origin for direct keys, uploaded-video playback, and upload chunks; also set as a Worker runtime binding |
+| `DIRECT_WEBSOCKET` | `true` | Connect room WebSockets directly to `BARE_METAL_ORIGIN` using one-use tickets; `false` selects the frontend's same-origin socket route |
 | `EDGE_PROXY_SECRET` | empty | Shared backend/Worker secret (at least 32 characters) enabling authenticated edge authorization; store as a Worker secret |
 
 Durable application state lives in **`data\helltube.sqlite`**, using Node's built-in SQLite support (no separate database installation). This includes accounts with salted scrypt hashes, non-expiring sessions and their revocation, volume/mute preferences, rooms, ordered queues/playlist groups, five-item history, shared playback checkpoints, and upload metadata/offsets. Existing `users.json` accounts migrate transactionally without changing IDs or passwords; legacy account files are removed only after a successful migration. Invalid databases are not silently reset.
