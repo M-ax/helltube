@@ -6,6 +6,7 @@ import {obsOffer} from './fixtures/obs-offer.js';
 import {makeItem} from '../server/rooms.js';
 import {ObsStreams} from '../server/obs.js';
 import {createWorker} from '../worker.js';
+import {strifePublishing} from '../server/strife-publishing.js';
 
 async function setup(t, options = {}) {
     const h = await start(t, {ffmpeg: 'missing-obs-test', ytdlp: 'missing-obs-test', ...options});
@@ -41,6 +42,32 @@ test('OBS tokens require room membership, are scoped, hashed, persisted and repl
     assert.equal((await h.api('/api/rooms/lobby/obs-token', {method: 'DELETE'})).status, 200);
     assert.throws(() => h.instance.obs.authenticate(`Bearer ${second.token}`, 'lobby'), {status: 401});
     assert.equal(h.instance.store.load('obs-keys').length, 0);
+});
+
+test('Strife high-resolution capabilities require membership and negotiate level 5.2 without changing OBS tokens', async t => {
+    const h = await start(t, {ffmpeg: 'missing-obs-test', ytdlp: 'missing-obs-test'});
+    const path = '/api/rooms/lobby/strife-capabilities';
+    assert.equal((await h.api(path, {auth: ''})).status, 401);
+    assert.equal((await h.api(path)).status, 403);
+    const socket = await h.connect();
+    socket.send(JSON.stringify({type:'join', roomId:'lobby'}));
+    await until(() => h.instance.rooms.get('lobby').members.size);
+    const capabilities = await h.api(path);
+    assert.equal(capabilities.status, 200);
+    assert.deepEqual(capabilities.data, strifePublishing);
+    assert.equal(h.instance.obs.keys.size, 0, 'capability discovery never mints a credential');
+    const {data} = await h.api('/api/rooms/lobby/strife-token', {method:'POST'});
+    assert.deepEqual(data.publishing, strifePublishing);
+    const response = await fetch(h.url + data.path, {method:'POST',
+        headers:{'Content-Type':'application/sdp', Authorization:`Bearer ${data.token}`},
+        body:obsOffer().replace(/profile-level-id=[a-f0-9]{6}/gi, 'profile-level-id=42e034')});
+    assert.equal(response.status, 201, await response.clone().text());
+    const answer = sdp.parse(await response.text());
+    assert.ok(answer.media.find(m => m.type === 'video').fmtp[0].config.includes('profile-level-id=42e034'));
+    assert.equal((await h.api('/api/rooms/lobby/obs-token', {method:'POST'})).data.publishing, undefined);
+    socket.send(JSON.stringify({type:'join', roomId:'the-ben-zone'}));
+    await until(() => h.instance.rooms.get('the-ben-zone').members.size);
+    assert.notEqual((await h.api('/api/rooms/the-ben-zone/strife-capabilities')).status, 200);
 });
 
 test('admins can stop an individual OBS stream and the publisher can start a fresh stream', async t => {

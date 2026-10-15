@@ -280,6 +280,9 @@ export async function createApp(overrides = {}) {
     limit(`obs-token:${req.auth.user.id}`, 12);
     res.status(201).json(obs.issue(req.auth, membership(req), 'strife'));
   });
+  app.get('/api/rooms/:id/strife-capabilities', (req, res) => {
+    res.json(obs.capabilities(membership(req)));
+  });
   app.delete('/api/rooms/:id/strife-token', (req, res) => {
     if (typeof req.body.token !== 'string' || !/^[a-f0-9]{64}$/i.test(req.body.token)) throw httpError(400, 'Invalid publishing token.');
     obs.revoke(req.auth.user.id, req.params.id, 'strife', req.body.token);

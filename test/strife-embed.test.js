@@ -35,6 +35,32 @@ test('desktop embed validates parent and isolates room credentials from stale re
     host.dispose();
 });
 
+test('capability discovery drops stale room replies and never requests a token', async () => {
+    const events = [], paths = [];
+    let receive, finish;
+    const parent = {postMessage: data => events.push(data)};
+    const win = {parent, location:{hash:'#parent=http%3A%2F%2F127.0.0.1%3A1234&session=test'},
+        addEventListener(type, fn) { if (type === 'message') receive = fn; }, removeEventListener() {}};
+    const host = createStrifeEmbed({enabled:true, windowTarget:win, join() {}, playback() {},
+        request(path) { paths.push(path); return new Promise(resolve => finish = resolve); }});
+    const send = data => receive({origin:'http://127.0.0.1:1234', source:parent,
+        data:{channel:'helltube.strife',version:1,session:'test',connection:'connection',...data}});
+    host.setContext({userId:'user',room:{id:'lobby'},rooms:[],connected:true});
+    await send({type:'hello',nativeShare:true});
+    const pending = send({type:'command',id:'caps',action:'capabilities'});
+    host.setContext({userId:'user',room:{id:'other'},rooms:[],connected:true});
+    finish({version:1,width:3840});
+    await pending;
+    assert.deepEqual(paths, ['/api/rooms/lobby/strife-capabilities']);
+    assert.equal(events.find(e => e.id === 'caps').ok, false);
+    assert.equal(events.some(e => e.publishing), false);
+    const current = send({type:'command',id:'current',action:'capabilities'});
+    finish({version:1,width:3840});
+    await current;
+    assert.deepEqual(events.find(e => e.id === 'current').publishing, {version:1,width:3840});
+    host.dispose();
+});
+
 test('Strife publishing tokens coexist with OBS and conditional revocation cannot stop a replacement', async t => {
     const h = await start(t, {ffmpeg: 'missing-test-ffmpeg', ytdlp: 'missing-test-ytdlp'});
     assert.equal((await h.api('/api/rooms/lobby/strife-token', {method: 'POST'})).status, 403);

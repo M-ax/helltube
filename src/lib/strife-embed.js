@@ -78,6 +78,12 @@ export function createStrifeEmbed({enabled, request, join, playback, windowTarge
             else if (m.action === 'playback' && context.userId && typeof m.muted === 'boolean' &&
                 Number.isFinite(m.volume) && m.volume >= 0 && m.volume <= 1) playback({volume: m.volume, muted: m.muted});
             else if (m.action === 'share') start();
+            else if (m.action === 'capabilities' && context.connected && context.room) {
+                const roomId = context.room.id, pendingGeneration = generation;
+                const publishing = await request(`/api/rooms/${encodeURIComponent(roomId)}/strife-capabilities`);
+                if (generation !== pendingGeneration || context.room?.id !== roomId || disposed) throw new Error('The selected room changed.');
+                result = {publishing};
+            }
             else if (m.action === 'credential' && share?.id === m.shareId && share.generation === generation && context.connected && !credential) {
                 const pending = share;
                 // Mark before awaiting: repeated requests must not replace a live credential.

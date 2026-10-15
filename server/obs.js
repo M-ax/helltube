@@ -2,6 +2,7 @@ import express from 'express';
 import {createHash, randomBytes, randomUUID} from 'node:crypto';
 import {httpError} from './config.js';
 import {parseObsOffer, obsRtpParameters, obsAnswer} from './obs-sdp.js';
+import {strifePublishing} from './strife-publishing.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 
@@ -26,7 +27,13 @@ export class ObsStreams {
     const key = {id: digest(token), userId: auth.user.id, roomId: room.id, sessionToken: auth.token, purpose};
     this.store.save('obs-keys', key.id, key);
     this.keys.set(key.id, key);
-    return {token, path: `/api/whip/${encodeURIComponent(room.id)}`, expires: this.accounts.sessions.get(auth.token).expires};
+    return {token, path: `/api/whip/${encodeURIComponent(room.id)}`, expires: this.accounts.sessions.get(auth.token).expires,
+      ...(purpose === 'strife' ? {publishing: strifePublishing} : {})};
+  }
+
+  capabilities(room) {
+    this.rooms.requireManual(room);
+    return strifePublishing;
   }
 
   remove(key) {
@@ -76,7 +83,7 @@ export class ObsStreams {
     this.resources.set(id, {key, ws});
     let answer;
     try {
-      await this.desktop.start(room, ws, user, {requestId: id, transport: 'mediasoup'}, {h264Level: '2a', prepare: async session => {
+      await this.desktop.start(room, ws, user, {requestId: id, transport: 'mediasoup'}, {h264Level: key.purpose === 'strife' ? '34' : '2a', prepare: async session => {
         const transport = session.publisher.transport;
         session.item.title = `${user.displayName}’s ${key.purpose === 'strife' ? 'Strife' : 'OBS'} stream`;
         const tracks = offer.media.map(m => obsRtpParameters(m, session.router.rtpCapabilities));
