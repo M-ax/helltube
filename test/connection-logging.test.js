@@ -33,7 +33,7 @@ test('real client reconnects, reports the previous close, and receives acknowled
     windowTarget: Object.assign(new EventTarget(), {navigator: {onLine: true}, location: new URL(url),
       localStorage: {getItem: () => 'lobby', setItem() {}}}),
     documentTarget: Object.assign(new EventTarget(), {visibilityState: 'visible'}), WebSocketImpl: BrowserSocket,
-    request: async () => ({}), onMessage: message => assert.fail(message), onSessionEnded: () => assert.fail('Session ended'),
+    request: async () => ({mode: 'same-origin'}), onMessage: message => assert.fail(message), onSessionEnded: () => assert.fail('Session ended'),
   });
   t.after(() => client.disconnect());
   client.connect('viewer');

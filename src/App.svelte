@@ -533,6 +533,7 @@
                             <Lazy load={() => import('./components/Player.svelte')} label="player"
                                     username={user.username} {room} {connected} {preparation} clockOffset={$realtimeState.clockOffset} rtt={$realtimeState.rtt}
                                     overlay={$realtimeState.overlay} reactions={$reactions} whiteboard={$whiteboard} userId={user.id}
+                                    isAdmin={user.role === 'admin'}
                                     onCommand={client.command} onAdd={focusComposer}
                                     captureMuted={$desktopState.hasAudio || ['starting', 'streaming'].includes($hostState.status)}
                                     desktopPlayback={$desktopPlayback} onRetryDesktop={desktop.retryView}

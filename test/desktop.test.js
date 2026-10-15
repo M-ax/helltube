@@ -506,6 +506,91 @@ test('TURN REST credentials are scoped and expire after the share limit; invalid
     }
 });
 
+test('admins stop individual streams through authenticated room sockets without interrupting other streams or video', async t => {
+    const h = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test', maxTranscoders: 0});
+    await h.instance.accounts.create({username: 'sharer', displayName: 'Sharer', password: 'sharing-password'});
+    const {token} = await h.instance.accounts.login('sharer', 'sharing-password');
+    const first = await h.connect(`session=${token}`), second = await h.connect(`session=${token}`);
+    const admin = await h.connect(), outsider = await h.connect();
+    const room = h.instance.rooms.get('lobby'), otherRoom = h.instance.rooms.create('Other');
+    const video = makeItem({kind: 'http', url: 'https://example.com/movie.mp4'});
+    const next = makeItem({kind: 'http', url: 'https://example.com/next.mp4'});
+    h.instance.rooms.add(room, [video, next]);
+    h.instance.rooms.stamp(room, 27, true);
+    const playback = {...room.playback};
+    const expectError = async (socket, message, expected) => {
+        const offset = socket.messages.length;
+        socket.send(JSON.stringify(message));
+        const error = await until(() => socket.messages.slice(offset).find(entry => entry.type === 'error'));
+        assert.match(error.message, expected);
+    };
+    await expectError(admin, {type: 'stream:stop', itemId: 'missing'}, /Join a room first/);
+    for (const socket of [first, second, admin]) socket.send(JSON.stringify({type: 'join', roomId: room.id}));
+    outsider.send(JSON.stringify({type: 'join', roomId: otherRoom.id}));
+    await until(() => room.members.size === 3 && otherRoom.members.size === 1);
+    first.send(JSON.stringify({type: 'desktop:start', ...request}));
+    second.send(JSON.stringify({type: 'desktop:start', ...request, requestId: 'capture-2'}));
+    const firstStarted = await until(() => first.messages.find(entry => entry.type === 'desktop:started'));
+    const secondStarted = await until(() => second.messages.find(entry => entry.type === 'desktop:started'));
+    const firstSession = h.instance.desktop.current(room, firstStarted.itemId);
+    const secondSession = h.instance.desktop.current(room, secondStarted.itemId);
+    for (const started of [firstStarted, secondStarted]) {
+        admin.send(JSON.stringify({type: 'desktop:watch', requestId: started.itemId, itemId: started.itemId}));
+    }
+    await until(() => firstSession.viewers.size === 1 && secondSession.viewers.size === 1 &&
+        [...firstSession.viewers.values()][0].transport && [...secondSession.viewers.values()][0].transport);
+    const firstView = [...firstSession.viewers.values()][0], secondView = [...secondSession.viewers.values()][0];
+    await expectError(first, {type: 'stream:stop', itemId: secondStarted.itemId, role: 'admin'}, /Administrator access required/);
+    await expectError(first, {type: 'stream:stop', itemId: firstStarted.itemId}, /Administrator access required/);
+    await expectError(outsider, {type: 'stream:stop', itemId: firstStarted.itemId}, /share has ended/);
+    await expectError(admin, {type: 'stream:stop'}, /share has ended/);
+    assert.equal(h.instance.desktop.sessions.size, 2);
+    first.send(JSON.stringify({type: 'desktop:stop', requestId: 'capture-2', itemId: secondStarted.itemId}));
+    // The following reply confirms the preceding legacy stop command was processed.
+    await expectError(first, {type: 'stream:stop', itemId: secondStarted.itemId}, /Administrator access required/);
+    assert.equal(h.instance.desktop.sessions.size, 2);
+    admin.send(JSON.stringify({type: 'stream:stop', itemId: firstStarted.itemId}));
+    const stopped = await until(() => first.messages.find(entry => entry.type === 'desktop:stopped'));
+    assert.match(stopped.message, /administrator stopped/i);
+    assert.equal(firstSession.router.closed, true);
+    assert.equal(firstSession.publisher.transport.closed, true);
+    assert.equal(firstView.transport.closed, true);
+    assert.equal(secondSession.router.closed, false);
+    assert.equal(secondSession.publisher.transport.closed, false);
+    assert.equal(secondView.transport.closed, false);
+    assert.deepEqual(room.desktops, [secondSession.item]);
+    assert.equal(room.current, video);
+    assert.deepEqual(room.queue, [next]);
+    assert.deepEqual(room.playback, playback);
+    await expectError(admin, {type: 'stream:stop', itemId: firstStarted.itemId}, /share has ended/);
+    assert.equal(h.instance.desktop.sessions.size, 1);
+    admin.send(JSON.stringify({type: 'stream:stop', itemId: secondStarted.itemId}));
+    await until(() => h.instance.desktop.sessions.size === 0);
+    assert.equal(secondSession.router.closed, true);
+    assert.equal(secondView.transport.closed, true);
+    assert.equal(room.current, video);
+    assert.deepEqual(room.queue, [next]);
+    assert.deepEqual(room.playback, playback);
+});
+
+test('stopping the main live stream selects the remaining stream and stopping the last resumes queued video', async t => {
+    const h = fixture(t);
+    const first = (await publish(h)).session;
+    await h.desktop.start(h.room, {id: 'second'}, h.user, {...request, requestId: 'capture-2'});
+    const second = h.desktop.sessions.get('second');
+    const video = makeItem({kind: 'http', url: 'https://example.com/movie.mp4'});
+    h.room.queue.push(video);
+    h.desktop.stopStream(h.room, first.item.id, {role: 'admin'});
+    assert.equal(h.room.current, second.item);
+    assert.deepEqual(h.room.queue, [video]);
+    assert.equal(second.router.closed, false);
+    h.desktop.stopStream(h.room, second.item.id, {role: 'admin'});
+    assert.equal(h.room.current, video);
+    assert.deepEqual(h.room.queue, []);
+    assert.deepEqual(h.room.desktops, []);
+    assert.deepEqual(h.room.history, []);
+});
+
 test('real sockets authorize metal resources by room and revoke viewer transports on room changes', async t => {
     const h = await start(t, {ffmpeg: 'missing-ffmpeg-desktop-test'});
     const sender = await h.connect(), viewer = await h.connect(), outsider = await h.connect();

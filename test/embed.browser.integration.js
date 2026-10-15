@@ -6,6 +6,9 @@ import { start, until } from './helpers.js';
 
 test('Strife-style loopback iframe preserves login and room through refresh', { timeout: 30000 }, async t => {
   const { url, instance } = await start(t, { ffmpeg: 'missing-test-ffmpeg', ytdlp: 'missing-test-ytdlp' });
+  const metal = url.replace('127.0.0.1', 'localhost');
+  instance.media.config.bareMetalOrigin = metal;
+  instance.media.config.origins.push(url);
   const shell = createServer((_, res) => {
     res.setHeader('Content-Type', 'text/html');
     res.end('<iframe style="width:100%;height:95vh;border:0" id="video" src="' + url + '" referrerpolicy="no-referrer" allow="autoplay; fullscreen; display-capture; clipboard-write" sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-popups" allowfullscreen></iframe>');
@@ -17,6 +20,8 @@ test('Strife-style loopback iframe preserves login and room through refresh', { 
   const page = await browser.newPage({ viewport: { width: 1480, height: 900 } });
   page.setDefaultTimeout(10000);
   const errors = [];
+  const sockets = [];
+  page.on('websocket', socket => sockets.push(new URL(socket.url())));
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('http://127.0.0.1:' + shell.address().port);
   const frame = page.frameLocator('#video');
@@ -34,6 +39,9 @@ test('Strife-style loopback iframe preserves login and room through refresh', { 
     try { return !!frame.contentWindow.document; } catch { return false; }
   }), false);
   assert.deepEqual(errors, []);
+  assert.ok(sockets.length >= 3, 'The iframe reconnects directly after each refresh');
+  assert.ok(sockets.every(socket => socket.origin === metal.replace('http:', 'ws:') &&
+    socket.pathname === '/ws' && /^[a-f0-9]{64}$/.test(socket.searchParams.get('ticket'))));
   const headers = (await fetch(url)).headers;
   assert.equal(headers.get('x-frame-options'), null);
   assert.equal(headers.get('content-security-policy').split('frame-ancestors ')[1], "'self' http://127.0.0.1:* http://localhost:*");

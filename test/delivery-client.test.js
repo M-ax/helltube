@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { setImmediate as tick } from 'node:timers/promises';
 import { parse } from 'svelte/compiler';
 import { api } from '../src/lib/api.js';
-import { createDeliveryClient, DeliveryError, isSameOriginUrl, uploadTransferUrl } from '../src/lib/delivery.js';
+import { createDeliveryClient, DeliveryError, isSameOriginUrl, uploadTransferUrl, directMediaRequest } from '../src/lib/delivery.js';
 import { targetPosition } from '../src/lib/format.js';
 import { createBufferHealth, isProxyLoadFailure } from '../src/lib/buffer-health.js';
 import { qualityReady } from '../src/lib/media-quality.js';
@@ -200,13 +200,14 @@ const playerSource = await readFile(new URL('../src/components/Player.svelte', i
 const playerAst = parse(playerSource);
 const sourceLifecycle = playerAst.instance.content.body.filter(node => node.type === 'VariableDeclaration' ||
   (node.type === 'FunctionDeclaration' && ['cleanupSource', 'attach', 'retryPlayback', 'switchToMetal',
-    'reportBufferHealth', 'nativePlaybackError', 'useStandardQuality'].includes(node.id.name)))
+    'reportBufferHealth', 'nativePlaybackError', 'useStandardQuality', 'refreshMediaAccess'].includes(node.id.name)))
   .map(node => playerSource.slice(node.start, node.end)).join('\n')
   .replace("import('hls.js')", 'loadHls()');
 
 function playerHarness(resolveMediaUrl, native = false, loadHls = Hls => Promise.resolve({default: Hls})) {
   const instances = [];
   const previews = [];
+  let monotonic = 0;
   class Hls {
     static Events = { MEDIA_ATTACHED: 'attached', MANIFEST_PARSED: 'parsed', ERROR: 'error', FRAG_LOADED: 'loaded' };
     static ErrorTypes = { MEDIA_ERROR: 'media', NETWORK_ERROR: 'network' };
@@ -228,22 +229,159 @@ function playerHarness(resolveMediaUrl, native = false, loadHls = Hls => Promise
     return preview;
   };
   const create = new Function('delivery', 'loadHls', 'targetPosition', 'createSeekPreview', 'isSameOriginUrl',
-    'room', 'clockOffset', 'element', 'createBufferHealth', 'isProxyLoadFailure', 'qualityReady', `${sourceLifecycle}
+    'room', 'clockOffset', 'element', 'createBufferHealth', 'isProxyLoadFailure', 'qualityReady', 'directMediaRequest', 'performance', `${sourceLifecycle}
     video = element;
     let connected = true;
     let live = false;
     let item = room.current;
     let media = item.media;
     const qualities = [];
-    return {attach, cleanupSource, retryPlayback, switchToMetal, nativePlaybackError,
+    return {attach, cleanupSource, retryPlayback, switchToMetal, nativePlaybackError, refreshMediaAccess,
       qualities, state: () => ({playerError, localBuffering, previewPosition, mediaAccess, fallbackNotice, qualityPreference, qualityFallbackItemId})};`);
   return { ...create({ resolveMediaAccess: async (...args) => {
     const access = await resolveMediaUrl(...args);
     return typeof access === 'string' ? {url: access, fallbackUrl: null, route: 'metal'} : access;
   } }, () => loadHls(Hls), targetPosition, createSeekPreview,
-    value => isSameOriginUrl(value, appOrigin), room, 0, video, createBufferHealth, isProxyLoadFailure, qualityReady),
-    instances, previews, video, room };
+    value => isSameOriginUrl(value, appOrigin), room, 0, video, createBufferHealth, isProxyLoadFailure, qualityReady, directMediaRequest,
+    {now: () => monotonic}),
+    instances, previews, video, room, setTime: value => monotonic = value };
 }
+
+test('negotiated playback uses FetchLoader and refreshes once before expiry, with retry after renewal failure', async () => {
+  let requests = 0;
+  const renewDeadline = 600000;
+  const replacement = Promise.withResolvers();
+  class FetchLoader {}
+  const player = playerHarness(async () => {
+    if (++requests === 2) throw Object.assign(new Error('Renewal failed'), {status: 502});
+    if (requests === 3) await replacement.promise;
+    return {url: directMediaUrl, route: 'metal', secureDirect: true, renewDeadline};
+  }, false, Hls => Promise.resolve({default: Hls, FetchLoader}));
+  await player.attach(player.room.current.id, mediaPath, 5);
+  const config = player.instances[0].config;
+  assert.equal(config.loader, FetchLoader);
+  assert.equal(config.fetchSetup({url: directMediaUrl}, {}).redirect, 'error');
+  assert.equal(config.fetchSetup({url: directMediaUrl}, {}).credentials, 'omit');
+  player.setTime(renewDeadline - 30001);
+  assert.equal(player.refreshMediaAccess(), false);
+  player.setTime(renewDeadline - 30000);
+  assert.equal(player.refreshMediaAccess(), true);
+  assert.equal(player.refreshMediaAccess(), false);
+  assert.equal(player.instances[0].destroyed, undefined);
+  await tick();
+  assert.equal(player.state().playerError, '');
+  assert.equal(player.instances[0].destroyed, undefined);
+  assert.equal(player.refreshMediaAccess(), false);
+  player.setTime(renewDeadline - 29000);
+  assert.equal(player.refreshMediaAccess(), true);
+  await tick();
+  assert.equal(player.instances[0].destroyed, undefined);
+  player.room.playback.position = 42; // Room time may change while replacement access is pending.
+  replacement.resolve();
+  await tick();
+  assert.equal(requests, 3);
+  assert.equal(player.instances[0].destroyed, true);
+  player.instances[1].events.get('parsed')();
+  assert.equal(player.instances[1].position, 37);
+  assert.equal(player.room.playback.paused, true);
+  // A throttled/background tab can resume after the deadline, not just in the renewal window.
+  player.setTime(renewDeadline + 600000);
+  assert.equal(player.refreshMediaAccess(), true);
+  await tick();
+  assert.equal(requests, 4);
+  const native = playerHarness(async () => ({url: directMediaUrl, secureDirect: true, renewDeadline}), true,
+    Hls => Promise.resolve({default: Hls, FetchLoader}));
+  await native.attach(native.room.current.id, mediaPath, 5);
+  assert.equal(native.video.src, '');
+  assert.match(native.state().playerError, /does not support HLS/);
+});
+
+test('renewal responses cannot replace a changed room, source or removed source', async () => {
+  for (const change of ['source', 'room', 'remove']) {
+    const pending = Promise.withResolvers();
+    let requests = 0;
+    let signal;
+    const access = {url: directMediaUrl, secureDirect: true, renewDeadline: 600000};
+    const player = playerHarness(async (_url, options) => {
+      if (++requests === 2) { signal = options.signal; return pending.promise; }
+      return access;
+    }, false, Hls => Promise.resolve({default: Hls, FetchLoader: class {}}));
+    await player.attach(player.room.current.id, mediaPath, 5);
+    player.setTime(570000);
+    assert.equal(player.refreshMediaAccess(), true);
+    if (change === 'remove') player.cleanupSource();
+    else if (change === 'room') {
+      player.room.id = 'another-room';
+      await player.attach(player.room.current.id, mediaPath, 5);
+    }
+    else await player.attach('new-item', `/media/${otherId}/index.m3u8`, 0);
+    assert.equal(signal.aborted, true);
+    const count = player.instances.length;
+    pending.resolve(access); // A transport ignoring abort still cannot resurrect the source.
+    await tick();
+    assert.equal(player.instances.length, count);
+    if (change !== 'remove') assert.notEqual(player.instances[1].destroyed, true);
+    else assert.equal(player.state().mediaAccess, null);
+  }
+});
+
+test('player renewal uses monotonic time despite forward and backward wall-clock jumps', async t => {
+  let wall = Date.now();
+  t.mock.method(Date, 'now', () => wall);
+  let requests = 0;
+  const player = playerHarness(async () => {
+    requests++;
+    return {url: directMediaUrl, secureDirect: true, renewDeadline: requests * 600000};
+  }, false, Hls => Promise.resolve({default: Hls, FetchLoader: class {}}));
+  await player.attach(player.room.current.id, mediaPath, 5);
+  for (const jump of [120000, -120000, 585000, 600000, 3600000, -7200000]) {
+    wall += jump;
+    assert.equal(player.refreshMediaAccess(), false);
+  }
+  assert.equal(requests, 1);
+  player.setTime(570000);
+  assert.equal(player.refreshMediaAccess(), true);
+  await tick();
+  assert.equal(requests, 2);
+  assert.equal(player.refreshMediaAccess(), false);
+});
+
+test('renewal denial fails closed; transient retries are bounded and never fall back', async () => {
+  for (const status of [401, 403, 502]) {
+    let requests = 0;
+    const player = playerHarness(async () => {
+      if (++requests > 1) throw Object.assign(new Error('Access denied or unavailable'), {status});
+      return {url: directMediaUrl, secureDirect: true, renewDeadline: 600000};
+    }, false, Hls => Promise.resolve({default: Hls, FetchLoader: class {}}));
+    await player.attach(player.room.current.id, mediaPath, 5);
+    for (const time of status === 502 ? [570000, 571000, 573000, 577000, 585000] : [570000]) {
+      player.setTime(time);
+      assert.equal(player.refreshMediaAccess(), true);
+      await tick();
+    }
+    assert.equal(requests, status === 502 ? 6 : 2);
+    assert.equal(player.instances[0].destroyed, true);
+    assert.equal(player.state().mediaAccess, null);
+    assert.match(player.state().playerError, /Access denied or unavailable/);
+    player.setTime(700000);
+    assert.equal(player.refreshMediaAccess(), false);
+  }
+});
+
+test('expired background renewal failures do not retry beyond the old grant deadline', async () => {
+  let requests = 0;
+  const player = playerHarness(async () => {
+    if (++requests > 1) throw new Error('Offline');
+    return {url: directMediaUrl, secureDirect: true, renewDeadline: 600000};
+  }, false, Hls => Promise.resolve({default: Hls, FetchLoader: class {}}));
+  await player.attach(player.room.current.id, mediaPath, 5);
+  player.setTime(900000);
+  assert.equal(player.refreshMediaAccess(), true);
+  await tick();
+  assert.equal(player.instances[0].destroyed, true);
+  assert.equal(player.refreshMediaAccess(), false);
+  assert.equal(requests, 2);
+});
 
 test('HLS loads only for a stream, reports chunk failures, and discards imports after leaving', async () => {
   let loads = 0;

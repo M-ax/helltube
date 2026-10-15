@@ -69,6 +69,7 @@ test('admin approval pushes to the requester and creates a one-use, cookie-authe
   assert.equal(claimed.data.user.displayName, guest.displayName);
   const cookies = claimed.response.headers.getSetCookie();
   assert.match(cookies[0], /^session=.*HttpOnly; SameSite=Strict; Path=\//);
+  assert.match(cookies[0], /Max-Age=34560000/);
   assert.match(cookies[1], /account_request=;.*Max-Age=0/);
   assert.equal((await api('/api/me', { auth: cookies[0].split(';')[0] })).data.user.username, guest.username);
   assert.equal((await api('/api/account-requests/claim', { method: 'POST', auth })).status, 404);

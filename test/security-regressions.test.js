@@ -7,6 +7,26 @@ import { start, until } from './helpers.js';
 const badLogin = { username: 'nobody', password: 'incorrect-password' };
 const goodLogin = { username: 'admin', password: 'garbageTime_' };
 
+test('login cookies persist, session checks renew them, and logout clears and revokes them', async t => {
+  const { api, instance } = await start(t, { secureCookies: true, maxTranscoders: 0 });
+  const login = await api('/api/login', { method: 'POST', body: goodLogin });
+  assert.equal(login.status, 200);
+  const loginCookie = login.response.headers.get('set-cookie');
+  assert.match(loginCookie, /^session=[a-f0-9]{64}; HttpOnly; SameSite=Strict; Path=\/; Max-Age=34560000; Secure$/);
+  const auth = loginCookie.split(';')[0];
+  const me = await api('/api/me', { auth });
+  assert.equal(me.status, 200);
+  assert.equal(me.response.headers.get('set-cookie'), loginCookie);
+  assert.equal(me.response.headers.get('cache-control'), 'no-store');
+  assert.equal(instance.accounts.sessions.get(auth.slice('session='.length)).expires, null);
+  const logout = await api('/api/logout', { method: 'POST', auth });
+  assert.equal(logout.status, 200);
+  assert.equal(logout.response.headers.get('set-cookie'), 'session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure');
+  const denied = await api('/api/me', { auth });
+  assert.equal(denied.status, 401);
+  assert.equal(denied.response.headers.get('set-cookie'), null);
+});
+
 test('login throttling isolates visitors behind the configured loopback proxy', async t => {
   const { api, instance } = await start(t, { trustProxy: true, maxTranscoders: 0 });
   const trusts = instance.app.get('trust proxy fn');

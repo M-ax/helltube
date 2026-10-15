@@ -7,6 +7,7 @@
 
     export let item;
     export let userId = null;
+    export let isAdmin = false;
     export let playback = null;
     export let connected = false;
     export let volume = 0.8;
@@ -31,6 +32,7 @@
     export let onVideoReady;
     export let onRetry;
     export let onRetryVideo;
+    export let onStop;
     let tile;
     let video;
     let fullscreen = false;
@@ -293,6 +295,13 @@
                 <span>{focused ? unfocusLabel : thumbnail ? item.addedBy || item.title : `Focus on ${item.addedBy || item.title}`}</span>
             </button>
         {/if}
+        {#if isAdmin && item.provider !== 'spotify'}
+            <button class="icon-button danger desktop-stop" type="button" disabled={inputDisabled || !connected}
+                    aria-label={`Stop ${item.title} for everyone`} title="Stop stream for everyone (admin)"
+                    on:click={() => onStop?.(item.id)}>
+                <Icon name="stop" size={16}/>
+            </button>
+        {/if}
         {#if nativeControls && !thumbnail}<button class="icon-button desktop-fullscreen" type="button"
                 aria-label={fullscreen ? 'Exit fullscreen' : `Fullscreen ${item.title}`} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen this desktop'}
                 disabled={fullscreenPending || (inputDisabled && !fullscreen)} on:click={toggleFullscreen}>
@@ -419,13 +428,15 @@
     video::-webkit-media-controls-fullscreen-button { display: none; }
     .desktop-tile:fullscreen { width: 100%; height: 100%; border-radius: 0; }
     .desktop-tile::backdrop { background: #050506; }
-    .desktop-fullscreen {
+    .desktop-stop, .desktop-fullscreen {
         flex: 0 0 30px;
         width: 30px;
         height: 30px;
         background: #000b;
         color: #eee;
     }
+    .desktop-stop { margin-left: auto; color: var(--danger, #ff8097); }
+    .thumbnail .desktop-stop { position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; }
     .desktop-controls {
         opacity: 0;
         pointer-events: none;

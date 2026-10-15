@@ -6,7 +6,6 @@ import { httpError, text } from './config.js';
 import { StateStore } from './store.js';
 
 const scrypt = promisify(scryptCallback);
-const sessionAge = 7 * 24 * 60 * 60 * 1000;
 const defaultPreferences = { volume: 0.8, muted: false };
 const passwordHashPattern = /^[a-f0-9]{32}:[a-f0-9]{128}$/i;
 
@@ -56,8 +55,9 @@ function validateSessions(sessions) {
   const tokens = new Set();
   for (const session of sessions) {
     if (!isObject(session) || typeof session.token !== 'string' || !/^[a-f0-9]{64}$/.test(session.token) ||
-      typeof session.userId !== 'string' || !session.userId || typeof session.expires !== 'number' ||
-      !Number.isFinite(session.expires) || session.expires < 0 || tokens.has(session.token)) {
+      typeof session.userId !== 'string' || !session.userId ||
+      (session.expires !== null && (typeof session.expires !== 'number' ||
+        !Number.isFinite(session.expires) || session.expires < 0)) || tokens.has(session.token)) {
       throw new Error('Invalid session database; refusing to overwrite it.');
     }
     tokens.add(session.token);
@@ -132,12 +132,17 @@ export class Accounts {
       const expired = [];
       const now = Date.now();
       for (const session of sessions) {
-        if (session.expires <= now || !ids.has(session.userId)) expired.push(session.token);
-        else active.set(session.token, { userId: session.userId, expires: session.expires });
+        if ((session.expires !== null && session.expires <= now) || !ids.has(session.userId)) expired.push(session.token);
+        else active.set(session.token, { userId: session.userId, expires: null });
       }
       this.store.transaction(() => {
         for (const user of users) this.store.save('users', user.id, user);
         for (const token of expired) this.store.delete('sessions', token);
+        for (const session of sessions) {
+          if (active.has(session.token) && session.expires !== null) {
+            this.store.save('sessions', session.token, { ...session, expires: null });
+          }
+        }
         this.store.save('account-state', 'schema', { version: 1 });
       });
       this.users = users;
@@ -180,10 +185,11 @@ export class Accounts {
   createSession(user, persist = () => {}) {
     if (!this.users.includes(user)) throw httpError(401, 'Account no longer exists.');
     const now = Date.now();
-    const expired = [...this.sessions].filter(([, session]) => session.expires <= now).map(([token]) => token);
+    const expired = [...this.sessions]
+      .filter(([, session]) => session.expires !== null && session.expires <= now).map(([token]) => token);
     if (this.sessions.size - expired.length >= 10000) throw httpError(503, 'Too many active sessions.');
     const token = randomBytes(32).toString('hex');
-    const session = { userId: user.id, expires: now + sessionAge };
+    const session = { userId: user.id, expires: null };
     this.store.transaction(() => {
       for (const expiredToken of expired) this.store.delete('sessions', expiredToken);
       this.store.save('sessions', token, { token, ...session });
@@ -199,7 +205,7 @@ export class Accounts {
     const session = this.sessions.get(token);
     if (!session) return null;
     const user = this.users.find(u => u.id === session.userId);
-    if (session.expires <= Date.now() || !user) {
+    if ((session.expires !== null && session.expires <= Date.now()) || !user) {
       this.logout(token);
       return null;
     }

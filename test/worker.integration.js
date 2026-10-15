@@ -72,6 +72,7 @@ test('real Worker shares encrypted HLS cache with per-hit auth while uploads and
   const browserRequests = [];
   const browserResponses = [];
   const browserSockets = [];
+  const backendSockets = [];
   const headerReads = [];
   let pageErrors = 0;
   try {
@@ -83,6 +84,8 @@ test('real Worker shares encrypted HLS cache with per-hit auth while uploads and
       bareMetalOrigin: directOrigin, edgeProxySecret: secret, origins: [origin] });
     instance.server.on('request', req => backendRequests.push({ method: req.method,
       pathname: new URL(req.url, directOrigin).pathname }));
+    instance.server.on('upgrade', (req, socket) => backendSockets.push({socket, cookie: req.headers.cookie,
+      origin: req.headers.origin, ticket: new URL(req.url, directOrigin).searchParams.get('ticket')}));
     const backendOrigin = await instance.listen(backendPort);
     assert.equal(instance.capabilities.ffmpeg, true, 'Real FFmpeg is required.');
     const sample = path.join(dir, 'split-delivery.mp4');
@@ -90,7 +93,9 @@ test('real Worker shares encrypted HLS cache with per-hit auth while uploads and
       '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
       '-t', '16', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '60', '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-movflags', '+faststart', sample], { timeout: 20000 });
-    instance.app.get('/worker-test-source.mp4', (_req, res) => res.sendFile(sample));
+    // A checkout may live under .delta or another hidden parent. Restrict the
+    // fixture to its own root rather than having sendFile reject that parent.
+    instance.app.get('/worker-test-source.mp4', (_req, res) => res.sendFile(path.basename(sample), { root: dir }));
     t.mock.method(instance.youtube, 'resolve', async () => ({ duration: 16,
       inputs: [{ url: `${backendOrigin}/worker-test-source.mp4`, headers: {} }] }));
     worker = await unstable_dev(path.resolve('worker.js'), {
@@ -236,11 +241,23 @@ test('real Worker shares encrypted HLS cache with per-hit auth while uploads and
     await until(() => room.members.size === 2);
     const secondCookie = await sessionCookie(viewerContext, origin);
     assert.ok(firstCookie !== secondCookie, 'Two UI logins have distinct sessions.');
-    assert.ok(browserSockets.length >= 2, 'Both browsers open real Worker WebSockets.');
+    assert.ok(browserSockets.length >= 2, 'Both browsers open real direct WebSockets.');
     for (const socket of browserSockets) {
-      assert.equal(socket.origin, origin.replace('http:', 'ws:'));
+      assert.equal(socket.origin, directOrigin.replace('http:', 'ws:'));
       assert.equal(socket.pathname, '/ws');
     }
+    assert.ok(backendSockets.every(socket => socket.ticket && !socket.cookie && socket.origin === origin),
+      'Metal authenticates direct browser sockets with one-use tickets and no backend cookie.');
+    assert.equal(backendRequests.filter(request => request.pathname === '/api/realtime-ticket').length, backendSockets.length);
+    const activeSocket = backendSockets.find(socket => !socket.socket.destroyed);
+    assert.ok(activeSocket);
+    const beforeReconnect = backendSockets.length;
+    activeSocket.socket.destroy();
+    await until(() => backendSockets.length > beforeReconnect && room.members.size === 2);
+    assert.notEqual(backendSockets.at(-1).ticket, activeSocket.ticket, 'Reconnect gets a new ticket through the frontend API.');
+    assert.equal(backendSockets.at(-1).cookie, undefined);
+    assert.ok(browserSockets.every(socket => socket.origin === directOrigin.replace('http:', 'ws:')),
+      'Reconnect never silently falls back through the Worker.');
     const segment = contents.split(/\r?\n/).find(line => /^segment-\d+\.ts$/.test(line));
     assert.ok(segment);
     const segmentPath = `/media/${job.id}/${segment}`;

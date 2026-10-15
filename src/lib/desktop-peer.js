@@ -66,8 +66,10 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
             active();
             try {
                 const producer = await transport.produce({track, stopTracks: false, codec: choices[index],
-                    encodings: [{...desktopVideoEncoding, maxBitrate: encoding.videoBitrate, maxFramerate: encoding.frameRate}],
-                    codecOptions: {videoGoogleStartBitrate: Math.min(2000, Math.floor(encoding.videoBitrate / 1000))}});
+                    encodings: [{...desktopVideoEncoding, maxFramerate: encoding.frameRate,
+                        ...(encoding.videoBitrate ? {maxBitrate: encoding.videoBitrate} : {})}],
+                    codecOptions: {videoGoogleStartBitrate: encoding.videoBitrate
+                        ? Math.min(2000, Math.floor(encoding.videoBitrate / 1000)) : 2000}});
                 if (quality && producer.rtpSender) {
                     const parameters = producer.rtpSender.getParameters();
                     parameters.degradationPreference = encoding.degradationPreference;
@@ -205,7 +207,8 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
                     active();
                     const producer = track.kind === 'video' ? await produceVideo(track) :
                         await transport.produce({track, stopTracks: false,
-                            codecOptions: {opusStereo: encoding.stereo, opusMaxAverageBitrate: encoding.audioBitrate,
+                            codecOptions: {opusStereo: encoding.stereo,
+                                ...(encoding.audioBitrate ? {opusMaxAverageBitrate: encoding.audioBitrate} : {}),
                                 opusFec: true, opusDtx: encoding.dtx}});
                     if (closed) { producer.close(); return; }
                     producers.set(track.kind, producer);
@@ -233,7 +236,7 @@ export function createDesktopPeer({client, connection, stream, Stream = globalTh
             const producer = producers.get('video');
             if (!producer) throw new Error('Wait for desktop sharing to start before changing the bitrate.');
             const videoBitrate = normalizeDesktopQuality({videoBitrate: value}).videoBitrate;
-            await producer.setRtpEncodingParameters({maxBitrate: videoBitrate});
+            await producer.setRtpEncodingParameters({maxBitrate: videoBitrate || undefined});
             active();
             encoding.videoBitrate = videoBitrate;
         },

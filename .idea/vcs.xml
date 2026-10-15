@@ -3,5 +3,9 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/apps/obs-studio" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/apps/obs-studio/deps/libdshowcapture/src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/apps/obs-studio/deps/libdshowcapture/src/external/capture-device-support" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/apps/obs-studio/plugins/obs-browser" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/apps/obs-studio/plugins/obs-websocket" vcs="Git" />
   </component>
 </project>

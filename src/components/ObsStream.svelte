@@ -45,10 +45,10 @@
     <ul class="obs-settings">
         <li><strong>Stream:</strong> If Simulcast is shown, set <strong>Total Layers</strong> to <strong>1</strong>.</li>
         <li><strong>Output:</strong> Set Output Mode to <strong>Advanced</strong>. Under Streaming, select the <strong>x264</strong> video encoder (H.264),
-            <strong>baseline</strong> profile, <strong>CBR</strong> rate control, up to <strong>{(desktopLimits.videoBitrate / 1000).toLocaleString()} Kbps</strong>,
+            <strong>baseline</strong> profile, <strong>CBR</strong> rate control, a video bitrate suited to your connection,
             and a <strong>2-second</strong> keyframe interval. Baseline uses no B-frames.</li>
         <li><strong>Audio:</strong> Under Output → Streaming, select the <strong>Opus</strong> audio encoder.
-            Under Output → Audio, set the streaming track to <strong>{desktopLimits.audioBitrate / 1000} Kbps</strong>.
+            Under Output → Audio, choose the streaming track's bitrate for your audio quality needs.
             Under Settings → Audio, use <strong>48 kHz</strong> and <strong>Stereo</strong>.</li>
         <li><strong>Video:</strong> Set Output (Scaled) Resolution to at most <strong>{desktopLimits.width}×{desktopLimits.height}</strong>
             and FPS to at most <strong>{desktopLimits.frameRate}</strong>. Under Advanced → Video, use <strong>NV12</strong> and <strong>Rec. 709</strong> for SDR.</li>
@@ -60,7 +60,7 @@
         </button>
         <button class="button secondary" disabled={!connected || busy} on:click={revoke}>Revoke OBS token</button>
     </div>
-    <p class="field-help">Tokens are private and allow streaming only to this room. Replacing or revoking a token stops its stream. Tokens expire with your sign-in session; signing out revokes them. You can close this page while streaming.</p>
+    <p class="field-help">Tokens are private and allow streaming only to this room. Replacing or revoking a token stops its stream. Tokens remain valid while your sign-in session is valid; signing out revokes them. You can close this page while streaming.</p>
     {#if credentials}
         <label for="obs-server">Server URL</label>
         <div class="field"><input id="obs-server" readonly value={credentials.url} on:focus={event => event.currentTarget.select()}/>
@@ -70,7 +70,7 @@
                                   autocomplete="off" on:focus={event => event.currentTarget.select()}/>
             <button class="button secondary" aria-pressed={showToken} on:click={() => showToken = !showToken}>{showToken ? 'Hide' : 'Show'} token</button>
             <button class="button secondary" on:click={() => copy(credentials.token)}>Copy token</button></div>
-        <p class="field-help">Expires {new Date(credentials.expires).toLocaleString()}. Copy the token now; it is only shown here after creation.</p>
+        <p class="field-help">{credentials.expires === null ? 'Does not expire automatically.' : `Expires ${new Date(credentials.expires).toLocaleString()}.`} Copy the token now; it is only shown here after creation.</p>
     {/if}
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
     {#if notice}<p role="status">{notice}</p>{/if}

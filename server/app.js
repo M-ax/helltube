@@ -27,7 +27,7 @@ import { RemoteMedia } from './remote-media.js';
 import { sourceKind } from '../shared/media-source.js';
 import { Media, available } from './media.js';
 import { StateStore } from './store.js';
-import { DirectAccess, equalSecret } from './direct-access.js';
+import { DirectAccess, equalSecret, strifeMediaOrigin, MEDIA_GRANT_TTL } from './direct-access.js';
 import { deploymentOrigin, securityHeaders, normalizeCommit } from '../shared/deployment.js';
 import { Deployment } from './deployment.js';
 import { DesktopShares } from './desktop.js';
@@ -38,6 +38,7 @@ import { desktopRelayOptions } from './desktop-relay.js';
 import { encryptedMediaFile, publicMediaFile, mediaContentType } from '../shared/media-files.js';
 import { disconnectReport, logConnection, proxyRequestId } from './connection-logging.js';
 import { diagnosticText } from '../shared/connection-diagnostics.js';
+import { RealtimeTickets } from './realtime-tickets.js';
 
 export function validOrigin(origin, host, config) {
   return !origin || origin === `http://${host}` || origin === `https://${host}` || config.origins.includes(origin);
@@ -66,6 +67,7 @@ export async function createApp(overrides = {}) {
     });
   } catch (error) { store.close(); throw error; }
   const accounts = new Accounts(config.dataDir, store);
+  const realtimeTickets = new RealtimeTickets(accounts);
   const accountRequests = new AccountRequests(accounts);
   const deployment = new Deployment(config, store);
   const youtube = new YouTube(config);
@@ -130,12 +132,23 @@ export async function createApp(overrides = {}) {
     req.edge = equalSecret(req.headers['x-helltube-edge'], config.edgeProxySecret);
     if (req.headers['x-helltube-edge'] !== undefined && !req.edge) return next(httpError(403, 'Invalid edge proxy credentials.'));
     const direct = req.path === '/direct' || req.path.startsWith('/direct/');
+    const scopedMedia = direct && config.bareMetalOrigin && typeof req.query.grant === 'string' && req.query.grant.startsWith('v2.');
+    if (scopedMedia) {
+      const match = /^\/direct\/media\/([a-f0-9-]{36})\/([^/]+)$/.exec(req.path);
+      if (!match || !(publicMediaFile.test(match[2]) || match[2] === 'key.bin') ||
+          !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next(httpError(403, 'Invalid direct media request.'));
+      req.auth = directAccess.authenticate(req.query.grant, `media:${match[1]}`, req.headers.origin);
+      mediaJob(match[1], req.auth);
+      res.set('Access-Control-Allow-Origin', req.headers.origin);
+      res.vary('Origin');
+      res.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+    }
     const trustedDirect = direct && config.bareMetalOrigin && config.origins.includes(req.headers.origin);
     // Attachment navigations omit Origin. The download route still validates its scoped grant.
     const grantedDownload = config.bareMetalOrigin && ['GET', 'HEAD'].includes(req.method) &&
       /^\/direct\/files\/[a-f0-9-]{36}\/download$/.test(req.path) && typeof req.query.grant === 'string';
-    if (!validOrigin(req.headers.origin, req.headers.host, config) ||
-      (req.headers['sec-fetch-site'] === 'cross-site' && !trustedDirect && !grantedDownload)) {
+    if ((!scopedMedia && !validOrigin(req.headers.origin, req.headers.host, config)) ||
+      (req.headers['sec-fetch-site'] === 'cross-site' && !scopedMedia && !trustedDirect && !grantedDownload)) {
       return next(httpError(403, 'Cross-origin requests are not allowed.'));
     }
     if (direct) {
@@ -147,9 +160,10 @@ export async function createApp(overrides = {}) {
       }
       if (req.method === 'OPTIONS') {
         const headers = String(req.headers['access-control-request-headers'] || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean);
-        if (!trustedDirect || !['GET', 'HEAD', 'PUT'].includes(req.headers['access-control-request-method']) ||
+        const methods = scopedMedia ? ['GET', 'HEAD'] : ['GET', 'HEAD', 'PUT'];
+        if ((!trustedDirect && !scopedMedia) || !methods.includes(req.headers['access-control-request-method']) ||
           headers.some(header => !['content-type', 'range'].includes(header))) return next(httpError(403, 'Invalid direct request preflight.'));
-        res.set({ 'Access-Control-Allow-Methods': 'GET, HEAD, PUT', 'Access-Control-Allow-Headers': 'Content-Type, Range',
+        res.set({ 'Access-Control-Allow-Methods': methods.join(', '), 'Access-Control-Allow-Headers': 'Content-Type, Range',
           'Access-Control-Max-Age': '600' });
         return res.status(204).end();
       }
@@ -175,7 +189,9 @@ export async function createApp(overrides = {}) {
     if (!value || value.until < now) { value = { count: 0, until: now + windowMs }; limits.set(key, value); }
     if (++value.count > max) throw httpError(429, 'Too many requests. Please wait a moment.');
   }
-  const cookie = token => `session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${token ? 604800 : 0}${config.secureCookies ? '; Secure' : ''}`;
+  // Browsers cap persistent cookies at 400 days; session checks renew this lifetime.
+  const cookieAge = 400 * 24 * 60 * 60;
+  const cookie = token => `session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${token ? cookieAge : 0}${config.secureCookies ? '; Secure' : ''}`;
   const clientIP = req => {
     const edgeIP = req.edge && req.headers['x-helltube-client-ip'];
     return typeof edgeIP === 'string' && isIP(edgeIP) ? edgeIP : req.ip;
@@ -197,12 +213,13 @@ export async function createApp(overrides = {}) {
     return room;
   };
   const requireMedia = () => { if (!capabilities.ffmpeg) throw httpError(503, 'FFmpeg is missing. Install it and restart the server.'); };
-  const directUrl = (route, auth, scope) => `${config.bareMetalOrigin}${route}?grant=${directAccess.issue(auth, scope)}`;
+  const directUrl = (route, auth, scope, origin = null, grant = null) =>
+    `${config.bareMetalOrigin}${route}?grant=${grant || directAccess.issue(auth, scope, origin)}`;
   const uploadStatus = (upload, auth, status = uploads.status(upload)) => ({ ...status,
     ...(config.bareMetalOrigin ? { transferUrl: directUrl(`/direct/uploads/${upload.id}`, auth, `upload:${upload.id}`) } : {}) });
   const identifyDirect = scope => (req, res, next) => {
     if (req.query.grant !== undefined) {
-      req.auth = directAccess.authenticate(req.query.grant, scope(req));
+      req.auth = directAccess.authenticate(req.query.grant, scope(req), req.headers.origin);
       return next();
     }
     if (config.bareMetalOrigin) return next(httpError(401, 'A direct access grant is required.'));
@@ -235,6 +252,21 @@ export async function createApp(overrides = {}) {
     limit, clientIP, cookie, config, capabilities });
   obsIngestRoutes(app, obs, {limit, clientIP});
   app.use('/api', identify, (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+  app.post('/api/realtime-ticket', (req, res) => {
+    if (!config.bareMetalOrigin || !config.directWebSocket) return res.json({mode: 'same-origin'});
+    limit(`realtime-ticket:${req.auth.user.id}`, 60);
+    const origin = req.headers.origin;
+    if (!origin || !validOrigin(origin, req.headers.host, config)) throw httpError(403, 'Invalid connection origin.');
+    const recipient = strifeMediaOrigin(req.headers['x-strife-media-origin']) || origin;
+    if (req.body.origin !== recipient) {
+      // Older Strife proxies do not advertise their browser's loopback origin.
+      // Keep their explicitly negotiated cookie-authenticated proxy route.
+      if (!req.headers['x-strife-media-origin'] && strifeMediaOrigin(req.body.origin)) return res.json({mode: 'same-origin'});
+      throw httpError(403, 'Invalid connection origin.');
+    }
+    res.json({mode: 'direct', realtimeOrigin: config.bareMetalOrigin, recipientOrigin: recipient,
+      ticket: realtimeTickets.issue(req.auth, recipient)});
+  });
   roomFileRoutes(app, {files: roomFiles, membership, reauthorize, identifyDirect, directUrl, config, limit});
   app.post('/api/rooms/:id/obs-token', (req, res) => {
     limit(`obs-token:${req.auth.user.id}`, 12);
@@ -253,14 +285,21 @@ export async function createApp(overrides = {}) {
     obs.revoke(req.auth.user.id, req.params.id, 'strife', req.body.token);
     res.json({ok: true});
   });
-  app.get('/api/config', (_req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin }));
+  app.get('/api/config', (req, res) => res.json({ bareMetalOrigin: config.bareMetalOrigin,
+    ...(config.bareMetalOrigin && strifeMediaOrigin(req.headers['x-strife-media-origin'])
+      ? { strifeDirectMedia: 1, strifeDirectMediaOrigin: config.bareMetalOrigin } : {}) }));
   app.get('/api/media/:jobId/access', (req, res) => {
     const job = mediaJob(req.params.jobId, req.auth);
-    const directOnly = ['upload', 'desktop'].includes(job.item.kind);
+    const recipient = strifeMediaOrigin(req.headers['x-strife-media-origin']);
+    const directOnly = recipient || ['upload', 'desktop'].includes(job.item.kind);
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + MEDIA_GRANT_TTL;
     const metalUrl = config.bareMetalOrigin
-      ? directUrl(`/direct/media/${job.id}/index.m3u8`, req.auth, `media:${job.id}`) : null;
+      ? directUrl(`/direct/media/${job.id}/index.m3u8`, req.auth, `media:${job.id}`, recipient,
+        recipient ? directAccess.issue(req.auth, `media:${job.id}`, recipient, expiresAt) : null) : null;
     res.json({ url: config.bareMetalOrigin && directOnly
       ? metalUrl : `/media/${job.id}/index.m3u8`,
+      ...(metalUrl && recipient ? { issuedAt, expiresAt } : {}),
       ...(metalUrl && !directOnly ? { fallbackUrl: metalUrl } : {}) });
   });
   app.get('/api/edge/media/:jobId/:file', async (req, res) => {
@@ -277,7 +316,8 @@ export async function createApp(overrides = {}) {
     expireSockets();
     res.set('Set-Cookie', cookie('')).json({ ok: true });
   });
-  app.get('/api/me', (req, res) => res.json({ user: publicUser(req.auth.user), capabilities }));
+  app.get('/api/me', (req, res) =>
+    res.set('Set-Cookie', cookie(req.auth.token)).json({ user: publicUser(req.auth.user), capabilities }));
   app.patch('/api/me/preferences', async (req, res) => {
     limit(`preferences:${req.auth.user.id}`, 120);
     res.json({ user: publicUser(await accounts.updatePreferences(req.auth.user.id, req.body)) });
@@ -416,12 +456,15 @@ export async function createApp(overrides = {}) {
       contents = sponsorPlaylist(contents, job.item, job.baseTime);
       if (!config.bareMetalOrigin) return res.send(contents);
       const scope = `media:${job.id}`;
-      const keyUrl = directUrl(`/direct/media/${job.id}/key.bin`, req.auth, scope);
+      // Child requests inherit the original recipient and deadline; reading a playlist cannot renew it.
+      const grant = typeof req.query.grant === 'string' && req.query.grant.startsWith('v2.') ? req.query.grant : null;
+      const childUrl = file => directUrl(`/direct/media/${job.id}/${file}`, req.auth, scope, null, grant);
+      const keyUrl = childUrl('key.bin');
       contents = contents.replace(/^#EXT-X-KEY:.*$/gm, line => line.replace(/URI="[^"]*"/, `URI="${keyUrl}"`));
       if (req.path.startsWith('/direct/')) {
-        contents = contents.replace(/^segment-\d{6,}\.(?:ts|m4s)$/gm, file => directUrl(`/direct/media/${job.id}/${file}`, req.auth, scope));
+        contents = contents.replace(/^segment-\d{6,}\.(?:ts|m4s)$/gm, file => childUrl(file));
         contents = contents.replace(/^(#EXT-X-MAP:)URI="init\.mp4"/gm,
-          `$1URI="${directUrl(`/direct/media/${job.id}/init.mp4`, req.auth, scope)}"`);
+          `$1URI="${childUrl('init.mp4')}"`);
       }
       return res.send(contents);
     }
@@ -502,25 +545,38 @@ export async function createApp(overrides = {}) {
     for (const ws of wss.clients) if (ws.roomId === room.id) send(ws, { type: 'overlay', message, expiresAt: Date.now() + 10000 });
   });
   server.on('upgrade', (req, socket, head) => {
-    const auth = accounts.authenticate(req.headers.cookie);
-    const rejected = req.url !== '/ws' ? 'invalid-path' : !auth ? 'unauthenticated'
-      : !req.headers.origin || !validOrigin(req.headers.origin, req.headers.host, config) ? 'invalid-origin'
+    const edge = equalSecret(req.headers['x-helltube-edge'], config.edgeProxySecret);
+    const ticketed = req.url?.startsWith('/ws?');
+    const url = ticketed ? new URL(req.url, 'http://localhost') : null;
+    const validPath = req.url === '/ws' || (ticketed && url.pathname === '/ws' &&
+      url.searchParams.size === 1 && url.searchParams.has('ticket'));
+    const ticketRoute = ticketed && config.bareMetalOrigin && config.directWebSocket && req.headers['x-helltube-edge'] === undefined;
+    const auth = ticketed ? (validPath && ticketRoute ? realtimeTickets.consume(url.searchParams.get('ticket'), req.headers.origin) : null)
+      : accounts.authenticate(req.headers.cookie);
+    const realtimeRoute = ticketed ? 'direct' : edge ? 'edge' : 'same-origin';
+    // Ticket origins were authorized at issuance, including negotiated Strife
+    // loopback recipients. Cookie upgrades retain their existing origin policy.
+    const rejected = !validPath ? 'invalid-path' : !auth ? ticketed ? 'invalid-ticket' : 'unauthenticated'
+      : !req.headers.origin || (!ticketed && !validOrigin(req.headers.origin, req.headers.host, config)) ? 'invalid-origin'
       : wss.clients.size >= 500 ? 'server-connection-limit'
       : [...wss.clients].filter(ws => ws.userId === auth.user.id).length >= 8 ? 'user-connection-limit' : null;
     if (rejected) {
       logConnection('ws.upgrade-rejected', {id: null, userId: auth?.user.id || null,
-        username: auth?.user.username, connectedAt: performance.now(), proxyRequestId: proxyRequestId(req)}, {cause: rejected});
+        username: auth?.user.username, connectedAt: performance.now(), proxyRequestId: proxyRequestId(req), realtimeRoute}, {cause: rejected});
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
-    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req, auth));
+    wss.handleUpgrade(req, socket, head, ws => {
+      ws.realtimeRoute = realtimeRoute;
+      wss.emit('connection', ws, req, auth);
+    });
   });
   wss.on('connection', (ws, req, auth) => {
     ws.id = randomUUID();
     ws.userId = auth.user.id;
     ws.username = auth.user.username;
     ws.proxyRequestId = proxyRequestId(req);
-    ws.cookie = req.headers.cookie;
+    ws.cookie = `session=${auth.token}`;
     ws.alive = true;
     ws.connectedAt = ws.lastPongAt = ws.lastMessageAt = performance.now();
     logConnection('ws.connected', ws);
@@ -577,6 +633,8 @@ export async function createApp(overrides = {}) {
           await desktop.start(room, ws, current.user, message);
         } else if (message.type === 'desktop:stop') {
           if (desktop.sessions.get(ws.id)?.requestId === message.requestId) desktop.stop(ws);
+        } else if (message.type === 'stream:stop') {
+          desktop.stopStream(room, message.itemId, current.user);
         } else if (message.type === 'desktop:watch') {
           limit(`watch:${ws.id}`, 12, 10000);
           await desktop.watch(room, ws, message);
@@ -638,6 +696,7 @@ export async function createApp(overrides = {}) {
     for (const [key, value] of limits) if (value.until < Date.now()) limits.delete(key);
     for (const [key, at] of reportedDisconnects) if (Date.now() - at > 24 * 60 * 60 * 1000) reportedDisconnects.delete(key);
     directAccess.prune();
+    realtimeTickets.prune();
   }, 15000);
   tick.unref();
   heartbeat.unref();
@@ -669,6 +728,7 @@ export async function createApp(overrides = {}) {
         stopReactionTick();
         clearInterval(heartbeat);
         clearInterval(housekeeping);
+        realtimeTickets.pending.clear();
         closeAccountRequests();
         await benZone.close();
         const stopped = server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve();

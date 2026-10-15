@@ -83,13 +83,13 @@ test('video-only capture and ending audio preserve the video share', async t => 
 
 test('browser bitrate selection applies before capture and live without replacing the share', async t => {
     const h = fixture(t);
-    assert.equal(get(h.share.state).videoBitrate, 12_000_000);
+    assert.equal(get(h.share.state).videoBitrate, 0);
     await h.share.setVideoBitrate(4_000_000);
     await h.share.start(); h.accept(); await flush();
     assert.equal(h.peers[0].quality.videoBitrate, 4_000_000);
     await h.share.setVideoBitrate(20_000_000);
-    assert.equal(h.peers[0].videoBitrate, 12_000_000);
-    assert.equal(get(h.share.state).videoBitrate, 12_000_000);
+    assert.equal(h.peers[0].videoBitrate, 20_000_000);
+    assert.equal(get(h.share.state).videoBitrate, 20_000_000);
     assert.equal(get(h.share.state).status, 'sharing');
     assert.equal(h.peers.length, 1);
     assert.ok(h.tracks.every(track => track.readyState === 'live'));
@@ -105,7 +105,7 @@ test('failed bitrate changes keep the prior setting and leave capture running', 
     h.accept(); await flush();
     h.peers[0].setVideoBitrate = async () => { throw new Error('Encoder rejected the change'); };
     await assert.rejects(h.share.setVideoBitrate(2_000_000), /Encoder rejected/);
-    assert.equal(get(h.share.state).videoBitrate, 12_000_000);
+    assert.equal(get(h.share.state).videoBitrate, 0);
     assert.equal(get(h.share.state).status, 'sharing');
     assert.ok(h.tracks.every(track => track.readyState === 'live'));
 });
@@ -454,36 +454,39 @@ test('signaling errors do not retry codecs or hide the server error', async t =>
     assert.equal(h.transports.length, 1);
 });
 
-test('transport publishes one encoding per track with a fixed upload ceiling and never takes ownership of capture', async t => {
+test('transport publishes one encoding per track without bitrate caps and never takes ownership of capture', async t => {
     const tracks = ['video', 'audio'].map(kind => ({kind, readyState: 'live'}));
     const h = relayHarness(t, {stream: {getTracks: () => tracks}});
     await h.peer.start();
     assert.deepEqual(h.produced.map(options => options.track), tracks);
     assert.ok(h.produced.every(options => options.stopTracks === false));
-    assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 12_000_000, maxFramerate: 60}]);
+    assert.deepEqual(h.produced[0].encodings, [{maxFramerate: 60}]);
+    assert.equal('opusMaxAverageBitrate' in h.produced[1].codecOptions, false);
     assert.deepEqual(h.commands.map(message => message.action), ['connect', 'produce', 'produce', 'ready']);
     assert.ok(h.commands.every(message => message.itemId === 'desktop' && message.peerId === 'peer' && message.requestId === 'capture'));
 });
 
-test('native publisher applies bounded quality, selected codecs and Opus mix settings', async t => {
+test('native publisher applies selected quality, codecs and Opus mix settings', async t => {
     const tracks = ['video', 'audio'].map(kind => ({kind, readyState: 'live'}));
     const h = relayHarness(t, {stream: {getTracks: () => tracks}, codecs: videoCodecs,
-        quality: {videoBitrate: 2_500_000, frameRate: 30, audioBitrate: 64000, codec: 'vp8', stereo: false, dtx: true}});
+        quality: {videoBitrate: 20_000_000, frameRate: 30, audioBitrate: 320_000, codec: 'vp8', stereo: false, dtx: true}});
     await h.peer.start();
     assert.equal(h.produced[0].codec.mimeType, 'video/VP8');
-    assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 2_500_000, maxFramerate: 30}]);
-    assert.equal(h.produced[1].codecOptions.opusMaxAverageBitrate, 64000);
+    assert.deepEqual(h.produced[0].encodings, [{maxBitrate: 20_000_000, maxFramerate: 30}]);
+    assert.equal(h.produced[1].codecOptions.opusMaxAverageBitrate, 320_000);
     assert.equal(h.produced[1].codecOptions.opusStereo, false);
     assert.equal(h.produced[1].codecOptions.opusDtx, true);
 });
 
-test('live bitrate changes adjust only the video sender and enforce the ceiling', async t => {
+test('live bitrate changes accept higher rates and restore automatic bitrate on the existing sender', async t => {
     const tracks = ['video', 'audio'].map(kind => ({kind, readyState: 'live'}));
     const h = relayHarness(t, {stream: {getTracks: () => tracks}});
     await h.peer.start();
     await h.peer.setVideoBitrate(2_000_000);
     await h.peer.setVideoBitrate(20_000_000);
-    assert.deepEqual(h.encodingChanges, [{kind: 'video', maxBitrate: 2_000_000}, {kind: 'video', maxBitrate: 12_000_000}]);
+    await h.peer.setVideoBitrate(0);
+    assert.deepEqual(h.encodingChanges, [{kind: 'video', maxBitrate: 2_000_000}, {kind: 'video', maxBitrate: 20_000_000},
+        {kind: 'video', maxBitrate: undefined}]);
     assert.equal(h.produced.length, 2, 'The existing tracks stay published');
     assert.equal(h.transports.length, 1);
     h.peer.close();

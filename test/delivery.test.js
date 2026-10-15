@@ -51,6 +51,80 @@ test('deployment origins and CSP reject credentials, paths and insecure public h
   assert.equal(headers['Referrer-Policy'], 'no-referrer');
 });
 
+test('Strife negotiates scoped ten-minute grants without relaxing ordinary API origins', async t => {
+  const {api, job, direct, url, cookie, instance, room} = await fixture(t);
+  const recipient = 'http://127.0.0.1:54321';
+  const headers = {'X-Strife-Media-Origin': recipient};
+  assert.deepEqual((await api('/api/config', {headers})).data,
+    {bareMetalOrigin: origin, strifeDirectMedia: 1, strifeDirectMediaOrigin: origin});
+  for (const value of ['', 'null', 'http://localhost:54321', `${recipient}/`, 'http://127.0.0.1:99999',
+    'http://127.0.0.1:054321', 'https://127.0.0.1:54321', 'https://foreign.example', `${recipient}, ${recipient}`]) {
+    assert.deepEqual((await api('/api/config', {headers: {'X-Strife-Media-Origin': value}})).data, {bareMetalOrigin: origin});
+  }
+  const media = await job('youtube');
+  const access = (await api(`/api/media/${media.id}/access`, {headers})).data;
+  assert.ok(access.url.startsWith(`${origin}/direct/media/${media.id}/index.m3u8?grant=v2.`));
+  assert.equal(access.fallbackUrl, undefined);
+  const grant = new URL(access.url).searchParams.get('grant');
+  const policy = JSON.parse(Buffer.from(grant.split('.')[2], 'base64url'));
+  assert.equal(policy.origin, recipient);
+  assert.ok(policy.expires > Date.now() + 590000 && policy.expires <= Date.now() + 600000);
+  assert.equal(access.expiresAt, policy.expires);
+  assert.equal(access.expiresAt - access.issuedAt, 600000);
+  await writeFile(path.join(media.dir, 'index.m3u8'),
+    '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nsegment-000000.m4s\n');
+  await writeFile(path.join(media.dir, 'init.mp4'), Buffer.alloc(20));
+  await writeFile(path.join(media.dir, 'segment-000000.m4s'), Buffer.alloc(20));
+  const request = (target, options = {}) => direct(target, {...options, headers: {Origin: recipient, ...options.headers}});
+  const playlist = await request(access.url);
+  assert.equal(playlist.status, 200);
+  assert.equal(playlist.headers.get('access-control-allow-origin'), recipient);
+  assert.equal(playlist.headers.get('access-control-allow-credentials'), null);
+  const contents = await playlist.text();
+  const children = [...contents.matchAll(/https:\/\/[^\s"]+/g)].map(match => match[0]);
+  assert.equal(children.length, 3);
+  for (const child of children) {
+    assert.equal(new URL(child).searchParams.get('grant'), grant);
+    assert.equal((await request(child)).status, 200);
+  }
+  assert.equal((await request(children[2], {headers: {Range: 'bytes=0-3'}})).status, 206);
+  assert.equal((await request(children[2], {method: 'HEAD'})).status, 200);
+  const preflight = await request(children[2], {method: 'OPTIONS', headers: {
+    'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'range, content-type'}});
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get('access-control-allow-methods'), 'GET, HEAD');
+  for (const extra of [{'Access-Control-Request-Method': 'PUT'},
+    {'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'authorization'}]) {
+    assert.equal((await request(access.url, {method: 'OPTIONS', headers: extra})).status, 403);
+  }
+  for (const badOrigin of ['http://127.0.0.1:54322', 'https://foreign.example', 'null', `${recipient}/`]) {
+    const denied = await request(access.url, {headers: {Origin: badOrigin, Cookie: cookie}});
+    assert.equal(denied.status, 401);
+    assert.equal(denied.headers.get('access-control-allow-origin'), null);
+  }
+  const target = new URL(access.url);
+  assert.equal((await fetch(url + target.pathname + target.search, {headers: {Cookie: cookie}})).status, 401);
+  for (const query of ['', '?grant=malformed', '?grant=v2.bad']) {
+    assert.ok((await request(origin + target.pathname + query, {headers: {Cookie: cookie}})).status >= 400);
+  }
+  const auth = instance.accounts.authenticate(cookie);
+  const accessManager = new DirectAccess(instance.accounts);
+  const expired = accessManager.issue(auth, `media:${media.id}`, recipient, Date.now() - 1);
+  assert.equal((await request(`${origin}${target.pathname}?grant=${expired}`)).status, 401);
+  const other = await job('upload');
+  assert.equal((await request(access.url.replace(media.id, other.id))).status, 401);
+  for (const route of ['/api/config', `/api/media/${media.id}/access`]) {
+    const response = await fetch(url + route, {headers: {Cookie: cookie, Origin: recipient, ...headers}});
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get('access-control-allow-origin'), null);
+  }
+  room.members.clear();
+  assert.equal((await request(access.url)).status, 403);
+  assert.equal((await request(access.url, {method: 'OPTIONS', headers: {'Access-Control-Request-Method': 'GET'}})).status, 403);
+  instance.accounts.sessions.delete(auth.token);
+  assert.equal((await request(access.url)).status, 401);
+});
+
 test('Twitch and hosted media use authorized encrypted edge delivery and direct keys', async t => {
   const { api, job, direct, url, cookie } = await fixture(t);
   for (const kind of ['twitch', 'http']) {

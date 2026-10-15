@@ -43,6 +43,28 @@ test('OBS tokens require room membership, are scoped, hashed, persisted and repl
     assert.equal(h.instance.store.load('obs-keys').length, 0);
 });
 
+test('admins can stop an individual OBS stream and the publisher can start a fresh stream', async t => {
+    const h = await setup(t);
+    const response = await h.request();
+    assert.equal(response.status, 201);
+    const session = [...h.instance.desktop.sessions.values()][0];
+    const observer = await h.connect();
+    observer.send(JSON.stringify({type: 'join', roomId: 'lobby'}));
+    await until(() => h.instance.rooms.get('lobby').members.size === 2);
+    observer.send(JSON.stringify({type: 'stream:stop', itemId: session.item.id}));
+    await until(() => !h.instance.desktop.sessions.has(session.ws.id));
+    assert.equal(session.router.closed, true);
+    assert.equal(session.publisher.transport.closed, true);
+    assert.deepEqual(h.instance.rooms.get('lobby').desktops, []);
+    assert.equal(h.instance.rooms.get('lobby').current, null);
+    h.instance.obs.tick();
+    assert.equal(h.instance.obs.resources.size, 0);
+    assert.equal((await h.request()).status, 201);
+    observer.send(JSON.stringify({type: 'stream:stop', itemId: session.item.id}));
+    await until(() => observer.messages.some(entry => entry.type === 'error'));
+    assert.equal(h.instance.desktop.sessions.size, 1, 'A stale stop cannot end a replacement stream');
+});
+
 test('WHIP negotiates H264/Opus alongside video and DELETE preserves playback', async t => {
     const h = await setup(t);
     const room = h.instance.rooms.get('lobby');
@@ -58,7 +80,7 @@ test('WHIP negotiates H264/Opus alongside video and DELETE preserves playback', 
     assert.ok(answer.media.every(m => m.direction === 'recvonly' && m.setup === 'passive' && m.candidates.length));
     assert.ok(answer.media[1].fmtp[0].config.includes('profile-level-id=42e02a'));
     const session = [...h.instance.desktop.sessions.values()][0];
-    assert.equal((await session.publisher.transport.getStats())[0].maxIncomingBitrate, 12_200_000);
+    assert.equal((await session.publisher.transport.getStats())[0].maxIncomingBitrate, undefined);
     assert.equal(session.producers.size, 2);
     assert.equal(session.ready, undefined, 'Wait for the DTLS connection before declaring the stream ready');
     assert.equal(room.current, video);
